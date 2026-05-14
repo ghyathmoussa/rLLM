@@ -13,4 +13,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [features]
+default = ["cpu"]
+cpu = []
 cuda = []

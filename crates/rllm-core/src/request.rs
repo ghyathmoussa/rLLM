@@ -161,19 +161,19 @@ impl RequestStatus {
     }
 
     pub fn can_transition_to(self, next: RequestStatus) -> bool {
-        match (self, next) {
-            (Self::Waiting, Self::Running | Self::FinishedAborted) => true,
-            (Self::Running, Self::Running
+        matches!(
+            (self, next),
+            (Self::Waiting, Self::Running | Self::FinishedAborted)
+            | (Self::Running, Self::Running
                 | Self::Waiting
                 | Self::Preempted
                 | Self::FinishedStopped
                 | Self::FinishedLength
                 | Self::FinishedAborted
-                | Self::FinishedError) => true,
-            (Self::Preempted, Self::Waiting | Self::FinishedAborted) => true,
-            (Self::WaitingForRemoteKV, Self::Running | Self::FinishedAborted) => true,
-            _ => false,
-        }
+                | Self::FinishedError)
+            | (Self::Preempted, Self::Waiting | Self::FinishedAborted)
+            | (Self::WaitingForRemoteKV, Self::Running | Self::FinishedAborted)
+        )
     }
 
     pub fn transition(self, next: RequestStatus) -> Result<RequestStatus> {
@@ -201,70 +201,56 @@ mod tests {
 
     #[test]
     fn n_zero_rejected() {
-        let mut p = SamplingParams::default();
-        p.n = 0;
+        let p = SamplingParams { n: 0, ..Default::default() };
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("n must be >= 1"));
     }
 
     #[test]
     fn negative_temperature_rejected() {
-        let mut p = SamplingParams::default();
-        p.temperature = -0.5;
+        let p = SamplingParams { temperature: -0.5, ..Default::default() };
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("temperature must be >= 0"));
     }
 
     #[test]
     fn temperature_zero_ok() {
-        let mut p = SamplingParams::default();
-        p.temperature = 0.0;
+        let p = SamplingParams { temperature: 0.0, ..Default::default() };
         assert!(p.validate().is_ok());
     }
 
     #[test]
     fn temperature_zero_with_n_gt_1_rejected() {
-        let mut p = SamplingParams::default();
-        p.temperature = 0.0;
-        p.n = 3;
+        let p = SamplingParams { temperature: 0.0, n: 3, ..Default::default() };
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("n must be 1 when temperature is 0"));
     }
 
     #[test]
     fn presence_penalty_out_of_range() {
-        let mut p = SamplingParams::default();
-        p.presence_penalty = 2.5;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("presence_penalty"));
+        let p = SamplingParams { presence_penalty: 2.5, ..Default::default() };
+        assert!(p.validate().unwrap_err().to_string().contains("presence_penalty"));
 
-        p.presence_penalty = -0.1;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("presence_penalty"));
+        let p = SamplingParams { presence_penalty: -0.1, ..Default::default() };
+        assert!(p.validate().unwrap_err().to_string().contains("presence_penalty"));
     }
 
     #[test]
     fn frequency_penalty_out_of_range() {
-        let mut p = SamplingParams::default();
-        p.frequency_penalty = -1.0;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("frequency_penalty"));
+        let p = SamplingParams { frequency_penalty: -1.0, ..Default::default() };
+        assert!(p.validate().unwrap_err().to_string().contains("frequency_penalty"));
     }
 
     #[test]
     fn repetition_penalty_zero_rejected() {
-        let mut p = SamplingParams::default();
-        p.repetition_penalty = 0.0;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("repetition_penalty"));
+        let p = SamplingParams { repetition_penalty: 0.0, ..Default::default() };
+        assert!(p.validate().unwrap_err().to_string().contains("repetition_penalty"));
     }
 
     #[test]
     fn top_p_out_of_range() {
-        let mut p = SamplingParams::default();
-        p.top_p = 1.5;
-        let err = p.validate().unwrap_err();
-        assert!(err.to_string().contains("top_p"));
+        let p = SamplingParams { top_p: 1.5, ..Default::default() };
+        assert!(p.validate().unwrap_err().to_string().contains("top_p"));
     }
 
     #[test]
