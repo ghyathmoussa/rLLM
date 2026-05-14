@@ -19,7 +19,7 @@ tracing.workspace = true
 parking_lot.workspace = true
 
 [features]
-default = ["cpu"]
+default = ["cuda"]
 cpu = ["rllm-kernels/cpu", "rllm-tensor/cpu"]
 cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda"]
 experimental-tp = []
