@@ -1,0 +1,113 @@
+[package]
+name = "rllm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "rLLM: A Rust LLM inference engine inspired by vLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-server.workspace = true
+rllm-engine.workspace = true
+rllm-tokenizer.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+
+[[example]]
+name = "offline_generate"
+path = "examples/offline_generate.rs"
+
+[[example]]
+name = "server"
+path = "examples/server.rs"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/rllm-core",
+    "crates/rllm-tokenizer",
+    "crates/rllm-model",
+    "crates/rllm-tensor",
+    "crates/rllm-kernels",
+    "crates/rllm-cache",
+    "crates/rllm-scheduler",
+    "crates/rllm-sampling",
+    "crates/rllm-worker",
+    "crates/rllm-executor",
+    "crates/rllm-engine",
+    "crates/rllm-server",
+    "crates/rllm-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# IDs and collections
+uuid = { version = "1", features = ["v4", "serde"] }
+parking_lot = "0.12"
+dashmap = "6"
+smallvec = "1"
+indexmap = "2"
+
+# Tokenizer and model loading
+tokenizers = "0.21"
+hf-hub = "0.4"
+safetensors = "0.6"
+
+# Candle tensor framework
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Streaming
+async-stream = "0.3"
+tokio-stream = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Benchmarking
+criterion = "0.6"
+
+# Internal crates
+rllm-core = { path = "crates/rllm-core" }
+rllm-tokenizer = { path = "crates/rllm-tokenizer" }
+rllm-model = { path = "crates/rllm-model" }
+rllm-tensor = { path = "crates/rllm-tensor" }
+rllm-kernels = { path = "crates/rllm-kernels" }
+rllm-cache = { path = "crates/rllm-cache" }
+rllm-scheduler = { path = "crates/rllm-scheduler" }
+rllm-sampling = { path = "crates/rllm-sampling" }
+rllm-worker = { path = "crates/rllm-worker" }
+rllm-executor = { path = "crates/rllm-executor" }
+rllm-engine = { path = "crates/rllm-engine" }
+rllm-server = { path = "crates/rllm-server" }
+rllm-bench = { path = "crates/rllm-bench" }

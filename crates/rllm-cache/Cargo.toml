@@ -1,0 +1,19 @@
+[package]
+name = "rllm-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "KV cache specs, block pool, prefix cache hashing, allocation, and eviction for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-tensor.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]

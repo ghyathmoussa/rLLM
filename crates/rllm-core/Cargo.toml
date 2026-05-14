@@ -1,0 +1,18 @@
+[package]
+name = "rllm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Common configs, errors, IDs, request/response types, and sequence state for rLLM"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

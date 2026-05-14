@@ -1,0 +1,16 @@
+[package]
+name = "rllm-executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Single-process and multi-process executor abstraction for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-cache.workspace = true
+rllm-worker.workspace = true
+rllm-scheduler.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
