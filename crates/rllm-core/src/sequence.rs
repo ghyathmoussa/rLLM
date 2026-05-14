@@ -36,3 +36,63 @@ impl RequestState {
         self.status.is_finished()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::RequestId;
+
+    fn sample_state() -> RequestState {
+        RequestState {
+            request_id: RequestId::new(),
+            prompt_token_ids: vec![1, 2, 3, 4],
+            generated_token_ids: vec![5, 6],
+            num_computed_tokens: 6,
+            block_hashes: Vec::new(),
+            status: RequestStatus::Running,
+            output_text: "Hello".into(),
+            stop_state: StopState::None,
+        }
+    }
+
+    #[test]
+    fn num_tokens_counts_prompt_and_generated() {
+        let state = sample_state();
+        assert_eq!(state.num_tokens(), 6);
+    }
+
+    #[test]
+    fn is_finished_delegates_to_status() {
+        let mut state = sample_state();
+        assert!(!state.is_finished());
+        state.status = RequestStatus::FinishedStopped;
+        assert!(state.is_finished());
+    }
+
+    #[test]
+    fn request_state_serde_roundtrip() {
+        let state = sample_state();
+        let json = serde_json::to_string(&state).unwrap();
+        let back: RequestState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state.prompt_token_ids, back.prompt_token_ids);
+        assert_eq!(state.generated_token_ids, back.generated_token_ids);
+        assert_eq!(state.num_computed_tokens, back.num_computed_tokens);
+        assert_eq!(state.status, back.status);
+        assert_eq!(state.output_text, back.output_text);
+    }
+
+    #[test]
+    fn stop_state_serde_roundtrip() {
+        for ss in [
+            StopState::None,
+            StopState::StopString(StringIndex(2)),
+            StopState::StopToken,
+            StopState::LengthLimit,
+            StopState::Aborted,
+        ] {
+            let json = serde_json::to_string(&ss).unwrap();
+            let back: StopState = serde_json::from_str(&json).unwrap();
+            assert_eq!(ss, back);
+        }
+    }
+}
