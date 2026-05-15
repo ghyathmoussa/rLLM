@@ -76,6 +76,7 @@ indexmap = "2"
 tokenizers = "0.21"
 hf-hub = "0.4"
 safetensors = "0.6"
+minijinja = "2"
 
 # Candle tensor framework
 candle-core = "0.9"
