@@ -17,3 +17,5 @@ tracing.workspace = true
 default = ["cuda"]
 cpu = []
 cuda = []
+
+[dev-dependencies]

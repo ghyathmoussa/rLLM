@@ -4,3 +4,7 @@ pub mod fused;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
+
+/// Re-export error type.
+#[cfg(feature = "cuda")]
+pub use cuda::CudaKernelError;
