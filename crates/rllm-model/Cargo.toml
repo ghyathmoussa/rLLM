@@ -16,9 +16,14 @@ serde_json.workspace = true
 hf-hub.workspace = true
 safetensors.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
-candle-backend = ["candle-core", "candle-nn", "candle-transformers"]
+default = ["candle-backend"]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers", "tokio"]
 
 [dependencies.candle-core]
 workspace = true
