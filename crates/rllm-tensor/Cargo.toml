@@ -1,0 +1,18 @@
+[package]
+name = "rllm-tensor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Thin tensor abstraction over device tensors, dtype, shape, and CUDA streams for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["cuda"]
+cpu = []
+cuda = []

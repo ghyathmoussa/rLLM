@@ -1,0 +1,56 @@
+# cargo-deny configuration for rLLM
+# Run: cargo deny check
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "warn"
+yanked = "warn"
+notice = "warn"
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "NOASSERTION",
+]
+default = "deny"
+# Some crates use Unicode-DFS-2016 which is fine
+exceptions = [
+    { allow = ["Unicode-DFS-2016"], name = "unicode-ident" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "lowest-version"
+# Internal crate dependency order — lower crates must not depend on higher ones
+deny = [
+    # rllm-core has no internal dependencies
+    # rllm-tensor must not depend on higher-level crates
+    { name = "rllm-server", wrappers = ["rllm"] },
+    { name = "rllm-engine", wrappers = ["rllm", "rllm-server", "rllm-bench"] },
+    { name = "rllm-executor", wrappers = ["rllm", "rllm-server", "rllm-engine"] },
+    { name = "rllm-worker", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor"] },
+    { name = "rllm-scheduler", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor"] },
+    { name = "rllm-model", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor", "rllm-worker"] },
+    { name = "rllm-kernels", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor", "rllm-worker"] },
+    { name = "rllm-cache", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor", "rllm-scheduler"] },
+    { name = "rllm-sampling", wrappers = ["rllm", "rllm-server", "rllm-engine", "rllm-executor", "rllm-worker"] },
+    { name = "rllm-tokenizer", wrappers = ["rllm", "rllm-server", "rllm-engine"] },
+]
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

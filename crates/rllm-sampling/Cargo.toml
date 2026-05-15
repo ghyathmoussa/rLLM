@@ -1,0 +1,15 @@
+[package]
+name = "rllm-sampling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Logits processors, sampling, and logprobs for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

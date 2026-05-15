@@ -1,0 +1,19 @@
+[package]
+name = "rllm-kernels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CUDA kernels and FFI wrappers for paged attention, cache ops, and fused ops for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-tensor.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["cuda"]
+cpu = []
+cuda = []

@@ -1,0 +1,18 @@
+[package]
+name = "rllm-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Request scheduling, continuous batching, chunked prefill, and preemption for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-cache.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true
+
+[dev-dependencies]

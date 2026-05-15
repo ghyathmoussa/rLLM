@@ -1,0 +1,25 @@
+[package]
+name = "rllm-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Device worker, model runner, batch building, and CUDA graph capture for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-model.workspace = true
+rllm-tensor.workspace = true
+rllm-kernels.workspace = true
+rllm-cache.workspace = true
+rllm-sampling.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+
+[features]
+default = ["cuda"]
+cpu = ["rllm-kernels/cpu", "rllm-tensor/cpu"]
+cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda"]
+experimental-tp = []

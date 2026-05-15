@@ -1,0 +1,33 @@
+[package]
+name = "rllm-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Model registry, HF config parsing, Llama model implementation, and weight loading for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+rllm-tensor.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hf-hub.workspace = true
+safetensors.workspace = true
+tracing.workspace = true
+
+[features]
+candle-backend = ["candle-core", "candle-nn", "candle-transformers"]
+
+[dependencies.candle-core]
+workspace = true
+optional = true
+
+[dependencies.candle-nn]
+workspace = true
+optional = true
+
+[dependencies.candle-transformers]
+workspace = true
+optional = true
