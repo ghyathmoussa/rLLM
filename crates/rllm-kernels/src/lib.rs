@@ -9,4 +9,5 @@ pub mod cuda;
 #[cfg(feature = "cuda")]
 pub use cuda::CudaKernelError;
 
+pub use attention::{AttentionMetadata, AttentionParams};
 pub use cache_ops::GpuKVCache;
