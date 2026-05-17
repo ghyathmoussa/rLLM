@@ -15,5 +15,8 @@ tracing.workspace = true
 parking_lot.workspace = true
 dashmap.workspace = true
 smallvec.workspace = true
+sha2.workspace = true
+ciborium.workspace = true
+xxhash-rust.workspace = true
 
 [dev-dependencies]

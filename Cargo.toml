@@ -98,6 +98,11 @@ clap = { version = "4", features = ["derive"] }
 # Benchmarking
 criterion = "0.6"
 
+# Hashing
+sha2 = "0.10"
+ciborium = "0.2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
 # Internal crates
 rllm-core = { path = "crates/rllm-core" }
 rllm-tokenizer = { path = "crates/rllm-tokenizer" }

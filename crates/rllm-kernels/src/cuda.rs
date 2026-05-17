@@ -30,18 +30,9 @@ mod ffi {
         ) -> c_int;
 
         // Block copy (byte-wise)
-        pub fn rllm_block_copy(
-            src: *const u8,
-            dst: *mut u8,
-            nbytes: i64,
-            stream: usize,
-        ) -> c_int;
+        pub fn rllm_block_copy(src: *const u8, dst: *mut u8, nbytes: i64, stream: usize) -> c_int;
 
-        pub fn rllm_block_copy_sync(
-            src: *const u8,
-            dst: *mut u8,
-            nbytes: i64,
-        ) -> c_int;
+        pub fn rllm_block_copy_sync(src: *const u8, dst: *mut u8, nbytes: i64) -> c_int;
     }
 }
 
@@ -57,11 +48,7 @@ pub enum CudaKernelError {
 /// Check a CUDA kernel return code and convert to Result.
 #[cfg(has_cuda)]
 fn check(rc: i32) -> Result<(), CudaKernelError> {
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(CudaKernelError::KernelError { code: rc })
-    }
+    if rc == 0 { Ok(()) } else { Err(CudaKernelError::KernelError { code: rc }) }
 }
 
 // ── Vector Add ──────────────────────────────────────────────────────────
@@ -200,8 +187,7 @@ mod tests {
         #[test]
         fn vector_add_sync_returns_not_available() {
             let mut buf = [0.0f32; 4];
-            let result =
-                vector_add_f32_sync(buf.as_ptr(), buf.as_ptr(), buf.as_mut_ptr(), 4);
+            let result = vector_add_f32_sync(buf.as_ptr(), buf.as_ptr(), buf.as_mut_ptr(), 4);
             assert!(result.is_err());
         }
 
@@ -210,10 +196,7 @@ mod tests {
             let mut buf = [0u8; 16];
             let result = block_copy(buf.as_ptr(), buf.as_mut_ptr(), 16, 0);
             assert!(result.is_err());
-            assert!(matches!(
-                result.unwrap_err(),
-                CudaKernelError::NotAvailable
-            ));
+            assert!(matches!(result.unwrap_err(), CudaKernelError::NotAvailable));
         }
 
         #[test]
@@ -254,8 +237,7 @@ mod tests {
             let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
             let mut dst = [0u8; 8];
             unsafe {
-                block_copy_sync(src.as_ptr(), dst.as_mut_ptr(), 8)
-                    .expect("block_copy_sync failed");
+                block_copy_sync(src.as_ptr(), dst.as_mut_ptr(), 8).expect("block_copy_sync failed");
             }
             assert_eq!(src, dst);
         }

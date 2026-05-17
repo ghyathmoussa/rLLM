@@ -56,7 +56,8 @@ fn main() {
         let mut cmd = std::process::Command::new(&nvcc);
         cmd.arg("-c")
             .arg(cu)
-            .arg("-o").arg(&obj)
+            .arg("-o")
+            .arg(&obj)
             .arg("-O2")
             .args(&arch_flags)
             .arg(format!("-I{}/include", cuda_home.display()));
