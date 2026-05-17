@@ -12,11 +12,15 @@ rllm-model.workspace = true
 rllm-tensor.workspace = true
 rllm-kernels.workspace = true
 rllm-cache.workspace = true
+rllm-scheduler.workspace = true
 rllm-sampling.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+
+[dev-dependencies]
+rllm-core.workspace = true
 
 [features]
 default = ["cuda"]

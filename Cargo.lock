@@ -2340,6 +2340,7 @@ dependencies = [
  "rllm-kernels",
  "rllm-model",
  "rllm-sampling",
+ "rllm-scheduler",
  "rllm-tensor",
  "thiserror 2.0.18",
  "tracing",
