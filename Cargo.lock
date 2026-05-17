@@ -2261,6 +2261,8 @@ name = "rllm-sampling"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rand",
+ "rand_chacha",
  "rllm-core",
  "thiserror 2.0.18",
  "tracing",

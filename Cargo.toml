@@ -95,6 +95,10 @@ tokio-stream = "0.1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Random
+rand = "0.9"
+rand_chacha = "0.9"
+
 # Benchmarking
 criterion = "0.6"
 
