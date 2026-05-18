@@ -44,6 +44,7 @@ impl FreeBlockQueue {
         self.len
     }
 
+    #[expect(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -80,6 +81,7 @@ impl FreeBlockQueue {
     }
 
     /// Pop block from the head (MRU, most recently freed).
+    #[expect(dead_code)]
     pub fn pop_front(&mut self, blocks: &mut [KVCacheBlock]) -> Option<u32> {
         let idx = self.head?;
         let block = &blocks[idx as usize];
