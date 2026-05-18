@@ -18,7 +18,11 @@ impl Tokenizer {
     }
 
     pub fn from_model_id(model_id: &str) -> Result<Self> {
-        let api = hf_hub::api::sync::Api::new()?;
+        let mut builder = hf_hub::api::sync::ApiBuilder::from_env();
+        if let Some(token) = token_from_env() {
+            builder = builder.with_token(Some(token));
+        }
+        let api = builder.build()?;
         let repo = api.model(model_id.to_string());
         let tokenizer_path = repo.get("tokenizer.json")?;
         let config = load_tokenizer_config_from_repo(&repo)?;
@@ -136,6 +140,14 @@ impl Tokenizer {
             chat_template: config.chat_template.clone(),
         })
     }
+}
+
+fn token_from_env() -> Option<String> {
+    ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN"]
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
 }
 
 fn single_token_id(tokenizer: &HfTokenizer, token: &str) -> Option<u32> {
