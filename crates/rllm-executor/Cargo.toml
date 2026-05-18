@@ -10,7 +10,7 @@ description = "Single-process and multi-process executor abstraction for rLLM"
 rllm-core.workspace = true
 rllm-cache.workspace = true
 rllm-metrics.workspace = true
-rllm-worker.workspace = true
+rllm-worker = { path = "../rllm-worker", default-features = false }
 rllm-scheduler.workspace = true
 rllm-sampling.workspace = true
 anyhow.workspace = true
@@ -20,4 +20,5 @@ tracing.workspace = true
 [features]
 default = []
 candle-backend = ["rllm-worker/candle-backend"]
+cuda = ["rllm-worker/cuda"]
 experimental-tp = []

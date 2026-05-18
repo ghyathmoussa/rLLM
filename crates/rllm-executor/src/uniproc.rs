@@ -2,8 +2,8 @@ use anyhow::Result;
 use rllm_cache::spec::KVCacheConfig;
 use rllm_core::ids::RequestId;
 use rllm_core::request::SamplingParams;
+use rllm_sampling::{Sampler, SamplingInput};
 use rllm_scheduler::SchedulerOutput;
-use rllm_sampling::{SamplingInput, Sampler};
 use rllm_worker::Worker;
 
 use crate::executor::{Executor, ExecutorOutput};
@@ -22,11 +22,7 @@ impl UniProcExecutor {
     pub fn new(mut worker: Worker) -> Self {
         let eos_token_id = worker.model_config().vocab_size as u32; // placeholder
         let sampler = worker.take_sampler().unwrap_or_default();
-        Self {
-            worker,
-            sampler,
-            eos_token_id,
-        }
+        Self { worker, sampler, eos_token_id }
     }
 
     /// Get a reference to the underlying worker.
@@ -47,6 +43,8 @@ impl UniProcExecutor {
 
 impl Executor for UniProcExecutor {
     fn initialize(&mut self, kv_cache_configs: &[KVCacheConfig]) -> Result<()> {
+        self.worker.initialize_cuda_device()?;
+        self.worker.load_model_weights()?;
         if let Some(config) = kv_cache_configs.first() {
             self.worker.initialize_kv_cache(config)?;
         }
@@ -65,10 +63,7 @@ impl Executor for UniProcExecutor {
         let batch = self.worker.model_runner_mut().build_tensors(scheduler_output)?;
 
         if batch.num_seqs == 0 {
-            return Ok(ExecutorOutput {
-                sampled_token_ids: vec![],
-                logprobs: vec![],
-            });
+            return Ok(ExecutorOutput { sampled_token_ids: vec![], logprobs: vec![] });
         }
 
         // 2. Build attention metadata.
@@ -89,18 +84,6 @@ impl Executor for UniProcExecutor {
             let n_tokens = batch.tokens_per_seq[i];
             let is_prefill = batch.is_prefill[i];
 
-            // Get or create logits for this request.
-            // In production, these come from the model forward pass.
-            // For now, use uniform dummy logits (all zeros → random sampling).
-            let logits = if is_prefill {
-                // During prefill, we only sample from the last token's logits.
-                // Store dummy logits for the full prefill, but sample from the last position.
-                vec![0.0f32; vocab_size]
-            } else {
-                // Decode: single token logits.
-                vec![0.0f32; vocab_size]
-            };
-
             // Get sampling params for this request.
             let sampling_params = self
                 .worker
@@ -110,63 +93,67 @@ impl Executor for UniProcExecutor {
                 .unwrap_or_default();
 
             // Build context token IDs for penalty application.
-            let (prompt_ids, generated_ids) = self
-                .worker
-                .model_runner()
-                .get_context_token_ids(&request_id)
-                .unwrap_or_default();
+            let (prompt_ids, generated_ids) =
+                self.worker.model_runner().get_context_token_ids(&request_id).unwrap_or_default();
 
             let mut context_token_ids = prompt_ids.clone();
             context_token_ids.extend_from_slice(&generated_ids);
 
             let num_generated = generated_ids.len() as u32;
 
-            let sampling_input = SamplingInput {
-                logits,
-                params: sampling_params.clone(),
-                context_token_ids,
-                num_generated,
-                eos_token_id: self.eos_token_id,
-                bad_word_token_ids: vec![],
+            let (token_id, logprob) = match self.worker.generate_next_token(&context_token_ids)? {
+                Some(token_id) => {
+                    if sampling_params.temperature > 0.0 {
+                        tracing::warn!(
+                            request_id = ?request_id,
+                            temperature = sampling_params.temperature,
+                            "Candle model path currently uses greedy next-token generation; sampling params are applied only on the dummy fallback"
+                        );
+                    }
+                    (token_id, None)
+                }
+                None => {
+                    // No real model loaded: keep the existing dummy-logits path
+                    // for tests and non-Candle builds.
+                    let logits = vec![0.0f32; vocab_size];
+                    let sampling_input = SamplingInput {
+                        logits,
+                        params: sampling_params.clone(),
+                        context_token_ids,
+                        num_generated,
+                        eos_token_id: self.eos_token_id,
+                        bad_word_token_ids: vec![],
+                    };
+                    let output = self.sampler.sample(&sampling_input);
+                    (output.token_id, output.logprob)
+                }
             };
 
-            let output = self.sampler.sample(&sampling_input);
-            sampled_token_ids.push(output.token_id);
-            logprobs.push(output.logprob);
+            sampled_token_ids.push(token_id);
+            logprobs.push(logprob);
 
             // Update model runner state.
             if is_prefill {
                 // For prefill, advance computed tokens by the number of
                 // prefill tokens. The sampled token from the last position
                 // will be stored as a generated token.
-                self.worker
-                    .model_runner_mut()
-                    .advance_computed(&request_id, n_tokens)?;
+                self.worker.model_runner_mut().advance_computed(&request_id, n_tokens)?;
                 // Store the sampled token as the first generated token.
-                self.worker
-                    .model_runner_mut()
-                    .store_generated_token(&request_id, output.token_id)?;
+                self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
             } else {
                 // Decode: store the generated token.
-                self.worker
-                    .model_runner_mut()
-                    .store_generated_token(&request_id, output.token_id)?;
+                self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
             }
         }
 
         // 5. Async output copy.
         let copied_ids = self.worker.model_runner_mut().async_output_copy(&sampled_token_ids)?;
-        self.worker
-            .model_runner_mut()
-            .cache_execute_model_state(copied_ids);
+        self.worker.model_runner_mut().cache_execute_model_state(copied_ids);
 
         rllm_metrics::histogram!("rllm_model_forward_duration_seconds")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(ExecutorOutput {
-            sampled_token_ids,
-            logprobs,
-        })
+        Ok(ExecutorOutput { sampled_token_ids, logprobs })
     }
 
     fn add_request(
@@ -175,12 +162,8 @@ impl Executor for UniProcExecutor {
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
     ) {
-        self.worker
-            .model_runner_mut()
-            .add_request(request_id, prompt_token_ids.clone());
-        self.worker
-            .model_runner_mut()
-            .set_sampling_params(request_id, sampling_params);
+        self.worker.model_runner_mut().add_request(request_id, prompt_token_ids.clone());
+        self.worker.model_runner_mut().set_sampling_params(request_id, sampling_params);
     }
 
     fn shutdown(&mut self) {

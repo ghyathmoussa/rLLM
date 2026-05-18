@@ -24,6 +24,12 @@ tempfile = "3"
 [features]
 default = ["candle-backend"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "tokio"]
+cuda = [
+    "candle-backend",
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+]
 
 [dependencies.candle-core]
 workspace = true

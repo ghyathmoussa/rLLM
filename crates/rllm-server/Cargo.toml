@@ -8,11 +8,14 @@ description = "Axum HTTP server with OpenAI-compatible API for rLLM"
 
 [dependencies]
 rllm-core.workspace = true
+rllm-cache.workspace = true
 rllm-engine.workspace = true
-rllm-executor.workspace = true
+rllm-executor = { path = "../rllm-executor", default-features = false }
 rllm-metrics.workspace = true
+rllm-model = { path = "../rllm-model", default-features = false }
 rllm-scheduler.workspace = true
-rllm-worker.workspace = true
+rllm-tensor.workspace = true
+rllm-worker = { path = "../rllm-worker", default-features = false }
 rllm-tokenizer.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -29,6 +32,20 @@ tokio-stream.workspace = true
 clap.workspace = true
 uuid.workspace = true
 metrics-exporter-prometheus.workspace = true
+
+[features]
+default = ["cuda"]
+candle-backend = [
+    "rllm-executor/candle-backend",
+    "rllm-model/candle-backend",
+    "rllm-worker/candle-backend",
+]
+cuda = [
+    "candle-backend",
+    "rllm-executor/cuda",
+    "rllm-model/cuda",
+    "rllm-worker/cuda",
+]
 
 [dev-dependencies]
 rllm-metrics.workspace = true

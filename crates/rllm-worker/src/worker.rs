@@ -6,6 +6,9 @@ use rllm_tensor::Device;
 
 use crate::model_runner::ModelRunner;
 
+#[cfg(feature = "candle-backend")]
+use rllm_model::ModelRunner as CandleModelRunner;
+
 const DEFAULT_GPU_MEMORY: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
 
 /// Device worker: owns the model runner, GPU KV cache, and device resources.
@@ -22,6 +25,8 @@ pub struct Worker {
     model_runner: ModelRunner,
     cache_config: Option<KVCacheConfig>,
     sampler: Option<Sampler>,
+    #[cfg(feature = "candle-backend")]
+    candle_model: Option<CandleModelRunner>,
 }
 
 impl Worker {
@@ -35,6 +40,8 @@ impl Worker {
             model_runner,
             cache_config: None,
             sampler: None,
+            #[cfg(feature = "candle-backend")]
+            candle_model: None,
         }
     }
 
@@ -61,21 +68,39 @@ impl Worker {
         Ok(())
     }
 
-    /// Load model weights from the path specified in `model_config.model_id`.
+    /// Load model weights from the local path or Hugging Face ID in `model_config.model_id`.
     ///
-    /// Actual weight loading requires the `candle-backend` feature.
-    /// Without it, this logs a warning and returns Ok.
+    /// With `candle-backend`, this parses the Hugging Face `config.json`, loads
+    /// SafeTensors weights onto the selected Candle device, and stores the
+    /// runnable CausalLM. Without that feature it logs and leaves the worker in
+    /// dummy-execution mode.
     pub fn load_model_weights(&mut self) -> Result<()> {
         #[cfg(feature = "candle-backend")]
         {
             tracing::info!(
                 worker_id = self.id,
                 model = %self.model_config.model_id,
-                "Loading model weights via candle backend"
+                "Loading model weights via Candle backend"
             );
-            // TODO: wire rllm-model::ModelRunner::from_dir() when candle-backend
-            // integration is complete. The model runner currently manages token
-            // state only; the actual candle model will be stored on the runner.
+            let loaded = CandleModelRunner::from_model_ref(&self.model_config.model_id)?;
+            if !loaded.is_cuda() {
+                anyhow::bail!(
+                    "Candle loaded model on {}, not CUDA. Refusing to serve because true GPU inference was requested.",
+                    loaded.device_description()
+                );
+            }
+            tracing::info!(
+                worker_id = self.id,
+                architecture = %loaded.config().architecture,
+                vocab_size = loaded.config().vocab_size,
+                num_layers = loaded.config().num_layers,
+                max_model_len = loaded.config().max_model_len,
+                device = %loaded.device_description(),
+                "Model weights loaded"
+            );
+            self.model_config = loaded.config().clone();
+            self.model_runner = ModelRunner::new(self.model_config.clone(), self.block_size);
+            self.candle_model = Some(loaded);
         }
         #[cfg(not(feature = "candle-backend"))]
         {
@@ -86,6 +111,48 @@ impl Worker {
             );
         }
         Ok(())
+    }
+
+    /// True when a real Candle model has been loaded.
+    pub fn has_loaded_model(&self) -> bool {
+        #[cfg(feature = "candle-backend")]
+        {
+            self.candle_model.is_some()
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            false
+        }
+    }
+
+    /// Generate the next token using the loaded Candle model, if available.
+    ///
+    /// This first integration path uses the model crate's greedy generation API
+    /// over the current prompt+generated context. It is intentionally simple and
+    /// correct; later work can replace it with batched logits and paged KV cache
+    /// reuse without changing the executor contract.
+    pub fn generate_next_token(&self, context_token_ids: &[u32]) -> Result<Option<u32>> {
+        #[cfg(feature = "candle-backend")]
+        {
+            let Some(model) = &self.candle_model else {
+                return Ok(None);
+            };
+            if context_token_ids.is_empty() {
+                anyhow::bail!("cannot generate from an empty token context");
+            }
+            let target_len = context_token_ids.len() + 1;
+            let generated = model.generate(context_token_ids, target_len)?;
+            let token = generated
+                .get(context_token_ids.len())
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("model did not return a next token"))?;
+            Ok(Some(token))
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            let _ = context_token_ids;
+            Ok(None)
+        }
     }
 
     /// Determine available GPU memory for KV cache allocation.

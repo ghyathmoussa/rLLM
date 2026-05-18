@@ -18,25 +18,43 @@ use crate::registry::CausalLM;
 #[cfg(feature = "candle-backend")]
 pub struct ModelRunner {
     model: Box<dyn CausalLM>,
+    device: Device,
 }
 
 #[cfg(feature = "candle-backend")]
 impl ModelRunner {
+    /// Load a model from a local directory or Hugging Face model ID.
+    pub fn from_model_ref(model_ref: &str) -> Result<Self> {
+        let model_dir = loader::resolve_model_dir(model_ref)
+            .with_context(|| format!("resolving model reference {model_ref}"))?;
+        Self::from_dir_path(&model_dir)
+    }
+
     /// Load a model from a local directory.
     pub fn from_dir(model_dir: &str) -> Result<Self> {
-        let config_path = std::path::Path::new(model_dir).join("config.json");
-        let config = hf_config::parse_hf_config(&config_path)
-            .context("parsing model config")?;
+        Self::from_dir_path(std::path::Path::new(model_dir))
+    }
 
-        let device = Device::cuda_if_available(0)
-            .map_err(|e| anyhow::anyhow!("device init: {e}"))?;
-        tracing::info!("loading model on device: {:?}", device);
+    fn from_dir_path(model_dir: &std::path::Path) -> Result<Self> {
+        let config_path = model_dir.join("config.json");
+        let config = hf_config::parse_hf_config(&config_path).context("parsing model config")?;
 
-        let (weight_map, _tied) = loader::load_weights_with_tied_detection(
-            std::path::Path::new(model_dir),
-            &device,
-        )
-        .context("loading weights")?;
+        let device =
+            Device::cuda_if_available(0).map_err(|e| anyhow::anyhow!("device init: {e}"))?;
+        tracing::info!(
+            model_dir = %model_dir.display(),
+            architecture = %config.architecture,
+            device = ?device,
+            "loading model"
+        );
+
+        let (weight_map, _tied) = loader::load_weights_with_tied_detection(model_dir, &device)
+            .context("loading weights")?;
+        tracing::debug!(
+            model_dir = %model_dir.display(),
+            tensors = weight_map.weights.len(),
+            "model weights loaded into memory"
+        );
 
         let model = match config.architecture.as_str() {
             "LlamaForCausalLM" | "MistralForCausalLM" => {
@@ -45,13 +63,19 @@ impl ModelRunner {
             arch => anyhow::bail!("unsupported architecture: {arch}"),
         };
 
-        Ok(Self {
-            model: Box::new(model),
-        })
+        Ok(Self { model: Box::new(model), device })
     }
 
     pub fn config(&self) -> &ModelConfig {
         self.model.config()
+    }
+
+    pub fn device_description(&self) -> String {
+        format!("{:?}", self.device)
+    }
+
+    pub fn is_cuda(&self) -> bool {
+        matches!(self.device, Device::Cuda(_))
     }
 
     /// Run greedy generation on a tokenized prompt.

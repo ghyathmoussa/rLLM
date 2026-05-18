@@ -35,6 +35,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         .and_then(|a| a.into_iter().next())
         .or(hf.model_type)
         .unwrap_or_else(|| "unknown".to_string());
+    let architecture = normalize_architecture(&architecture);
 
     let hidden_size = hf.hidden_size.unwrap_or(4096);
     let num_attention_heads = hf.num_attention_heads.unwrap_or(32);
@@ -42,13 +43,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
     let head_dim = hf.head_dim.unwrap_or(hidden_size / num_attention_heads);
     let intermediate_size = hf.intermediate_size.unwrap_or(hidden_size * 4);
 
-    validate_config(
-        &architecture,
-        hidden_size,
-        num_attention_heads,
-        num_kv_heads,
-        head_dim,
-    )?;
+    validate_config(&architecture, hidden_size, num_attention_heads, num_kv_heads, head_dim)?;
 
     let dtype = match hf.torch_dtype.as_deref() {
         Some("float16") | Some("fp16") => DType::F16,
@@ -60,11 +55,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
     };
 
     Ok(ModelConfig {
-        model_id: path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_string_lossy()
-            .to_string(),
+        model_id: path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string(),
         architecture,
         vocab_size: hf.vocab_size.unwrap_or(32000),
         hidden_size,
@@ -119,9 +110,19 @@ fn validate_config(
     match architecture {
         "LlamaForCausalLM" | "MistralForCausalLM" => Ok(()),
         _ => {
-            tracing::warn!("unsupported architecture '{architecture}', attempting Llama-compatible loading");
+            tracing::warn!(
+                "unsupported architecture '{architecture}', attempting Llama-compatible loading"
+            );
             Ok(())
         }
+    }
+}
+
+fn normalize_architecture(architecture: &str) -> String {
+    match architecture {
+        "llama" | "LlamaModel" | "LLaMAForCausalLM" => "LlamaForCausalLM".to_string(),
+        "mistral" | "MistralModel" => "MistralForCausalLM".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -220,5 +221,19 @@ mod tests {
         );
         let config = parse_hf_config(f.path()).unwrap();
         assert_eq!(config.architecture, "MistralForCausalLM");
+    }
+
+    #[test]
+    fn normalizes_llama_model_type() {
+        let f = write_config_json(
+            r#"{
+                "model_type": "llama",
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        assert_eq!(config.architecture, "LlamaForCausalLM");
     }
 }
