@@ -2438,6 +2438,7 @@ dependencies = [
  "rllm-metrics",
  "rllm-sampling",
  "rllm-scheduler",
+ "rllm-server",
  "rllm-worker",
  "serde",
  "serde_json",
@@ -2483,6 +2484,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "parking_lot",
+ "rllm-cache",
  "rllm-core",
  "rllm-executor",
  "rllm-metrics",

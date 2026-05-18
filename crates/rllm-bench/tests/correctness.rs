@@ -347,6 +347,122 @@ fn prefix_cache_sharing() {
     assert!(result.num_computed_tokens >= 8, "Expected at least 8 computed tokens");
 }
 
+/// Batch invariance: Running the same batch configuration twice produces
+/// the same output tokens (determinism across runs).
+#[test]
+fn batch_determinism_same_config() {
+    let config = MockExecutorConfig {
+        mode: MockMode::Deterministic { offset: 0 },
+        vocab_size: 1000,
+        eos_token_id: 999,
+        sampler_seed: Some(42),
+    };
+
+    let params = SamplingParams { temperature: 0.0, max_tokens: Some(8), ..Default::default() };
+
+    let run_test = || {
+        let mock = MockExecutor::new(config.clone());
+        let scheduler = make_test_scheduler(16, 512, 64, 4096);
+        let core = EngineCore::new(Box::new(mock), scheduler, 999);
+        let mut engine = LLMEngine::new(core);
+
+        let req = make_inference_request_with_params(16, 8, params.clone());
+        engine.add_request(req).unwrap();
+        let outputs = engine.generate(vec![]).unwrap();
+        outputs[0]
+            .outputs
+            .iter()
+            .flat_map(|o| o.token_ids.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let run1 = run_test();
+    let run2 = run_test();
+    assert_eq!(
+        run1, run2,
+        "Same deterministic config should produce same output"
+    );
+}
+
+/// Batch invariance: Running the same batch of multiple requests twice
+/// produces the same outputs (determinism with batching).
+#[test]
+fn batch_determinism_multiple_requests() {
+    let config = MockExecutorConfig {
+        mode: MockMode::Deterministic { offset: 0 },
+        vocab_size: 1000,
+        eos_token_id: 999,
+        sampler_seed: Some(42),
+    };
+
+    let params = SamplingParams { temperature: 0.0, max_tokens: Some(4), ..Default::default() };
+
+    let run_test = || {
+        let mock = MockExecutor::new(config.clone());
+        let scheduler = make_test_scheduler(16, 512, 64, 4096);
+        let core = EngineCore::new(Box::new(mock), scheduler, 999);
+        let mut engine = LLMEngine::new(core);
+
+        for _ in 0..4 {
+            let req = make_inference_request_with_params(8, 4, params.clone());
+            engine.add_request(req).unwrap();
+        }
+        let outputs = engine.generate(vec![]).unwrap();
+        outputs
+            .iter()
+            .map(|o| {
+                o.outputs
+                    .iter()
+                    .flat_map(|co| co.token_ids.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let run1 = run_test();
+    let run2 = run_test();
+    assert_eq!(run1, run2, "Same batch config should produce same outputs");
+}
+
+/// Seeded random mode is reproducible across runs.
+#[test]
+fn batch_determinism_seeded_random() {
+    let config = MockExecutorConfig {
+        mode: MockMode::SeededRandom { seed: 12345 },
+        vocab_size: 1000,
+        eos_token_id: 999,
+        sampler_seed: Some(42),
+    };
+
+    let params = SamplingParams { temperature: 1.0, max_tokens: Some(8), ..Default::default() };
+
+    let run_test = || {
+        let mock = MockExecutor::new(config.clone());
+        let scheduler = make_test_scheduler(16, 512, 64, 4096);
+        let core = EngineCore::new(Box::new(mock), scheduler, 999);
+        let mut engine = LLMEngine::new(core);
+
+        for _ in 0..3 {
+            let req = make_inference_request_with_params(8, 4, params.clone());
+            engine.add_request(req).unwrap();
+        }
+        let outputs = engine.generate(vec![]).unwrap();
+        outputs
+            .iter()
+            .map(|o| {
+                o.outputs
+                    .iter()
+                    .flat_map(|co| co.token_ids.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let run1 = run_test();
+    let run2 = run_test();
+    assert_eq!(run1, run2, "Seeded random should be reproducible across runs");
+}
+
 #[test]
 fn seeded_random_mode_reproducibility() {
     let config = MockExecutorConfig {

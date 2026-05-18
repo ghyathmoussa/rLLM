@@ -71,6 +71,18 @@ pub struct AttentionMetadata {
     pub num_decode_tokens: usize,
     /// Maximum number of blocks per sequence.
     pub max_num_blocks_per_seq: usize,
+    /// Number of common prefix blocks shared across all sequences.
+    ///
+    /// When all sequences share a common prefix (via prefix caching), the
+    /// attention kernel can skip computing attention for these blocks since
+    /// the result is identical. Set to 0 when no common prefix exists.
+    pub common_prefix_blocks: usize,
+    /// Optional sliding window size for windowed attention.
+    ///
+    /// When `Some(window_size)`, attention is restricted to the last
+    /// `window_size` tokens. This reduces KV cache usage for long sequences.
+    /// Set to `None` for full attention.
+    pub sliding_window: Option<usize>,
 }
 
 impl AttentionMetadata {
@@ -84,6 +96,8 @@ impl AttentionMetadata {
             num_prefill_tokens: 0,
             num_decode_tokens: 0,
             max_num_blocks_per_seq: 0,
+            common_prefix_blocks: 0,
+            sliding_window: None,
         }
     }
 
@@ -107,7 +121,23 @@ impl AttentionMetadata {
             num_prefill_tokens: 0,
             num_decode_tokens: num_seqs,
             max_num_blocks_per_seq,
+            common_prefix_blocks: 0,
+            sliding_window: None,
         }
+    }
+
+    /// Create metadata for a decode-only batch with sliding window and common prefix.
+    pub fn for_decode_with_options(
+        seq_lens: Vec<u32>,
+        block_tables: Vec<Vec<i32>>,
+        max_num_blocks_per_seq: usize,
+        common_prefix_blocks: usize,
+        sliding_window: Option<usize>,
+    ) -> Self {
+        let mut meta = Self::for_decode(seq_lens, block_tables, max_num_blocks_per_seq);
+        meta.common_prefix_blocks = common_prefix_blocks;
+        meta.sliding_window = sliding_window;
+        meta
     }
 
     /// Create metadata for a prefill-only batch.
@@ -137,6 +167,8 @@ impl AttentionMetadata {
             num_prefill_tokens,
             num_decode_tokens: 0,
             max_num_blocks_per_seq,
+            common_prefix_blocks: 0,
+            sliding_window: None,
         }
     }
 
@@ -162,6 +194,67 @@ impl AttentionMetadata {
     /// Total number of tokens (prefill + decode).
     pub fn num_tokens(&self) -> usize {
         self.num_prefill_tokens + self.num_decode_tokens
+    }
+
+    /// Detect the number of common prefix blocks shared by all sequences.
+    ///
+    /// Compares block tables across all sequences. The common prefix count
+    /// is the number of leading blocks that are identical across all sequences.
+    /// This can be used by attention kernels to skip recomputing the prefix.
+    pub fn detect_common_prefix_blocks(&mut self) {
+        if self.block_tables.is_empty() || self.block_tables.len() < 2 {
+            self.common_prefix_blocks = 0;
+            return;
+        }
+
+        let first = &self.block_tables[0];
+        let mut common = first.len();
+
+        for bt in self.block_tables[1..].iter() {
+            let mut count = 0;
+            for (a, b) in first.iter().zip(bt.iter()) {
+                if a == b {
+                    count += 1;
+                } else {
+                    break;
+                }
+            }
+            common = common.min(count);
+        }
+
+        self.common_prefix_blocks = common;
+    }
+
+    /// Compute a sliding window mask for the attention computation.
+    ///
+    /// Returns a tuple of `(start_positions, end_positions)` for each sequence
+    /// indicating the range of KV positions to attend to.
+    /// When `sliding_window` is `None`, the full range is returned.
+    pub fn sliding_window_ranges(&self) -> Vec<(u32, u32)> {
+        let window = match self.sliding_window {
+            Some(w) => w as u32,
+            None => return self.seq_lens.iter().map(|&len| (0, len)).collect(),
+        };
+
+        self.seq_lens
+            .iter()
+            .map(|&len| {
+                if len <= window {
+                    (0, len)
+                } else {
+                    (len - window, len)
+                }
+            })
+            .collect()
+    }
+
+    /// Number of tokens that are within the sliding window for each sequence.
+    /// Returns 0 for all sequences when no sliding window is configured.
+    pub fn num_window_tokens(&self) -> usize {
+        match self.sliding_window {
+            Some(w) => self.seq_lens.iter().map(|&len| (len as usize).min(w)).sum(),
+            None => self.seq_lens.iter().map(|&len| len as usize).sum(),
+        }
     }
 }
 
@@ -614,6 +707,115 @@ mod tests {
     fn metadata_new() {
         let meta = AttentionMetadata::new();
         assert_eq!(meta.query_start_loc, vec![0]);
+    }
+
+    #[test]
+    fn detect_common_prefix_blocks_empty() {
+        let meta = AttentionMetadata::new();
+        let mut m = meta.clone();
+        m.detect_common_prefix_blocks();
+        assert_eq!(m.common_prefix_blocks, 0);
+    }
+
+    #[test]
+    fn detect_common_prefix_blocks_single_seq() {
+        let meta = AttentionMetadata::for_decode(
+            vec![10],
+            vec![vec![0, 1, 2]],
+            3,
+        );
+        let mut m = meta;
+        m.detect_common_prefix_blocks();
+        assert_eq!(m.common_prefix_blocks, 0);
+    }
+
+    #[test]
+    fn detect_common_prefix_blocks_shared() {
+        let meta = AttentionMetadata::for_decode(
+            vec![16, 16],
+            vec![vec![0, 1, 2], vec![0, 1, 3]],
+            3,
+        );
+        let mut m = meta;
+        m.detect_common_prefix_blocks();
+        // First two blocks (0, 1) are shared
+        assert_eq!(m.common_prefix_blocks, 2);
+    }
+
+    #[test]
+    fn detect_common_prefix_blocks_none_shared() {
+        let meta = AttentionMetadata::for_decode(
+            vec![16, 16],
+            vec![vec![0, 1], vec![5, 6]],
+            2,
+        );
+        let mut m = meta;
+        m.detect_common_prefix_blocks();
+        assert_eq!(m.common_prefix_blocks, 0);
+    }
+
+    #[test]
+    fn test_sliding_window_ranges_none() {
+        let meta = AttentionMetadata::for_decode(
+            vec![10, 20],
+            vec![vec![0], vec![1]],
+            1,
+        );
+        let ranges = meta.sliding_window_ranges();
+        assert_eq!(ranges, vec![(0, 10), (0, 20)]);
+    }
+
+    #[test]
+    fn test_sliding_window_ranges_with_window() {
+        let mut meta = AttentionMetadata::for_decode(
+            vec![10, 200, 50],
+            vec![vec![0], vec![1], vec![2]],
+            1,
+        );
+        meta.sliding_window = Some(64);
+        let ranges = meta.sliding_window_ranges();
+        // seq 0: len=10 <= 64, full range (0, 10)
+        assert_eq!(ranges[0], (0, 10));
+        // seq 1: len=200 > 64, last 64 tokens (136, 200)
+        assert_eq!(ranges[1], (136, 200));
+        // seq 2: len=50 <= 64, full range (0, 50)
+        assert_eq!(ranges[2], (0, 50));
+    }
+
+    #[test]
+    fn test_num_window_tokens() {
+        let mut meta = AttentionMetadata::for_decode(
+            vec![10, 200, 50],
+            vec![vec![0], vec![1], vec![2]],
+            1,
+        );
+        meta.sliding_window = Some(64);
+        // windowed: min(10,64) + min(200,64) + min(50,64) = 10 + 64 + 50 = 124
+        assert_eq!(meta.num_window_tokens(), 124);
+    }
+
+    #[test]
+    fn test_num_window_tokens_no_window() {
+        let meta = AttentionMetadata::for_decode(
+            vec![10, 200, 50],
+            vec![vec![0], vec![1], vec![2]],
+            1,
+        );
+        // without window: sum of all lengths
+        assert_eq!(meta.num_window_tokens(), 260);
+    }
+
+    #[test]
+    fn test_for_decode_with_options() {
+        let meta = AttentionMetadata::for_decode_with_options(
+            vec![10],
+            vec![vec![0, 1]],
+            2,
+            1,
+            Some(32),
+        );
+        assert_eq!(meta.common_prefix_blocks, 1);
+        assert_eq!(meta.sliding_window, Some(32));
     }
 
     #[cfg(not(has_cuda))]

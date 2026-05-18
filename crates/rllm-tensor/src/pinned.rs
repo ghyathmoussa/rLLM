@@ -1,5 +1,7 @@
 use std::alloc::{self, Layout};
 use std::ptr::NonNull;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 /// Page-locked ("pinned") host buffer for async CPU/GPU transfers.
 ///
@@ -16,8 +18,8 @@ impl PinnedBuffer {
     ///
     /// The memory is zero-initialized.
     pub fn alloc(bytes: usize) -> Self {
-        let layout = Layout::from_size_align(bytes.max(1), 64)
-            .expect("invalid pinned buffer layout");
+        let layout =
+            Layout::from_size_align(bytes.max(1), 64).expect("invalid pinned buffer layout");
         let ptr = Self::alloc_impl(layout);
         // Safety: we own the allocation and it's valid for layout.size() bytes.
         unsafe {
@@ -74,6 +76,24 @@ impl PinnedBuffer {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut T, count) }
     }
 
+    /// Copy typed values into the pinned buffer.
+    pub fn copy_from_slice<T: Copy>(&mut self, values: &[T]) {
+        let bytes = std::mem::size_of_val(values);
+        assert!(
+            bytes <= self.len(),
+            "pinned buffer too small: need {bytes} bytes, have {}",
+            self.len()
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, self.as_mut_ptr(), bytes);
+        }
+    }
+
+    /// Read typed values from the pinned buffer into a Vec.
+    pub fn read_to_vec<T: Copy>(&self, count: usize) -> Vec<T> {
+        unsafe { self.as_slice::<T>(count).to_vec() }
+    }
+
     #[cfg(not(feature = "cuda"))]
     fn alloc_impl(layout: Layout) -> NonNull<u8> {
         // Safety: Layout is valid (checked above), alloc returns null on failure.
@@ -113,6 +133,35 @@ impl Drop for PinnedBuffer {
 unsafe impl Send for PinnedBuffer {}
 unsafe impl Sync for PinnedBuffer {}
 
+/// Host-side completion handle for a token copy staged through pinned memory.
+pub struct AsyncPinnedCopy<T> {
+    receiver: Receiver<Vec<T>>,
+}
+
+impl<T> AsyncPinnedCopy<T> {
+    /// Wait for the copy to complete and return the staged values.
+    pub fn wait(self) -> Vec<T> {
+        self.receiver.recv().expect("async pinned copy worker terminated unexpectedly")
+    }
+}
+
+/// Stage token IDs through pinned memory on a background host thread.
+///
+/// CUDA builds can replace the worker body with `cudaMemcpyAsync` plus a stream
+/// synchronization; the public contract already models completion separately
+/// from launch so callers can overlap CPU output processing with GPU execution.
+pub fn async_copy_token_ids(token_ids: &[u32]) -> AsyncPinnedCopy<u32> {
+    let mut pinned = PinnedBuffer::alloc_typed::<u32>(token_ids.len().max(1));
+    pinned.copy_from_slice(token_ids);
+    let count = token_ids.len();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let copied = pinned.read_to_vec::<u32>(count);
+        let _ = sender.send(copied);
+    });
+    AsyncPinnedCopy { receiver }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +199,18 @@ mod tests {
         slice.copy_from_slice(&[1.0f32, 2.0, 3.0, 4.0]);
         let read = unsafe { buf.as_slice::<f32>(4) };
         assert_eq!(read, &[1.0f32, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn copy_helpers_roundtrip() {
+        let mut buf = PinnedBuffer::alloc_typed::<u32>(3);
+        buf.copy_from_slice(&[7, 8, 9]);
+        assert_eq!(buf.read_to_vec::<u32>(3), vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn async_token_copy_roundtrip() {
+        let handle = async_copy_token_ids(&[11, 12, 13]);
+        assert_eq!(handle.wait(), vec![11, 12, 13]);
     }
 }

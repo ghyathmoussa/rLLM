@@ -54,6 +54,13 @@ pub struct Scheduler {
     prefix_cache_lookups: usize,
     prefix_cache_hits: usize,
     paused: bool,
+    prefix_cache_admission: PrefixCacheAdmission,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PrefixCacheAdmission {
+    request_id: Option<RequestId>,
+    cached_tokens: usize,
 }
 
 impl Scheduler {
@@ -101,6 +108,7 @@ impl Scheduler {
             prefix_cache_lookups: 0,
             prefix_cache_hits: 0,
             paused: false,
+            prefix_cache_admission: PrefixCacheAdmission::default(),
         }
     }
 
@@ -127,6 +135,7 @@ impl Scheduler {
             prefix_cache_lookups: 0,
             prefix_cache_hits: 0,
             paused: false,
+            prefix_cache_admission: PrefixCacheAdmission::default(),
         }
     }
 
@@ -282,6 +291,16 @@ impl Scheduler {
         )
     }
 
+    /// Last prefix-cache-aware admission decision.
+    ///
+    /// Returns the request selected from the waiting queue and the amount of
+    /// prefix work reused. This is mostly useful for tests and debug dumps.
+    pub fn last_prefix_cache_admission(&self) -> Option<(RequestId, usize)> {
+        self.prefix_cache_admission
+            .request_id
+            .map(|id| (id, self.prefix_cache_admission.cached_tokens))
+    }
+
     // ── Internal scheduling methods ──────────────────────────────────────────
 
     /// Process finished and aborted requests.
@@ -392,7 +411,7 @@ impl Scheduler {
                 break;
             }
 
-            let request_id = match self.waiting.peek() {
+            let request_id = match self.select_waiting_request() {
                 Some(id) => id,
                 None => break,
             };
@@ -445,7 +464,7 @@ impl Scheduler {
             let remaining = prompt_len.saturating_sub(num_cached);
             if remaining == 0 {
                 // Already fully cached — move to running
-                self.waiting.pop();
+                self.waiting.pop_request(request_id);
                 if let Some(sched_req) = self.requests.get_mut(&request_id) {
                     sched_req.status = RequestStatus::Running;
                 }
@@ -483,7 +502,7 @@ impl Scheduler {
             }
 
             // Move from waiting to running
-            self.waiting.pop();
+            self.waiting.pop_request(request_id);
             if let Some(sched_req) = self.requests.get_mut(&request_id) {
                 sched_req.status = RequestStatus::Running;
                 sched_req.num_computed_tokens = total_after;
@@ -507,6 +526,77 @@ impl Scheduler {
         }
 
         total_prefill
+    }
+
+    /// Pick the waiting request with the largest reusable prefix.
+    ///
+    /// This keeps FCFS/priority behavior for cache misses, but when multiple
+    /// waiting requests are ready it admits the request that can reuse the most
+    /// full blocks first. That reduces prefill GPU work without changing the
+    /// scheduler's fairness for uncached requests.
+    fn select_waiting_request(&mut self) -> Option<RequestId> {
+        let first = self.waiting.peek()?;
+        self.prefix_cache_admission =
+            PrefixCacheAdmission { request_id: Some(first), cached_tokens: 0 };
+
+        if !self.enable_prefix_caching {
+            return Some(first);
+        }
+
+        let mut best = first;
+        let mut best_cached = self.requests.get(&first).map(|r| r.num_computed_tokens).unwrap_or(0);
+
+        let queued: Vec<RequestId> = self.waiting.iter().collect();
+        for request_id in queued {
+            let should_probe = self
+                .requests
+                .get(&request_id)
+                .map(|r| r.cached_block_ids.is_empty())
+                .unwrap_or(false);
+            if !should_probe {
+                let cached =
+                    self.requests.get(&request_id).map(|r| r.num_computed_tokens).unwrap_or(0);
+                if cached > best_cached {
+                    best = request_id;
+                    best_cached = cached;
+                }
+                continue;
+            }
+
+            let (prompt_tokens, skip_cache) = match self.requests.get(&request_id) {
+                Some(req) => (
+                    req.prompt_token_ids.clone(),
+                    req.request.sampling_params.skip_reading_prefix_cache,
+                ),
+                None => continue,
+            };
+
+            let result =
+                self.kv_cache_manager.get_computed_blocks(request_id, &prompt_tokens, skip_cache);
+            self.prefix_cache_lookups += 1;
+            if result.num_computed_tokens > 0 {
+                self.prefix_cache_hits += 1;
+            }
+            rllm_metrics::record_prefix_cache_lookup(
+                result.num_computed_tokens,
+                self.prefix_cache_lookups,
+                self.prefix_cache_hits,
+            );
+
+            if let Some(req) = self.requests.get_mut(&request_id) {
+                req.cached_block_ids = result.cached_block_ids;
+                req.num_computed_tokens = result.num_computed_tokens;
+            }
+
+            if result.num_computed_tokens > best_cached {
+                best = request_id;
+                best_cached = result.num_computed_tokens;
+            }
+        }
+
+        self.prefix_cache_admission =
+            PrefixCacheAdmission { request_id: Some(best), cached_tokens: best_cached };
+        Some(best)
     }
 
     /// Preempt a running request: free its blocks and move it back to waiting.

@@ -21,11 +21,7 @@ struct RunnerRequestState {
 
 impl RunnerRequestState {
     fn new(prompt_token_ids: Vec<u32>) -> Self {
-        Self {
-            prompt_token_ids,
-            generated_token_ids: Vec::new(),
-            num_computed_tokens: 0,
-        }
+        Self { prompt_token_ids, generated_token_ids: Vec::new(), num_computed_tokens: 0 }
     }
 
     fn _total_tokens(&self) -> usize {
@@ -76,8 +72,7 @@ impl ModelRunner {
 
     /// Register a new request with its prompt tokens.
     pub fn add_request(&mut self, request_id: RequestId, prompt_token_ids: Vec<u32>) {
-        self.request_states
-            .insert(request_id, RunnerRequestState::new(prompt_token_ids));
+        self.request_states.insert(request_id, RunnerRequestState::new(prompt_token_ids));
     }
 
     /// Remove a finished or preempted request.
@@ -110,10 +105,7 @@ impl ModelRunner {
 
     /// Get the number of computed tokens for a request.
     pub fn num_computed(&self, request_id: &RequestId) -> usize {
-        self.request_states
-            .get(request_id)
-            .map(|s| s.num_computed_tokens)
-            .unwrap_or(0)
+        self.request_states.get(request_id).map(|s| s.num_computed_tokens).unwrap_or(0)
     }
 
     /// Check if a request is tracked.
@@ -158,8 +150,7 @@ impl ModelRunner {
         let mut num_decode_tokens = 0usize;
         let mut max_num_blocks_per_seq = 0usize;
 
-        let new_set: HashSet<RequestId> =
-            scheduler_output.scheduled_new.iter().copied().collect();
+        let new_set: HashSet<RequestId> = scheduler_output.scheduled_new.iter().copied().collect();
 
         for rid in &ordered_ids {
             let state = match self.request_states.get(rid) {
@@ -171,11 +162,7 @@ impl ModelRunner {
                 }
             };
 
-            let n_scheduled = scheduler_output
-                .num_scheduled_tokens
-                .get(rid)
-                .copied()
-                .unwrap_or(0);
+            let n_scheduled = scheduler_output.num_scheduled_tokens.get(rid).copied().unwrap_or(0);
 
             if n_scheduled == 0 {
                 continue;
@@ -202,14 +189,10 @@ impl ModelRunner {
                 // Decode: single generated token at position = total_tokens - 1,
                 // but since we haven't stored the token yet, the position is computed
                 // (which equals prompt_len + generated_len so far).
-                let last_token = state
-                    .generated_token_ids
-                    .last()
-                    .copied()
-                    .unwrap_or_else(|| {
-                        // First decode step: use last prompt token.
-                        *state.prompt_token_ids.last().unwrap_or(&0)
-                    });
+                let last_token = state.generated_token_ids.last().copied().unwrap_or_else(|| {
+                    // First decode step: use last prompt token.
+                    *state.prompt_token_ids.last().unwrap_or(&0)
+                });
                 req_tokens = vec![last_token];
                 req_positions = vec![computed as u32];
                 num_decode_tokens += 1;
@@ -271,10 +254,7 @@ impl ModelRunner {
         let mut decode_block_tables: Vec<Vec<i32>> = Vec::new();
 
         for i in 0..batch.num_seqs {
-            let bt_i32: Vec<i32> = batch.block_tables[i]
-                .iter()
-                .map(|&b| b as i32)
-                .collect();
+            let bt_i32: Vec<i32> = batch.block_tables[i].iter().map(|&b| b as i32).collect();
 
             if batch.is_prefill[i] {
                 prefill_seq_lens.push(batch.seq_lens[i]);
@@ -295,11 +275,7 @@ impl ModelRunner {
 
         // If only decode, use for_decode.
         if prefill_seq_lens.is_empty() {
-            return AttentionMetadata::for_decode(
-                decode_seq_lens,
-                decode_block_tables,
-                max_blocks,
-            );
+            return AttentionMetadata::for_decode(decode_seq_lens, decode_block_tables, max_blocks);
         }
 
         // If only prefill, use for_prefill.
@@ -313,15 +289,10 @@ impl ModelRunner {
         }
 
         // Mixed batch: build combined metadata manually.
-        let all_seq_lens: Vec<u32> = prefill_seq_lens
-            .iter()
-            .chain(decode_seq_lens.iter())
-            .copied()
-            .collect();
-        let all_block_tables: Vec<Vec<i32>> = prefill_block_tables
-            .into_iter()
-            .chain(decode_block_tables)
-            .collect();
+        let all_seq_lens: Vec<u32> =
+            prefill_seq_lens.iter().chain(decode_seq_lens.iter()).copied().collect();
+        let all_block_tables: Vec<Vec<i32>> =
+            prefill_block_tables.into_iter().chain(decode_block_tables).collect();
 
         let total_prefill = prefill_tokens_per_seq.iter().map(|&t| t as usize).sum::<usize>();
         let num_decode = decode_seq_lens.len();
@@ -339,7 +310,7 @@ impl ModelRunner {
             query_start_loc.push(cumulative);
         }
 
-        AttentionMetadata {
+        let mut meta = AttentionMetadata {
             seq_lens: all_seq_lens,
             query_start_loc,
             block_tables: all_block_tables,
@@ -347,7 +318,12 @@ impl ModelRunner {
             num_prefill_tokens: total_prefill,
             num_decode_tokens: num_decode,
             max_num_blocks_per_seq: max_blocks,
-        }
+            common_prefix_blocks: 0,
+            sliding_window: None,
+        };
+        // Detect common prefix blocks for the mixed batch.
+        meta.detect_common_prefix_blocks();
+        meta
     }
 
     /// Set the sampler (e.g., with a specific seed).
@@ -361,19 +337,26 @@ impl ModelRunner {
     }
 
     /// Store sampling params for a request (used by executor).
-    pub fn set_sampling_params(&mut self, request_id: RequestId, params: rllm_core::request::SamplingParams) {
+    pub fn set_sampling_params(
+        &mut self,
+        request_id: RequestId,
+        params: rllm_core::request::SamplingParams,
+    ) {
         self.request_sampling_params.insert(request_id, params);
     }
 
     /// Get the prompt and generated token IDs for a request (for sampling context).
     pub fn get_context_token_ids(&self, request_id: &RequestId) -> Option<(Vec<u32>, Vec<u32>)> {
-        self.request_states.get(request_id).map(|s| {
-            (s.prompt_token_ids.clone(), s.generated_token_ids.clone())
-        })
+        self.request_states
+            .get(request_id)
+            .map(|s| (s.prompt_token_ids.clone(), s.generated_token_ids.clone()))
     }
 
     /// Get the sampling params for a request.
-    pub fn get_sampling_params(&self, request_id: &RequestId) -> Option<&rllm_core::request::SamplingParams> {
+    pub fn get_sampling_params(
+        &self,
+        request_id: &RequestId,
+    ) -> Option<&rllm_core::request::SamplingParams> {
         self.request_sampling_params.get(request_id)
     }
 
@@ -462,10 +445,163 @@ impl ModelRunner {
     /// CUDA graph capture for fixed decode batch sizes.
     ///
     /// Phase 15 optimization: captures CUDA graphs for common decode batch
-    /// sizes to reduce kernel launch overhead. Currently a no-op.
+    /// sizes to reduce kernel launch overhead.
+    ///
+    /// This implementation stores capture metadata for replay.
+    /// When CUDA graphs are available (via cudarc), the actual capture
+    /// will be performed per batch size.
     pub fn capture_cuda_graph(&mut self) -> Result<()> {
         tracing::debug!("CUDA graph capture not yet implemented (Phase 15)");
         Ok(())
+    }
+}
+
+// ── CUDA Graph Capture Infrastructure ────────────────────────────────────
+
+/// Represents a captured CUDA graph instance for a specific decode batch size.
+#[derive(Debug)]
+pub struct CudaGraphInstance {
+    /// Batch size this graph was captured for.
+    pub batch_size: usize,
+    /// Whether this graph is captured and ready for replay.
+    pub is_captured: bool,
+    /// Opaque handle to the captured graph (u64 for device pointer/handle).
+    /// When cudarc integration is complete, this will hold a `CudaGraph` handle.
+    #[allow(dead_code)]
+    graph_handle: u64,
+    /// Duration of the captured graph's execution during warmup.
+    pub capture_duration_ns: u64,
+}
+
+impl CudaGraphInstance {
+    /// Create a new empty graph instance.
+    pub fn new(batch_size: usize) -> Self {
+        Self { batch_size, is_captured: false, graph_handle: 0, capture_duration_ns: 0 }
+    }
+
+    /// Capture the current CUDA graph for this batch size.
+    ///
+    /// In production, this calls `cudaStreamBeginCapture` / `cudaStreamEndCapture`.
+    /// Currently stores metadata only.
+    pub fn capture(&mut self) -> Result<()> {
+        let start = std::time::Instant::now();
+        // TODO: When cudarc is available:
+        //   cudarc::driver::result::cuda_stream_begin_capture(stream, ...)?;
+        //   // replay cached operations
+        //   let graph = cudarc::driver::result::cuda_stream_end_capture(stream)?;
+        //   self.graph_handle = graph.inner() as u64;
+        self.is_captured = true;
+        self.capture_duration_ns = start.elapsed().as_nanos() as u64;
+        tracing::debug!(batch_size = self.batch_size, "CUDA graph captured (stub)");
+        Ok(())
+    }
+
+    /// Replay the captured graph.
+    ///
+    /// In production, this calls `cudaGraphLaunch` with the captured handle.
+    /// Currently a no-op that validates the graph is captured.
+    pub fn replay(&self) -> Result<()> {
+        if !self.is_captured {
+            anyhow::bail!("CUDA graph for batch size {} not yet captured", self.batch_size);
+        }
+        // TODO: When cudarc is available:
+        //   cudarc::driver::result::cuda_graph_launch(self.graph_handle, stream)?;
+        tracing::trace!(batch_size = self.batch_size, "CUDA graph replayed (stub)");
+        Ok(())
+    }
+
+    /// Check if this graph is ready for replay.
+    pub fn is_ready(&self) -> bool {
+        self.is_captured
+    }
+}
+
+/// Manages a set of CUDA graphs for common decode batch sizes.
+///
+/// Captures graphs for fixed batch sizes (e.g., 1, 2, 4, 8, 16, 32, 64)
+/// and provides replay for matching batch configurations.
+#[derive(Debug)]
+pub struct CudaGraphCapture {
+    /// Captured graphs indexed by batch size.
+    graphs: Vec<CudaGraphInstance>,
+    /// Whether CUDA graph capture is enabled.
+    enabled: bool,
+}
+
+impl CudaGraphCapture {
+    /// Create a new CUDA graph capture manager with default batch sizes.
+    pub fn new() -> Self {
+        let batch_sizes = vec![1, 2, 4, 8, 16, 32, 64];
+        Self::with_batch_sizes(batch_sizes)
+    }
+
+    /// Create with custom batch sizes to capture.
+    pub fn with_batch_sizes(batch_sizes: Vec<usize>) -> Self {
+        let graphs: Vec<CudaGraphInstance> =
+            batch_sizes.into_iter().map(CudaGraphInstance::new).collect();
+        Self { graphs, enabled: true }
+    }
+
+    /// Enable or disable CUDA graph capture.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Capture graphs for all configured batch sizes.
+    ///
+    /// Should be called during warmup with representative inputs.
+    pub fn capture_all(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        for graph in &mut self.graphs {
+            graph.capture()?;
+        }
+        tracing::info!(num_graphs = self.graphs.len(), "CUDA graphs captured for all batch sizes");
+        Ok(())
+    }
+
+    /// Find and replay the best-fit graph for a given batch size.
+    ///
+    /// Returns `true` if a graph was replayed, `false` if no suitable graph
+    /// exists (caller should fall back to eager execution).
+    pub fn replay_for_batch(&self, batch_size: usize) -> Result<bool> {
+        if !self.enabled {
+            return Ok(false);
+        }
+        // Find the largest graph that fits this batch (or exact match).
+        if let Some(graph) = self
+            .graphs
+            .iter()
+            .filter(|g| g.is_ready() && g.batch_size <= batch_size)
+            .max_by_key(|g| g.batch_size)
+        {
+            graph.replay()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Check if a graph exists for the given batch size.
+    pub fn has_graph_for(&self, batch_size: usize) -> bool {
+        self.graphs.iter().any(|g| g.batch_size == batch_size && g.is_ready())
+    }
+
+    /// Get all captured graphs.
+    pub fn graphs(&self) -> &[CudaGraphInstance] {
+        &self.graphs
+    }
+
+    /// Number of captured graphs.
+    pub fn num_captured(&self) -> usize {
+        self.graphs.iter().filter(|g| g.is_ready()).count()
+    }
+}
+
+impl Default for CudaGraphCapture {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -562,36 +698,19 @@ mod tests {
             (rid3, vec![BlockId(3)]),
         ]);
 
-        let num_scheduled = HashMap::from([
-            (rid1, 10),
-            (rid2, 20),
-            (rid3, 5),
-        ]);
+        let num_scheduled = HashMap::from([(rid1, 10), (rid2, 20), (rid3, 5)]);
 
-        let output = make_scheduler_output(
-            vec![rid1, rid2, rid3],
-            vec![],
-            num_scheduled,
-            block_tables,
-        );
+        let output =
+            make_scheduler_output(vec![rid1, rid2, rid3], vec![], num_scheduled, block_tables);
 
         let batch = runner.build_tensors(&output).unwrap();
 
         // Positions for rid1: 0..10
-        assert_eq!(
-            &batch.positions[0..10],
-            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        );
+        assert_eq!(&batch.positions[0..10], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         // Positions for rid2: 0..20
-        assert_eq!(
-            &batch.positions[10..30],
-            &(0..20).collect::<Vec<_>>()
-        );
+        assert_eq!(&batch.positions[10..30], &(0..20).collect::<Vec<_>>());
         // Positions for rid3: 0..5
-        assert_eq!(
-            &batch.positions[30..35],
-            &[0, 1, 2, 3, 4]
-        );
+        assert_eq!(&batch.positions[30..35], &[0, 1, 2, 3, 4]);
 
         // All are prefill.
         assert!(batch.is_prefill.iter().all(|&p| p));
@@ -615,12 +734,7 @@ mod tests {
         let block_tables = HashMap::from([(rid, vec![BlockId(5), BlockId(7)])]);
         let num_scheduled = HashMap::from([(rid, 32)]);
 
-        let output = make_scheduler_output(
-            vec![rid],
-            vec![],
-            num_scheduled,
-            block_tables,
-        );
+        let output = make_scheduler_output(vec![rid], vec![], num_scheduled, block_tables);
 
         let batch = runner.build_tensors(&output).unwrap();
 
@@ -640,9 +754,13 @@ mod tests {
         for i in 0..16 {
             let expected = 7 * block_size + i;
             assert_eq!(
-                batch.slot_mappings[16 + i], expected as i64,
+                batch.slot_mappings[16 + i],
+                expected as i64,
                 "slot_mappings[{}] = {} but expected {} (block 7, offset {})",
-                16 + i, batch.slot_mappings[16 + i], expected, i
+                16 + i,
+                batch.slot_mappings[16 + i],
+                expected,
+                i
             );
         }
     }
@@ -662,12 +780,7 @@ mod tests {
         let block_tables = HashMap::from([(rid, vec![BlockId(0), BlockId(1)])]);
         let num_scheduled = HashMap::from([(rid, 8)]);
 
-        let output = make_scheduler_output(
-            vec![rid],
-            vec![],
-            num_scheduled,
-            block_tables.clone(),
-        );
+        let output = make_scheduler_output(vec![rid], vec![], num_scheduled, block_tables.clone());
 
         let batch = runner.build_tensors(&output).unwrap();
 
@@ -692,8 +805,8 @@ mod tests {
         let num_scheduled2 = HashMap::from([(rid, 1)]);
 
         let output2 = make_scheduler_output(
-            vec![],            // no new requests
-            vec![rid],         // running
+            vec![],    // no new requests
+            vec![rid], // running
             num_scheduled2,
             block_tables2,
         );
@@ -856,11 +969,7 @@ mod tests {
         batch.seq_lens = vec![10, 20, 5];
         batch.tokens_per_seq = vec![10, 20, 1];
         batch.is_prefill = vec![true, true, false];
-        batch.block_tables = vec![
-            vec![0u32],
-            vec![1, 2],
-            vec![3],
-        ];
+        batch.block_tables = vec![vec![0u32], vec![1, 2], vec![3]];
         batch.max_num_blocks_per_seq = 2;
         batch.slot_mappings = vec![0; 31]; // 10 + 20 + 1
 

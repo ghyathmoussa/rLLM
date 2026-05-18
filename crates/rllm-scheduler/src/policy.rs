@@ -57,6 +57,11 @@ impl RequestQueue {
         self.entries.shift_remove(&request_id).is_some()
     }
 
+    /// Pop a specific request while preserving the order of the remaining queue.
+    pub fn pop_request(&mut self, request_id: RequestId) -> Option<RequestId> {
+        self.entries.shift_remove(&request_id).map(|_| request_id)
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

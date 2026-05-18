@@ -29,3 +29,7 @@ tokio-stream.workspace = true
 clap.workspace = true
 uuid.workspace = true
 metrics-exporter-prometheus.workspace = true
+
+[dev-dependencies]
+rllm-metrics.workspace = true
+tower.workspace = true

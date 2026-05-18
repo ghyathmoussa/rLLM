@@ -204,6 +204,115 @@ fn acceptance_metrics_recorder() {
     rllm_metrics::gauge!("rllm_test_gauge").set(42.0);
 }
 
+/// Acceptance: engine serves one Llama-compatible model configuration.
+///
+/// Verifies the full pipeline accepts a Llama-compatible config:
+/// scheduler -> executor -> sampler -> engine works end-to-end
+/// with standard Llama dimensions.
+#[test]
+fn acceptance_llama_compatible_model() {
+    let config = MockExecutorConfig {
+        mode: MockMode::Deterministic { offset: 0 },
+        vocab_size: 32000,
+        eos_token_id: 2,
+        sampler_seed: Some(42),
+    };
+    let mock = MockExecutor::new(config);
+    let scheduler = make_test_scheduler(16, 4096, 64, 8192);
+    let core = EngineCore::new(Box::new(mock), scheduler, 2);
+    let mut engine = LLMEngine::new(core);
+
+    // Llama-compatible request with standard dimensions.
+    let req = make_inference_request(128, 32);
+    engine.add_request(req).unwrap();
+
+    let outputs = engine.generate(vec![]).unwrap();
+    assert_eq!(outputs.len(), 1, "Should produce exactly one output");
+    assert!(outputs[0].finished, "Output should be finished");
+    assert!(
+        outputs[0].usage.completion_tokens > 0,
+        "Should generate completion tokens"
+    );
+    assert!(
+        outputs[0].usage.completion_tokens <= 32,
+        "Completion tokens should not exceed max_tokens"
+    );
+}
+
+/// Acceptance: OpenAI-compatible chat completion conversion works.
+///
+/// Verifies the request/response types roundtrip and conversion
+/// to internal SamplingParams works correctly.
+#[test]
+fn acceptance_openai_chat_completion() {
+    use rllm_core::output::FinishReason;
+    use rllm_core::output::RequestOutput;
+    use rllm_core::output::CompletionOutput;
+    use rllm_core::ids::RequestId;
+
+    // Create a sample ChatCompletionRequest and convert to SamplingParams.
+    let chat_req = rllm_server::openai::ChatCompletionRequest {
+        model: "llama-2-7b".into(),
+        messages: vec![
+            rllm_server::openai::ChatMessage { role: "user".into(), content: "Hello!".into() },
+        ],
+        temperature: Some(0.7),
+        top_p: Some(0.9),
+        max_tokens: Some(100),
+        stream: Some(false),
+        stop: Some(rllm_server::openai::StopSequence::Single("\n".into())),
+        n: Some(1),
+        logprobs: Some(true),
+        top_logprobs: Some(5),
+        presence_penalty: Some(0.1),
+        frequency_penalty: Some(0.1),
+        seed: Some(42),
+    };
+
+    let params = rllm_server::openai::chat_request_to_sampling_params(&chat_req);
+    assert_eq!(params.temperature, 0.7);
+    assert_eq!(params.top_p, 0.9);
+    assert_eq!(params.max_tokens, Some(100));
+    assert_eq!(params.presence_penalty, 0.1);
+    assert!(!params.stop.is_empty());
+
+    // Create a sample RequestOutput and convert to ChatCompletionResponse.
+    let output = RequestOutput {
+        request_id: RequestId::new(),
+        outputs: vec![CompletionOutput {
+            index: 0,
+            text: "Hello! How can I help you?".into(),
+            token_ids: vec![1, 2, 3, 4, 5],
+            finish_reason: Some(FinishReason::Stop),
+            logprobs: None,
+        }],
+        finished: true,
+        usage: rllm_core::output::Usage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+        },
+    };
+
+    let response = rllm_server::openai::request_output_to_chat_completion(&output, "llama-2-7b");
+    assert_eq!(response.object, "chat.completion");
+    assert_eq!(response.model, "llama-2-7b");
+    assert_eq!(response.choices.len(), 1);
+    assert_eq!(response.choices[0].message.content, "Hello! How can I help you?");
+    assert_eq!(response.usage.prompt_tokens, 10);
+    assert_eq!(response.usage.completion_tokens, 5);
+
+    // Verify serialization.
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(json.contains("chat.completion"));
+    assert!(json.contains("llama-2-7b"));
+
+    // Verify deserialization roundtrip.
+    let deserialized: rllm_server::openai::ChatCompletionResponse =
+        serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.choices[0].message.content, response.choices[0].message.content);
+}
+
 /// Acceptance: engine generates correct usage statistics.
 #[test]
 fn acceptance_usage_statistics() {

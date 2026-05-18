@@ -85,7 +85,7 @@ pub enum PromptInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionResponse {
     pub id: String,
-    pub object: &'static str,
+    pub object: String,
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChatChoice>,
@@ -108,7 +108,7 @@ pub struct ChatResponseMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionResponse {
     pub id: String,
-    pub object: &'static str,
+    pub object: String,
     pub created: u64,
     pub model: String,
     pub choices: Vec<CompletionChoice>,
@@ -134,7 +134,7 @@ pub struct UsageInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCompletionChunk {
     pub id: String,
-    pub object: &'static str,
+    pub object: String,
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChunkChoice>,
@@ -159,14 +159,14 @@ pub struct ChunkDelta {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelListResponse {
-    pub object: &'static str,
+    pub object: String,
     pub data: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
-    pub object: &'static str,
+    pub object: String,
     pub created: u64,
     pub owned_by: String,
 }
@@ -314,7 +314,7 @@ pub fn request_output_to_chat_completion(
 
     ChatCompletionResponse {
         id,
-        object: "chat.completion",
+        object: "chat.completion".to_string(),
         created,
         model: model.to_string(),
         choices,
@@ -355,7 +355,7 @@ pub fn request_output_to_completion(
 
     CompletionResponse {
         id,
-        object: "text_completion",
+        object: "text_completion".to_string(),
         created,
         model: model.to_string(),
         choices,

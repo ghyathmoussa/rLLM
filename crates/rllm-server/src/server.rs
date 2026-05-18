@@ -40,6 +40,19 @@ impl AppState {
     }
 }
 
+/// Build the router with all routes and middleware.
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
+        .route("/v1/models", get(list_models_handler))
+        .route("/v1/chat/completions", post(chat_completions_handler))
+        .route("/v1/completions", post(completions_handler))
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
 /// Build and run the HTTP server.
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // Install metrics recorder and describe all metrics.
@@ -49,15 +62,7 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let model_name = args.model.clone();
     let state = AppState::new(model_name, metrics_handle);
 
-    let app = Router::new()
-        .route("/health", get(health_handler))
-        .route("/metrics", get(metrics_handler))
-        .route("/v1/models", get(list_models_handler))
-        .route("/v1/chat/completions", post(chat_completions_handler))
-        .route("/v1/completions", post(completions_handler))
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+    let app = build_router(state);
 
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("Listening on {}", addr);
@@ -83,10 +88,10 @@ async fn metrics_handler(State(state): State<AppState>) -> String {
 async fn list_models_handler(State(state): State<AppState>) -> Json<ModelListResponse> {
     let now = now_timestamp();
     Json(ModelListResponse {
-        object: "list",
+        object: "list".to_string(),
         data: vec![ModelInfo {
             id: state.model_name.clone(),
-            object: "model",
+            object: "model".to_string(),
             created: now,
             owned_by: "rllm".to_string(),
         }],
@@ -129,7 +134,7 @@ async fn chat_completions_handler(
             // Initial chunk with role.
             let role_chunk = ChatCompletionChunk {
                 id: id.clone(),
-                object: "chat.completion.chunk",
+                object: "chat.completion.chunk".to_string(),
                 created,
                 model: model.clone(),
                 choices: vec![ChunkChoice {
@@ -149,7 +154,7 @@ async fn chat_completions_handler(
             // For now, send a final chunk.
             let done_chunk = ChatCompletionChunk {
                 id: id.clone(),
-                object: "chat.completion.chunk",
+                object: "chat.completion.chunk".to_string(),
                 created,
                 model: model.clone(),
                 choices: vec![ChunkChoice {
@@ -176,7 +181,7 @@ async fn chat_completions_handler(
     // In production, this would submit to the engine and collect the full output.
     let response = ChatCompletionResponse {
         id: generate_completion_id("chatcmpl"),
-        object: "chat.completion",
+        object: "chat.completion".to_string(),
         created: now_timestamp(),
         model: model.clone(),
         choices: vec![ChatChoice {
@@ -205,7 +210,7 @@ async fn completions_handler(
 
     let response = CompletionResponse {
         id: generate_completion_id("cmpl"),
-        object: "text_completion",
+        object: "text_completion".to_string(),
         created: now_timestamp(),
         model: model.clone(),
         choices: vec![CompletionChoice {

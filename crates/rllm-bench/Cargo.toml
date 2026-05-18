@@ -29,6 +29,7 @@ reqwest.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+rllm-server.workspace = true
 
 [features]
 default = []
