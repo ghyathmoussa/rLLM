@@ -26,4 +26,5 @@ rllm-core.workspace = true
 default = ["cuda"]
 cpu = ["rllm-kernels/cpu", "rllm-tensor/cpu"]
 cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda"]
+candle-backend = ["rllm-model/candle-backend"]
 experimental-tp = []

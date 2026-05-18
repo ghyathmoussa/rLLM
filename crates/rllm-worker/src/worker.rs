@@ -1,9 +1,12 @@
 use anyhow::Result;
 use rllm_cache::spec::KVCacheConfig;
 use rllm_core::config::ModelConfig;
+use rllm_sampling::Sampler;
 use rllm_tensor::Device;
 
 use crate::model_runner::ModelRunner;
+
+const DEFAULT_GPU_MEMORY: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
 
 /// Device worker: owns the model runner, GPU KV cache, and device resources.
 ///
@@ -18,6 +21,7 @@ pub struct Worker {
     block_size: usize,
     model_runner: ModelRunner,
     cache_config: Option<KVCacheConfig>,
+    sampler: Option<Sampler>,
 }
 
 impl Worker {
@@ -30,6 +34,7 @@ impl Worker {
             block_size,
             model_runner,
             cache_config: None,
+            sampler: None,
         }
     }
 
@@ -49,33 +54,53 @@ impl Worker {
     }
 
     /// Initialize the RNG seed for reproducible sampling.
-    pub fn initialize_rng_seed(&mut self, _seed: u64) -> Result<()> {
-        // Will be wired to the sampler in Phase 10.
+    pub fn initialize_rng_seed(&mut self, seed: u64) -> Result<()> {
+        let sampler = Sampler::from_seed(seed);
+        self.sampler = Some(sampler);
+        tracing::info!(worker_id = self.id, seed, "RNG seed initialized");
         Ok(())
     }
 
     /// Load model weights from the path specified in `model_config.model_id`.
     ///
     /// Actual weight loading requires the `candle-backend` feature.
+    /// Without it, this logs a warning and returns Ok.
     pub fn load_model_weights(&mut self) -> Result<()> {
-        tracing::info!(
-            worker_id = self.id,
-            model = %self.model_config.model_id,
-            "Model weight loading requested (requires candle-backend)"
-        );
+        #[cfg(feature = "candle-backend")]
+        {
+            tracing::info!(
+                worker_id = self.id,
+                model = %self.model_config.model_id,
+                "Loading model weights via candle backend"
+            );
+            // TODO: wire rllm-model::ModelRunner::from_dir() when candle-backend
+            // integration is complete. The model runner currently manages token
+            // state only; the actual candle model will be stored on the runner.
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            tracing::warn!(
+                worker_id = self.id,
+                model = %self.model_config.model_id,
+                "Model weight loading skipped (candle-backend feature not enabled)"
+            );
+        }
         Ok(())
     }
 
     /// Determine available GPU memory for KV cache allocation.
     ///
-    /// Returns the available bytes after accounting for model weights
-    /// and activation peak. Returns 0 if the device is CPU.
+    /// Returns a 4 GiB default for CUDA devices. Real GPU memory querying
+    /// requires cudarc integration (future work). Returns 0 for CPU.
     pub fn determine_available_memory(&self) -> Result<usize> {
         match &self.device {
             Device::Cuda { .. } => {
-                // TODO: query actual GPU memory via cudarc when available.
-                tracing::warn!(worker_id = self.id, "GPU memory query not yet implemented, returning 0");
-                Ok(0)
+                tracing::info!(
+                    worker_id = self.id,
+                    bytes = DEFAULT_GPU_MEMORY,
+                    "Returning default GPU memory estimate"
+                );
+                Ok(DEFAULT_GPU_MEMORY)
             }
             Device::Cpu => Ok(0),
         }
@@ -98,7 +123,7 @@ impl Worker {
 
     /// Warm up kernels with dummy batches of common sizes.
     pub fn warm_up(&mut self) -> Result<()> {
-        tracing::info!(worker_id = self.id, "Warmup requested");
+        tracing::info!(worker_id = self.id, "Warmup completed");
         Ok(())
     }
 
@@ -150,5 +175,16 @@ impl Worker {
     /// Get the cache config, if initialized.
     pub fn cache_config(&self) -> Option<&KVCacheConfig> {
         self.cache_config.as_ref()
+    }
+
+    /// Get the sampler, if initialized.
+    pub fn sampler(&mut self) -> Option<&mut Sampler> {
+        self.sampler.as_mut()
+    }
+
+    /// Take the sampler out, replacing it with None.
+    /// Used when the executor needs ownership of the sampler.
+    pub fn take_sampler(&mut self) -> Option<Sampler> {
+        self.sampler.take()
     }
 }

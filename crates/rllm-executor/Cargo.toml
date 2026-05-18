@@ -11,10 +11,12 @@ rllm-core.workspace = true
 rllm-cache.workspace = true
 rllm-worker.workspace = true
 rllm-scheduler.workspace = true
+rllm-sampling.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [features]
 default = []
+candle-backend = ["rllm-worker/candle-backend"]
 experimental-tp = []

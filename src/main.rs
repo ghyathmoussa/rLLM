@@ -1,7 +1,8 @@
 use clap::Parser;
 use rllm_server::Cli;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -19,9 +20,9 @@ fn main() -> anyhow::Result<()> {
                 port = %args.port,
                 "Starting rLLM server"
             );
-            // Server implementation in Phase 12
-            tracing::warn!("Server not yet implemented — see Phase 12");
-            Ok(())
+            rllm_server::server::serve(args).await?;
         }
     }
+
+    Ok(())
 }

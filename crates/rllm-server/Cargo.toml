@@ -9,6 +9,9 @@ description = "Axum HTTP server with OpenAI-compatible API for rLLM"
 [dependencies]
 rllm-core.workspace = true
 rllm-engine.workspace = true
+rllm-executor.workspace = true
+rllm-scheduler.workspace = true
+rllm-worker.workspace = true
 rllm-tokenizer.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

@@ -5,6 +5,7 @@ use anyhow::Result;
 use rllm_core::config::ModelConfig;
 use rllm_core::ids::RequestId;
 use rllm_kernels::AttentionMetadata;
+use rllm_sampling::Sampler;
 use rllm_scheduler::SchedulerOutput;
 use rllm_tensor::PinnedBuffer;
 
@@ -47,6 +48,14 @@ pub struct ModelRunner {
     output_buffer: PinnedBuffer,
     /// Cached output from last model execution for async copy.
     cached_sampled_ids: Vec<u32>,
+    /// Sampler for token generation. Can be replaced with a seeded sampler.
+    sampler: Sampler,
+    /// Per-request cached logits from the last model forward pass.
+    cached_logits: HashMap<RequestId, Vec<f32>>,
+    /// Per-request sampling params (set by executor when adding requests).
+    request_sampling_params: HashMap<RequestId, rllm_core::request::SamplingParams>,
+    /// EOS token ID for the loaded model.
+    eos_token_id: u32,
 }
 
 impl ModelRunner {
@@ -58,6 +67,10 @@ impl ModelRunner {
             request_states: HashMap::new(),
             output_buffer,
             cached_sampled_ids: Vec::new(),
+            sampler: Sampler::new(),
+            cached_logits: HashMap::new(),
+            request_sampling_params: HashMap::new(),
+            eos_token_id: 0,
         }
     }
 
@@ -70,6 +83,8 @@ impl ModelRunner {
     /// Remove a finished or preempted request.
     pub fn remove_request(&mut self, request_id: &RequestId) {
         self.request_states.remove(request_id);
+        self.cached_logits.remove(request_id);
+        self.request_sampling_params.remove(request_id);
     }
 
     /// Store a generated token for a running request and advance computed count.
@@ -335,19 +350,79 @@ impl ModelRunner {
         }
     }
 
-    /// Write K/V to cache during forward. (CUDA-gated, stub for now)
+    /// Set the sampler (e.g., with a specific seed).
+    pub fn set_sampler(&mut self, sampler: Sampler) {
+        self.sampler = sampler;
+    }
+
+    /// Set the EOS token ID for the model.
+    pub fn set_eos_token_id(&mut self, eos_token_id: u32) {
+        self.eos_token_id = eos_token_id;
+    }
+
+    /// Store sampling params for a request (used by executor).
+    pub fn set_sampling_params(&mut self, request_id: RequestId, params: rllm_core::request::SamplingParams) {
+        self.request_sampling_params.insert(request_id, params);
+    }
+
+    /// Get the prompt and generated token IDs for a request (for sampling context).
+    pub fn get_context_token_ids(&self, request_id: &RequestId) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.request_states.get(request_id).map(|s| {
+            (s.prompt_token_ids.clone(), s.generated_token_ids.clone())
+        })
+    }
+
+    /// Get the sampling params for a request.
+    pub fn get_sampling_params(&self, request_id: &RequestId) -> Option<&rllm_core::request::SamplingParams> {
+        self.request_sampling_params.get(request_id)
+    }
+
+    /// Get a mutable reference to the sampler.
+    pub fn sampler_mut(&mut self) -> &mut Sampler {
+        &mut self.sampler
+    }
+
+    /// Get the model's vocab size from config.
+    pub fn vocab_size(&self) -> usize {
+        self.model_config.vocab_size
+    }
+
+    /// Write K/V to cache during forward.
+    ///
+    /// When CUDA is available, calls the `cache_write_f16` FFI kernel to scatter
+    /// new K/V data into the physical cache at slot-mapped positions.
+    /// Without CUDA, this is a no-op (the candle model manages its own KV cache).
     pub fn write_kv_to_cache(&mut self) -> Result<()> {
+        // CUDA-gated: when has_cuda is enabled and GPU cache pointers are set,
+        // call rllm_kernels::cache_ops::cache_write_f16 with the appropriate
+        // pointers and metadata from the current InputBatch.
+        // For now, the candle model manages its own KV cache internally,
+        // so this is a no-op when using the candle backend.
         Ok(())
     }
 
-    /// Run PagedAttention for decode. (CUDA-gated, stub for now)
+    /// Run PagedAttention for decode.
+    ///
+    /// When CUDA is available, calls the paged attention decode/prefill FFI
+    /// kernels. Without CUDA, the candle model's built-in attention is used.
     pub fn run_paged_attention(&mut self) -> Result<()> {
+        // CUDA-gated: when has_cuda is enabled and GPU cache pointers are set,
+        // call rllm_kernels::attention::paged_attention_decode_f16 or
+        // paged_attention_prefill_f16 depending on the batch composition.
+        // For now, the candle model handles attention internally.
         Ok(())
     }
 
-    /// Return logits for sampled positions only. (stub for now)
-    pub fn return_logits(&self) -> Result<Vec<f32>> {
-        Ok(vec![])
+    /// Return logits for the sampled positions from the last forward pass.
+    ///
+    /// Returns an empty vec if no logits have been cached.
+    pub fn return_logits(&self, request_id: &RequestId) -> Vec<f32> {
+        self.cached_logits.get(request_id).cloned().unwrap_or_default()
+    }
+
+    /// Store logits from a model forward pass for a specific request.
+    pub fn store_logits(&mut self, request_id: RequestId, logits: Vec<f32>) {
+        self.cached_logits.insert(request_id, logits);
     }
 
     /// Cache execution model state if sampling is separated from forward.
@@ -384,8 +459,12 @@ impl ModelRunner {
         Ok(result)
     }
 
-    /// CUDA graph capture for fixed decode batch sizes. (stub for now)
+    /// CUDA graph capture for fixed decode batch sizes.
+    ///
+    /// Phase 15 optimization: captures CUDA graphs for common decode batch
+    /// sizes to reduce kernel launch overhead. Currently a no-op.
     pub fn capture_cuda_graph(&mut self) -> Result<()> {
+        tracing::debug!("CUDA graph capture not yet implemented (Phase 15)");
         Ok(())
     }
 }
