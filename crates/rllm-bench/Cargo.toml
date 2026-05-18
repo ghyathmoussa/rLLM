@@ -4,18 +4,43 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Offline and online benchmarks for rLLM"
+description = "Offline and online benchmarks, correctness harness for rLLM"
 
 [dependencies]
 rllm-core.workspace = true
 rllm-engine.workspace = true
+rllm-executor.workspace = true
+rllm-scheduler.workspace = true
+rllm-cache.workspace = true
+rllm-sampling.workspace = true
+rllm-metrics.workspace = true
+rllm-worker.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tokio.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[features]
+default = []
+cuda = ["rllm-kernels/cuda"]
+
+[dependencies.rllm-kernels]
+workspace = true
 
 [[bench]]
 name = "bench_main"
 harness = false
+
+[[bin]]
+name = "rllm-bench"
+path = "src/main.rs"

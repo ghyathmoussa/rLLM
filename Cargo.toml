@@ -105,7 +105,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
 # Benchmarking
-criterion = "0.6"
+criterion = { version = "0.6", features = ["html_reports"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+proptest = "1"
 
 # Hashing
 sha2 = "0.10"

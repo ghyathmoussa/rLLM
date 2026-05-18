@@ -150,8 +150,7 @@ impl EngineCore {
                 // Check stopping conditions.
                 let reached_eos = token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
                 let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
-                let hit_stop_token =
-                    req.sampling_params.stop_token_ids.contains(&token_id);
+                let hit_stop_token = req.sampling_params.stop_token_ids.contains(&token_id);
 
                 if reached_eos || hit_stop_token {
                     Some(FinishReason::Stop)
@@ -202,6 +201,10 @@ impl EngineCore {
             outputs.iter().filter(|o| o.finished).map(|o| o.request_id).collect();
 
         for id in &finished_ids {
+            // Tell the scheduler to stop tracking this request so has_work()
+            // and future step() calls no longer include it.
+            self.scheduler.abort_request(*id);
+
             if let Some(req) = self.requests.remove(id) {
                 // Record e2e latency and finished count.
                 let elapsed = req.arrival_time.elapsed().as_secs_f64();
