@@ -21,7 +21,7 @@ pub struct UniProcExecutor {
 impl UniProcExecutor {
     pub fn new(mut worker: Worker) -> Self {
         let eos_token_id = worker.model_config().vocab_size as u32; // placeholder
-        let sampler = worker.take_sampler().unwrap_or_else(Sampler::new);
+        let sampler = worker.take_sampler().unwrap_or_default();
         Self {
             worker,
             sampler,

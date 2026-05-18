@@ -12,7 +12,7 @@ use crate::engine_core::EngineCore;
 /// Commands sent to the engine background task.
 enum EngineCommand {
     AddRequest {
-        request: InferenceRequest,
+        request: Box<InferenceRequest>,
     },
     AbortRequest {
         request_id: RequestId,
@@ -48,7 +48,7 @@ impl AsyncLLMEngine {
     /// Add a new inference request.
     pub fn add_request(&self, request: InferenceRequest) -> anyhow::Result<()> {
         self.cmd_tx
-            .send(EngineCommand::AddRequest { request })
+            .send(EngineCommand::AddRequest { request: Box::new(request) })
             .map_err(|_| anyhow::anyhow!("Engine task shut down"))?;
         Ok(())
     }
@@ -90,6 +90,7 @@ async fn engine_loop(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 EngineCommand::AddRequest { request } => {
+                    let request = *request;
                     let mut core = core.lock();
                     if let Err(e) = core.add_request(request) {
                         tracing::error!("Failed to add request: {}", e);

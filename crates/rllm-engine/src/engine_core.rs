@@ -12,6 +12,7 @@ struct EngineRequest {
     prompt_token_ids: Vec<u32>,
     generated_token_ids: Vec<u32>,
     sampling_params: SamplingParams,
+    #[expect(dead_code)]
     prompt_text: Option<String>,
     max_tokens: u32,
     /// Arrival time (from the original InferenceRequest) for TTFT/e2e latency.
@@ -21,6 +22,7 @@ struct EngineRequest {
 }
 
 impl EngineRequest {
+    #[expect(dead_code)]
     fn num_tokens(&self) -> usize {
         self.prompt_token_ids.len() + self.generated_token_ids.len()
     }
@@ -149,7 +151,7 @@ impl EngineCore {
                 let reached_eos = token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
                 let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
                 let hit_stop_token =
-                    req.sampling_params.stop_token_ids.iter().any(|&st| st == token_id);
+                    req.sampling_params.stop_token_ids.contains(&token_id);
 
                 if reached_eos || hit_stop_token {
                     Some(FinishReason::Stop)

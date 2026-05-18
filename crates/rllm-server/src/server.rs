@@ -20,6 +20,7 @@ pub struct AppState {
     model_name: String,
     // The engine is behind Arc<AsyncLLMEngine> for sharing across handlers.
     // For now, we store the config info needed for responses.
+    #[expect(dead_code)]
     engine: Arc<AsyncLLMEngineWrapper>,
     /// Prometheus metrics handle for the `/metrics` endpoint.
     metrics_handle: PrometheusHandle,
