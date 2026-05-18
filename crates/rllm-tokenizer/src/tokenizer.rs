@@ -31,14 +31,18 @@ impl Tokenizer {
         tokio::task::spawn_blocking(move || Self::from_model_id(&model_id)).await?
     }
 
+    #[tracing::instrument(skip(self), name = "tokenize")]
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         let encoding = self
             .inner
             .encode(text, add_special_tokens)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(encoding.get_ids().to_vec())
+        let ids = encoding.get_ids().to_vec();
+        tracing::trace!(num_tokens = ids.len(), "tokenize complete");
+        Ok(ids)
     }
 
+    #[tracing::instrument(skip(self, ids), name = "detokenize")]
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let text = self
             .inner

@@ -124,6 +124,7 @@ impl KVCacheManager {
     ///
     /// Returns `Some(new_block_ids)` on success, `None` if insufficient blocks.
     /// On failure, no state is modified.
+    #[tracing::instrument(skip(self), name = "allocate_kv")]
     pub fn allocate_slots(
         &mut self,
         request_id: RequestId,

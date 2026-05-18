@@ -9,6 +9,7 @@ description = "Engine core, sync/async engines, and request lifecycle for rLLM"
 [dependencies]
 rllm-core.workspace = true
 rllm-executor.workspace = true
+rllm-metrics.workspace = true
 rllm-scheduler.workspace = true
 rllm-sampling.workspace = true
 rllm-tokenizer.workspace = true

@@ -8,6 +8,7 @@ description = "Logits processors, sampling, and logprobs for rLLM"
 
 [dependencies]
 rllm-core.workspace = true
+rllm-metrics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

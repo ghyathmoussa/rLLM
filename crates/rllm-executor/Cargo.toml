@@ -9,6 +9,7 @@ description = "Single-process and multi-process executor abstraction for rLLM"
 [dependencies]
 rllm-core.workspace = true
 rllm-cache.workspace = true
+rllm-metrics.workspace = true
 rllm-worker.workspace = true
 rllm-scheduler.workspace = true
 rllm-sampling.workspace = true

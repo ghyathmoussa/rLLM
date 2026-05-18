@@ -14,6 +14,10 @@ struct EngineRequest {
     sampling_params: SamplingParams,
     prompt_text: Option<String>,
     max_tokens: u32,
+    /// Arrival time (from the original InferenceRequest) for TTFT/e2e latency.
+    arrival_time: std::time::Instant,
+    /// Whether the first token has been generated (for TTFT).
+    first_token_generated: bool,
 }
 
 impl EngineRequest {
@@ -36,17 +40,8 @@ pub struct EngineCore {
 }
 
 impl EngineCore {
-    pub fn new(
-        executor: Box<dyn Executor>,
-        scheduler: Scheduler,
-        eos_token_id: u32,
-    ) -> Self {
-        Self {
-            executor,
-            scheduler,
-            requests: HashMap::new(),
-            eos_token_id,
-        }
+    pub fn new(executor: Box<dyn Executor>, scheduler: Scheduler, eos_token_id: u32) -> Self {
+        Self { executor, scheduler, requests: HashMap::new(), eos_token_id }
     }
 
     /// Add a new inference request.
@@ -60,11 +55,7 @@ impl EngineCore {
         let sampling_params = request.sampling_params.clone();
         let prompt_text = request.prompt.clone();
 
-        self.executor.add_request(
-            request_id,
-            token_ids.clone(),
-            sampling_params.clone(),
-        );
+        self.executor.add_request(request_id, token_ids.clone(), sampling_params.clone());
 
         let engine_req = EngineRequest {
             prompt_token_ids: token_ids,
@@ -72,10 +63,14 @@ impl EngineCore {
             sampling_params,
             prompt_text,
             max_tokens,
+            arrival_time: request.arrival_time,
+            first_token_generated: false,
         };
 
         self.requests.insert(request_id, engine_req);
         self.scheduler.add_request(request);
+
+        rllm_metrics::counter!("rllm_requests_total").increment(1);
 
         Ok(())
     }
@@ -88,6 +83,7 @@ impl EngineCore {
 
     /// Run one engine step. Returns outputs for requests that produced tokens
     /// this step, including any that have finished.
+    #[tracing::instrument(skip_all, name = "engine_step")]
     pub fn step(&mut self) -> Vec<RequestOutput> {
         // 1. Schedule.
         let scheduler_output = self.scheduler.step();
@@ -101,9 +97,29 @@ impl EngineCore {
             Ok(output) => output,
             Err(e) => {
                 tracing::error!("Executor error: {}", e);
+                tracing::debug!(
+                    "{}",
+                    rllm_metrics::debug_scheduler_output_dump(
+                        scheduler_output.scheduled_new.len(),
+                        scheduler_output.scheduled_cached.len(),
+                        scheduler_output.scheduled_running.len(),
+                        scheduler_output.token_budget_used,
+                        scheduler_output.preempted.len(),
+                        scheduler_output.finished.len(),
+                    )
+                );
+                tracing::debug!(
+                    "{}",
+                    self.scheduler.debug_request_state_summary(scheduler_output.finished.len())
+                );
+                tracing::debug!("{}", self.scheduler.debug_kv_cache_summary());
                 return vec![];
             }
         };
+
+        // Record token throughput metrics.
+        let n_sampled = exec_result.sampled_token_ids.len() as u64;
+        rllm_metrics::counter!("rllm_generated_tokens_total").increment(n_sampled);
 
         // 3. Process outputs.
         let mut outputs = Vec::new();
@@ -122,15 +138,18 @@ impl EngineCore {
             let finished = if let Some(req) = self.requests.get_mut(request_id) {
                 req.generated_token_ids.push(token_id);
 
+                // TTFT: record time from arrival to first generated token.
+                if !req.first_token_generated {
+                    req.first_token_generated = true;
+                    let ttft = req.arrival_time.elapsed().as_secs_f64();
+                    rllm_metrics::histogram!("rllm_ttft_seconds").record(ttft);
+                }
+
                 // Check stopping conditions.
-                let reached_eos = token_id == self.eos_token_id
-                    && !req.sampling_params.ignore_eos;
+                let reached_eos = token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
                 let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
-                let hit_stop_token = req
-                    .sampling_params
-                    .stop_token_ids
-                    .iter()
-                    .any(|&st| st == token_id);
+                let hit_stop_token =
+                    req.sampling_params.stop_token_ids.iter().any(|&st| st == token_id);
 
                 if reached_eos || hit_stop_token {
                     Some(FinishReason::Stop)
@@ -149,13 +168,19 @@ impl EngineCore {
                 let prompt_tokens = req.prompt_token_ids.len() as u32;
                 let completion_tokens = req.generated_token_ids.len() as u32;
 
+                // Record prompt tokens on first output.
+                if completion_tokens == 1 {
+                    rllm_metrics::counter!("rllm_prompt_tokens_total")
+                        .increment(prompt_tokens as u64);
+                }
+
                 let finish_reason = finished;
 
                 outputs.push(RequestOutput {
                     request_id: *request_id,
                     outputs: vec![CompletionOutput {
                         index: 0,
-                        text: String::new(), // Detokenization done by output processor
+                        text: String::new(),
                         token_ids: vec![token_id],
                         finish_reason,
                         logprobs: None,
@@ -171,16 +196,25 @@ impl EngineCore {
         }
 
         // 4. Clean up finished requests.
-        let finished_ids: Vec<RequestId> = outputs
-            .iter()
-            .filter(|o| o.finished)
-            .map(|o| o.request_id)
-            .collect();
+        let finished_ids: Vec<RequestId> =
+            outputs.iter().filter(|o| o.finished).map(|o| o.request_id).collect();
 
         for id in &finished_ids {
-            // Tell scheduler the request is finished by aborting it.
-            // The scheduler will handle the state transition.
-            self.requests.remove(id);
+            if let Some(req) = self.requests.remove(id) {
+                // Record e2e latency and finished count.
+                let elapsed = req.arrival_time.elapsed().as_secs_f64();
+                rllm_metrics::histogram!("rllm_e2e_latency_seconds").record(elapsed);
+                rllm_metrics::counter!("rllm_requests_finished_total").increment(1);
+                rllm_metrics::record_tokens_per_second(
+                    req.generated_token_ids.len() as u32,
+                    elapsed,
+                );
+                // TPOT approximation: e2e / num_generated_tokens.
+                if req.generated_token_ids.len() > 1 {
+                    let tpot = elapsed / req.generated_token_ids.len() as f64;
+                    rllm_metrics::histogram!("rllm_tpot_seconds").record(tpot);
+                }
+            }
         }
 
         outputs

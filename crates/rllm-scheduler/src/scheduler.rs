@@ -51,6 +51,8 @@ pub struct Scheduler {
     finished: HashSet<RequestId>,
     kv_cache_manager: KVCacheManager,
     total_preemptions: usize,
+    prefix_cache_lookups: usize,
+    prefix_cache_hits: usize,
     paused: bool,
 }
 
@@ -96,6 +98,8 @@ impl Scheduler {
                 hash_algorithm,
             ),
             total_preemptions: 0,
+            prefix_cache_lookups: 0,
+            prefix_cache_hits: 0,
             paused: false,
         }
     }
@@ -120,6 +124,8 @@ impl Scheduler {
             finished: HashSet::new(),
             kv_cache_manager,
             total_preemptions: 0,
+            prefix_cache_lookups: 0,
+            prefix_cache_hits: 0,
             paused: false,
         }
     }
@@ -153,7 +159,10 @@ impl Scheduler {
     }
 
     /// Run one scheduling step and return the output.
+    #[tracing::instrument(skip_all, name = "schedule")]
     pub fn step(&mut self) -> SchedulerOutput {
+        let start = std::time::Instant::now();
+
         if self.paused {
             return self.build_output(0, 0);
         }
@@ -180,6 +189,33 @@ impl Scheduler {
             prefill_tokens,
             decode_tokens,
         };
+
+        // Record scheduler metrics.
+        rllm_metrics::histogram!("rllm_scheduler_step_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+        rllm_metrics::record_scheduler_snapshot(
+            output.stats.num_running,
+            output.stats.num_waiting,
+            budget_used,
+            max_budget,
+        );
+
+        let cache_usage = self.kv_cache_manager.usage();
+        rllm_metrics::record_kv_cache_usage(
+            cache_usage.num_total_blocks,
+            cache_usage.num_active_blocks,
+            cache_usage.num_cached_hashes,
+        );
+
+        tracing::debug!(
+            new = output.scheduled_new.len(),
+            cached = output.scheduled_cached.len(),
+            running = output.scheduled_running.len(),
+            budget_used,
+            preempted = output.preempted.len(),
+            finished = output.finished.len(),
+            "schedule step complete"
+        );
 
         output
     }
@@ -222,6 +258,28 @@ impl Scheduler {
     /// Reset the prefix cache. Fails if active requests exist.
     pub fn reset_prefix_cache(&mut self) -> Result<(), String> {
         self.kv_cache_manager.reset_prefix_cache()
+    }
+
+    /// Human-readable request state summary for debug logs.
+    pub fn debug_request_state_summary(&self, last_finished: usize) -> String {
+        rllm_metrics::debug_request_state_summary(
+            self.waiting.len(),
+            self.running.len(),
+            last_finished,
+            self.requests.len(),
+        )
+    }
+
+    /// Human-readable KV cache block table summary for debug logs.
+    pub fn debug_kv_cache_summary(&self) -> String {
+        let usage = self.kv_cache_manager.usage();
+        rllm_metrics::debug_kv_cache_summary(
+            usage.num_total_blocks,
+            usage.num_active_blocks,
+            usage.num_free_blocks,
+            usage.num_cached_hashes,
+            usage.num_tracked_requests,
+        )
     }
 
     // ── Internal scheduling methods ──────────────────────────────────────────
@@ -275,8 +333,7 @@ impl Scheduler {
             // Decode: schedule 1 token
             // Check if we need a new block (at block boundary)
             let current_blocks = sched_req.num_computed_tokens.div_ceil(self.block_size);
-            let needed_blocks =
-                (sched_req.num_computed_tokens + 1).div_ceil(self.block_size);
+            let needed_blocks = (sched_req.num_computed_tokens + 1).div_ceil(self.block_size);
 
             if needed_blocks > current_blocks {
                 // Need to allocate a new block
@@ -364,6 +421,15 @@ impl Scheduler {
                     skip_cache,
                 );
                 let cached = result.num_computed_tokens;
+                self.prefix_cache_lookups += 1;
+                if cached > 0 {
+                    self.prefix_cache_hits += 1;
+                }
+                rllm_metrics::record_prefix_cache_lookup(
+                    cached,
+                    self.prefix_cache_lookups,
+                    self.prefix_cache_hits,
+                );
                 // Update request state
                 if let Some(sched_req) = self.requests.get_mut(&request_id) {
                     sched_req.cached_block_ids = result.cached_block_ids;
@@ -462,6 +528,7 @@ impl Scheduler {
         }
 
         self.total_preemptions += 1;
+        rllm_metrics::counter!("rllm_preemptions_total").increment(1);
     }
 
     /// Internal: finish a request and clean up.

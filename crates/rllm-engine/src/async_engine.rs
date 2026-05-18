@@ -79,6 +79,7 @@ impl AsyncLLMEngine {
 }
 
 /// Background engine loop.
+#[tracing::instrument(skip_all, name = "engine_loop")]
 async fn engine_loop(
     core: Arc<Mutex<EngineCore>>,
     mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,

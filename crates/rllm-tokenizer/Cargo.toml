@@ -8,6 +8,7 @@ description = "HF tokenizer loading, encoding, decoding, streaming detokenizatio
 
 [dependencies]
 rllm-core.workspace = true
+rllm-metrics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

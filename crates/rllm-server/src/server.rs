@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::response::sse::Event;
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use axum::extract::State;
+use axum::response::IntoResponse;
+use axum::response::sse::Event;
+use axum::routing::{get, post};
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -20,6 +21,8 @@ pub struct AppState {
     // The engine is behind Arc<AsyncLLMEngine> for sharing across handlers.
     // For now, we store the config info needed for responses.
     engine: Arc<AsyncLLMEngineWrapper>,
+    /// Prometheus metrics handle for the `/metrics` endpoint.
+    metrics_handle: PrometheusHandle,
 }
 
 /// Wrapper to allow cloning the engine handle.
@@ -31,21 +34,23 @@ pub struct AsyncLLMEngineWrapper {
 }
 
 impl AppState {
-    pub fn new(model_name: String) -> Self {
-        Self {
-            model_name,
-            engine: Arc::new(AsyncLLMEngineWrapper {}),
-        }
+    pub fn new(model_name: String, metrics_handle: PrometheusHandle) -> Self {
+        Self { model_name, engine: Arc::new(AsyncLLMEngineWrapper {}), metrics_handle }
     }
 }
 
 /// Build and run the HTTP server.
 pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    // Install metrics recorder and describe all metrics.
+    let metrics_handle = rllm_metrics::install_recorder();
+    rllm_metrics::describe_metrics();
+
     let model_name = args.model.clone();
-    let state = AppState::new(model_name);
+    let state = AppState::new(model_name, metrics_handle);
 
     let app = Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/models", get(list_models_handler))
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/v1/completions", post(completions_handler))
@@ -65,11 +70,15 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
 // ── Handlers ───────────────────────────────────────────────────────────────
 
 async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-    })
+    Json(HealthResponse { status: "ok".to_string() })
 }
 
+/// Prometheus metrics endpoint.
+async fn metrics_handler(State(state): State<AppState>) -> String {
+    state.metrics_handle.render()
+}
+
+#[tracing::instrument(skip(state), name = "http_list_models")]
 async fn list_models_handler(State(state): State<AppState>) -> Json<ModelListResponse> {
     let now = now_timestamp();
     Json(ModelListResponse {
@@ -83,10 +92,15 @@ async fn list_models_handler(State(state): State<AppState>) -> Json<ModelListRes
     })
 }
 
+#[tracing::instrument(skip(state), name = "http_chat_completions")]
 async fn chat_completions_handler(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> impl IntoResponse {
+    let started = std::time::Instant::now();
+    rllm_metrics::counter!("rllm_http_requests_total").increment(1);
+    let request_span = tracing::info_span!("http_request", path = "/v1/chat/completions");
+    let _guard = request_span.enter();
     let model = state.model_name.clone();
 
     // Validate request.
@@ -98,6 +112,8 @@ async fn chat_completions_handler(
                 code: None,
             },
         };
+        rllm_metrics::histogram!("rllm_http_request_duration_seconds")
+            .record(started.elapsed().as_secs_f64());
         return (axum::http::StatusCode::BAD_REQUEST, Json(err)).into_response();
     }
 
@@ -148,6 +164,8 @@ async fn chat_completions_handler(
             yield Ok(Event::default().data("[DONE]"));
         };
 
+        rllm_metrics::histogram!("rllm_http_request_duration_seconds")
+            .record(started.elapsed().as_secs_f64());
         return axum::response::Sse::new(sse_stream)
             .keep_alive(axum::response::sse::KeepAlive::default())
             .into_response();
@@ -162,26 +180,26 @@ async fn chat_completions_handler(
         model: model.clone(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatResponseMessage {
-                role: "assistant".into(),
-                content: String::new(),
-            },
+            message: ChatResponseMessage { role: "assistant".into(), content: String::new() },
             finish_reason: Some("stop".into()),
         }],
-        usage: UsageInfo {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
+        usage: UsageInfo { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     };
 
+    rllm_metrics::histogram!("rllm_http_request_duration_seconds")
+        .record(started.elapsed().as_secs_f64());
     Json(response).into_response()
 }
 
+#[tracing::instrument(skip(state), name = "http_completions")]
 async fn completions_handler(
     State(state): State<AppState>,
     Json(_req): Json<CompletionRequest>,
 ) -> impl IntoResponse {
+    let started = std::time::Instant::now();
+    rllm_metrics::counter!("rllm_http_requests_total").increment(1);
+    let request_span = tracing::info_span!("http_request", path = "/v1/completions");
+    let _guard = request_span.enter();
     let model = state.model_name.clone();
 
     let response = CompletionResponse {
@@ -194,12 +212,10 @@ async fn completions_handler(
             text: String::new(),
             finish_reason: Some("stop".into()),
         }],
-        usage: UsageInfo {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
+        usage: UsageInfo { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     };
 
+    rllm_metrics::histogram!("rllm_http_request_duration_seconds")
+        .record(started.elapsed().as_secs_f64());
     Json(response).into_response()
 }

@@ -8,6 +8,7 @@ description = "KV cache specs, block pool, prefix cache hashing, allocation, and
 
 [dependencies]
 rllm-core.workspace = true
+rllm-metrics.workspace = true
 rllm-tensor.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

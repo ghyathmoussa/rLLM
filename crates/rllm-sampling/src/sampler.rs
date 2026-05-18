@@ -55,7 +55,9 @@ impl Sampler {
     }
 
     /// Sample a single token from the given input.
+    #[tracing::instrument(skip_all, name = "sampling")]
     pub fn sample(&mut self, input: &SamplingInput) -> SamplingOutput {
+        let start = std::time::Instant::now();
         let vocab_size = input.logits.len();
         if vocab_size == 0 {
             return SamplingOutput {
@@ -166,11 +168,16 @@ impl Sampler {
             (None, None)
         };
 
-        SamplingOutput {
+        let output = SamplingOutput {
             token_id,
             logprob,
             top_logprobs,
-        }
+        };
+
+        rllm_metrics::histogram!("rllm_sampling_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
+
+        output
     }
 
     /// Sample a batch of requests, returning one `SamplingOutput` per request.

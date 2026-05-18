@@ -41,6 +41,7 @@ members = [
     "crates/rllm-engine",
     "crates/rllm-server",
     "crates/rllm-bench",
+    "crates/rllm-metrics",
 ]
 
 [workspace.package]
@@ -99,6 +100,10 @@ clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 rand_chacha = "0.9"
 
+# Observability
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
 # Benchmarking
 criterion = "0.6"
 
@@ -121,3 +126,4 @@ rllm-executor = { path = "crates/rllm-executor" }
 rllm-engine = { path = "crates/rllm-engine" }
 rllm-server = { path = "crates/rllm-server" }
 rllm-bench = { path = "crates/rllm-bench" }
+rllm-metrics = { path = "crates/rllm-metrics" }

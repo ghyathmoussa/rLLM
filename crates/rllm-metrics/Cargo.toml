@@ -1,0 +1,16 @@
+[package]
+name = "rllm-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Metrics infrastructure for rLLM (Prometheus + optional OpenTelemetry)"
+
+[dependencies]
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+otel = []

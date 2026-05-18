@@ -111,12 +111,21 @@ impl Worker {
     /// Stores the config for later use by the model runner.
     /// Actual GPU allocation happens when the `cuda` feature is enabled.
     pub fn initialize_kv_cache(&mut self, config: &KVCacheConfig) -> Result<()> {
+        let bytes_per_cache = config.spec.num_layers
+            * config.num_blocks
+            * config.spec.block_size
+            * config.spec.num_kv_heads
+            * config.spec.head_dim
+            * 2
+            * config.spec.dtype.bytes_per_scalar();
         tracing::info!(
             worker_id = self.id,
             num_blocks = config.num_blocks,
             block_size = config.spec.block_size,
+            allocated_bytes = bytes_per_cache,
             "Initializing KV cache"
         );
+        rllm_metrics::record_gpu_memory_allocated(bytes_per_cache);
         self.cache_config = Some(config.clone());
         Ok(())
     }
@@ -137,9 +146,11 @@ impl Worker {
             0 => {}
             1 => {
                 self.cache_config = None;
+                rllm_metrics::record_gpu_memory_allocated(0);
             }
             2 => {
                 self.cache_config = None;
+                rllm_metrics::record_gpu_memory_allocated(0);
             }
             _ => {}
         }

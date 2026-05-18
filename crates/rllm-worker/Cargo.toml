@@ -12,6 +12,7 @@ rllm-model.workspace = true
 rllm-tensor.workspace = true
 rllm-kernels.workspace = true
 rllm-cache.workspace = true
+rllm-metrics.workspace = true
 rllm-scheduler.workspace = true
 rllm-sampling.workspace = true
 anyhow.workspace = true

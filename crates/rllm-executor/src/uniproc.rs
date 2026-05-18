@@ -57,7 +57,10 @@ impl Executor for UniProcExecutor {
         self.worker.determine_available_memory()
     }
 
+    #[tracing::instrument(skip_all, name = "model_forward")]
     fn execute_model(&mut self, scheduler_output: &SchedulerOutput) -> Result<ExecutorOutput> {
+        let start = std::time::Instant::now();
+
         // 1. Build input tensors from scheduler output.
         let batch = self.worker.model_runner_mut().build_tensors(scheduler_output)?;
 
@@ -156,6 +159,9 @@ impl Executor for UniProcExecutor {
         self.worker
             .model_runner_mut()
             .cache_execute_model_state(copied_ids);
+
+        rllm_metrics::histogram!("rllm_model_forward_duration_seconds")
+            .record(start.elapsed().as_secs_f64());
 
         Ok(ExecutorOutput {
             sampled_token_ids,

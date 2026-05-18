@@ -9,6 +9,7 @@ description = "Request scheduling, continuous batching, chunked prefill, and pre
 [dependencies]
 rllm-core.workspace = true
 rllm-cache.workspace = true
+rllm-metrics.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
