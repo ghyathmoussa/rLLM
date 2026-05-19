@@ -86,30 +86,36 @@ async fn engine_loop(
     output_tx: watch::Sender<Vec<RequestOutput>>,
 ) {
     loop {
-        // Process all pending commands.
+        // Drain all pending commands into a local Vec (no lock needed for try_recv).
+        let mut commands = Vec::new();
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                EngineCommand::AddRequest { request } => {
-                    let request = *request;
-                    let mut core = core.lock();
-                    if let Err(e) = core.add_request(request) {
-                        tracing::error!("Failed to add request: {}", e);
-                    }
-                }
-                EngineCommand::AbortRequest { request_id } => {
-                    let mut core = core.lock();
-                    core.abort_request(request_id);
-                }
                 EngineCommand::Shutdown => {
                     tracing::info!("Engine loop shutting down");
                     return;
                 }
+                other => commands.push(other),
             }
         }
 
-        // Run one step if there's work.
+        // Acquire mutex once, process all commands + run step, then release.
         {
             let mut core = core.lock();
+            for cmd in commands.drain(..) {
+                match cmd {
+                    EngineCommand::AddRequest { request } => {
+                        let request = *request;
+                        if let Err(e) = core.add_request(request) {
+                            tracing::error!("Failed to add request: {}", e);
+                        }
+                    }
+                    EngineCommand::AbortRequest { request_id } => {
+                        core.abort_request(request_id);
+                    }
+                    EngineCommand::Shutdown => unreachable!(), // handled above
+                }
+            }
+
             if core.has_work() {
                 let outputs = core.step();
                 if !outputs.is_empty() {

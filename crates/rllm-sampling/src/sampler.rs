@@ -204,6 +204,9 @@ fn greedy_sample(logits: &[f32]) -> u32 {
 
 /// Random: softmax then weighted sample.
 fn random_sample(logits: &mut [f32], rng: &mut Option<ChaCha8Rng>) -> u32 {
+    if logits.is_empty() {
+        return 0;
+    }
     logits::softmax_in_place(logits);
 
     let r = match rng {
@@ -219,7 +222,7 @@ fn random_sample(logits: &mut [f32], rng: &mut Option<ChaCha8Rng>) -> u32 {
         }
     }
     // Fallback: return last token.
-    (logits.len() - 1) as u32
+    logits.len().saturating_sub(1) as u32
 }
 
 #[cfg(test)]

@@ -36,15 +36,51 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 4096)]
     pub max_num_batched_tokens: usize,
 
-    /// GPU memory utilization target (0.0 - 1.0)
-    #[arg(long, default_value_t = 0.9)]
+    /// GPU memory utilization target (0.01 - 1.0)
+    #[arg(long, default_value_t = 0.9, value_parser = parse_gpu_utilization)]
     pub gpu_memory_utilization: f32,
 
     /// Enable prefix caching
     #[arg(long, default_value_t = true)]
     pub enable_prefix_caching: bool,
 
+    /// API key for authenticated endpoints (reads RLLM_API_KEY env var)
+    #[arg(long, env = "RLLM_API_KEY")]
+    pub api_key: Option<String>,
+
+    /// CORS allowed origins (comma-separated, * for all)
+    #[arg(long, default_value = "*")]
+    pub cors_allowed_origins: String,
+
+    /// Enable debug endpoints (e.g., /debug/model)
+    #[arg(long, default_value_t = false)]
+    pub enable_debug_endpoints: bool,
+
+    /// Maximum messages allowed in chat completion request
+    #[arg(long, default_value_t = 256)]
+    pub max_input_messages: usize,
+
+    /// Maximum characters allowed in input body
+    #[arg(long, default_value_t = 1_000_000)]
+    pub max_input_chars: usize,
+
+    /// Maximum concurrent inference requests
+    #[arg(long, default_value_t = 64)]
+    pub max_concurrent_requests: usize,
+
+    /// Request timeout in seconds
+    #[arg(long, default_value_t = 120)]
+    pub request_timeout_secs: u64,
+
     /// Log level
     #[arg(long, default_value = "info")]
     pub log_level: String,
+}
+
+fn parse_gpu_utilization(s: &str) -> Result<f32, String> {
+    let val: f32 = s.parse().map_err(|_| format!("invalid float: {s}"))?;
+    if !(0.01..=1.0).contains(&val) {
+        return Err(format!("gpu_memory_utilization must be in range 0.01..=1.0, got {val}"));
+    }
+    Ok(val)
 }

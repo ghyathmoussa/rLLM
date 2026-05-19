@@ -86,7 +86,7 @@ candle-transformers = "0.9"
 
 # HTTP server
 axum = "0.8"
-tower = "0.5"
+tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Streaming
@@ -94,7 +94,7 @@ async-stream = "0.3"
 tokio-stream = "0.1"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Random
 rand = "0.9"
@@ -108,6 +108,9 @@ metrics-exporter-prometheus = "0.16"
 criterion = { version = "0.6", features = ["html_reports"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 proptest = "1"
+
+# Constant-time comparison
+subtle = "2"
 
 # Hashing
 sha2 = "0.10"

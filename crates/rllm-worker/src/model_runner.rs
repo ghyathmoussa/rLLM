@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rllm_core::config::ModelConfig;
 use rllm_core::ids::RequestId;
 use rllm_kernels::AttentionMetadata;
@@ -183,7 +183,9 @@ impl ModelRunner {
                     continue;
                 }
                 req_tokens = state.prompt_token_ids[start..end].to_vec();
-                req_positions = (start..end).map(|p| p as u32).collect();
+                req_positions = (start..end)
+                    .map(|p| u32::try_from(p).context("position exceeds u32"))
+                    .collect::<Result<Vec<_>>>()?;
                 num_prefill_tokens += req_tokens.len();
             } else {
                 // Decode: single generated token at position = total_tokens - 1,
@@ -194,12 +196,12 @@ impl ModelRunner {
                     *state.prompt_token_ids.last().unwrap_or(&0)
                 });
                 req_tokens = vec![last_token];
-                req_positions = vec![computed as u32];
+                req_positions = vec![u32::try_from(computed).context("position exceeds u32")?];
                 num_decode_tokens += 1;
             }
 
             let n_tokens = req_tokens.len();
-            let seq_len = (computed + n_tokens) as u32;
+            let seq_len = u32::try_from(computed + n_tokens).context("seq_len exceeds u32")?;
 
             // Get block table and compute slot mappings.
             let bt: Vec<u32> = scheduler_output
@@ -613,14 +615,23 @@ impl Default for CudaGraphCapture {
 ///
 /// Returns -1 for positions that map to an out-of-range block table entry.
 fn compute_slot_mappings(positions: &[u32], block_table: &[u32], block_size: usize) -> Vec<i64> {
-    let block_size = block_size as u32;
+    let block_size = match u32::try_from(block_size) {
+        Ok(bs) => bs,
+        Err(_) => return vec![-1; positions.len()],
+    };
     positions
         .iter()
         .map(|&pos| {
             let block_idx = pos / block_size;
             let offset = pos % block_size;
             if (block_idx as usize) < block_table.len() {
-                block_table[block_idx as usize] as i64 * block_size as i64 + offset as i64
+                let bt = block_table[block_idx as usize] as i64;
+                let bs = block_size as i64;
+                let off = offset as i64;
+                match bt.checked_mul(bs).and_then(|v| v.checked_add(off)) {
+                    Some(slot) => slot,
+                    None => -1,
+                }
             } else {
                 -1
             }

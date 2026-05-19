@@ -53,6 +53,9 @@ pub fn apply_top_p(logits: &mut [f32], p: f32) {
         .collect();
     indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+    if indexed.is_empty() {
+        return;
+    }
     let max_val = indexed.first().map(|&(_, v)| v).unwrap_or(0.0);
     let exps: Vec<f32> = indexed
         .iter()

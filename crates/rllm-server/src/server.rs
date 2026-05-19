@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{header, HeaderValue, Method};
+use axum::middleware::from_fn_with_state;
 use axum::response::sse::Event;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -26,16 +28,18 @@ use rllm_tokenizer::tokenizer::Tokenizer;
 use rllm_worker::Worker;
 use serde::Serialize;
 use tokio::net::TcpListener;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::auth;
 use crate::cli::ServeArgs;
 use crate::openai::*;
 
 const BLOCK_SIZE: usize = 16;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ModelRuntime {
     engine: Arc<AsyncLLMEngine>,
     tokenizer: Arc<AsyncTokenizerPool>,
@@ -51,37 +55,101 @@ pub struct AppState {
     runtime: Option<ModelRuntime>,
     /// Prometheus metrics handle for the `/metrics` endpoint.
     metrics_handle: PrometheusHandle,
+    /// Optional API key for authenticated endpoints.
+    pub api_key: Option<String>,
+    /// CORS allowed origins configuration.
+    cors_allowed_origins: String,
+    /// Enable debug endpoints.
+    enable_debug_endpoints: bool,
+    /// Maximum concurrent requests.
+    max_concurrent_requests: usize,
+    /// Request timeout in seconds.
+    request_timeout_secs: u64,
+    /// Maximum messages allowed in chat completion request.
+    max_input_messages: usize,
 }
 
 impl AppState {
     /// Test/placeholder state. The real server path uses `with_runtime`.
     pub fn new(model_name: String, metrics_handle: PrometheusHandle) -> Self {
-        Self { model_name, runtime: None, metrics_handle }
+        Self {
+            model_name,
+            runtime: None,
+            metrics_handle,
+            api_key: None,
+            cors_allowed_origins: "*".to_string(),
+            enable_debug_endpoints: false,
+            max_concurrent_requests: 64,
+            request_timeout_secs: 120,
+            max_input_messages: 256,
+        }
     }
 
     fn with_runtime(
         model_name: String,
         metrics_handle: PrometheusHandle,
         runtime: ModelRuntime,
+        api_key: Option<String>,
+        cors_allowed_origins: String,
+        enable_debug_endpoints: bool,
+        max_concurrent_requests: usize,
+        request_timeout_secs: u64,
+        max_input_messages: usize,
     ) -> Self {
-        Self { model_name, runtime: Some(runtime), metrics_handle }
+        Self {
+            model_name,
+            runtime: Some(runtime),
+            metrics_handle,
+            api_key,
+            cors_allowed_origins,
+            enable_debug_endpoints,
+            max_concurrent_requests,
+            request_timeout_secs,
+            max_input_messages,
+        }
     }
 }
 
 /// Build the router with all routes and middleware.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let cors = build_cors_layer(&state.cors_allowed_origins);
+
+    let v1_router = Router::new()
+        .route("/models", get(list_models_handler))
+        .route("/chat/completions", post(chat_completions_handler))
+        .route("/completions", post(completions_handler))
+        .layer(ConcurrencyLimitLayer::new(state.max_concurrent_requests))
+        .route_layer(from_fn_with_state(state.clone(), auth::auth_middleware));
+
+    let mut router = Router::new()
         .route("/", get(docs_handler))
         .route("/docs", get(docs_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
-        .route("/debug/model", get(debug_model_handler))
-        .route("/v1/models", get(list_models_handler))
-        .route("/v1/chat/completions", post(chat_completions_handler))
-        .route("/v1/completions", post(completions_handler))
+        .nest("/v1", v1_router)
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .layer(cors);
+
+    if state.enable_debug_endpoints {
+        router = router.route("/debug/model", get(debug_model_handler));
+    }
+
+    router.with_state(state)
+}
+
+fn build_cors_layer(origins: &str) -> CorsLayer {
+    if origins == "*" {
+        return CorsLayer::permissive();
+    }
+    let origins: Vec<HeaderValue> = origins
+        .split(',')
+        .map(|s| s.trim().parse().expect("invalid CORS origin"))
+        .collect();
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
 }
 
 /// Build and run the HTTP server.
@@ -90,7 +158,17 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     rllm_metrics::describe_metrics();
 
     let runtime = build_runtime(&args).await?;
-    let state = AppState::with_runtime(args.model.clone(), metrics_handle, runtime);
+    let state = AppState::with_runtime(
+        args.model.clone(),
+        metrics_handle,
+        runtime,
+        args.api_key.clone(),
+        args.cors_allowed_origins.clone(),
+        args.enable_debug_endpoints,
+        args.max_concurrent_requests,
+        args.request_timeout_secs,
+        args.max_input_messages,
+    );
     let app = build_router(state);
 
     let addr = format!("{}:{}", args.host, args.port);
@@ -292,9 +370,9 @@ struct DebugModelResponse {
 async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelResponse> {
     let runtime = state.runtime.as_ref();
     Json(DebugModelResponse {
-        model: state.model_name,
+        model: state.model_name.clone(),
         loaded: runtime.is_some(),
-        model_dir: runtime.map(|rt| rt.model_dir.clone()),
+        model_dir: Some(state.model_name),
         architecture: runtime.map(|rt| rt.architecture.clone()),
         device: runtime.map(|rt| rt.device.clone()),
     })
@@ -331,6 +409,15 @@ async fn chat_completions_handler(
         );
     }
 
+    if req.messages.len() > state.max_input_messages {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("too many messages: max is {}", state.max_input_messages),
+            "invalid_request_error",
+            started,
+        );
+    }
+
     let is_stream = req.stream.unwrap_or(false);
     let model = state.model_name.clone();
     let Some(runtime) = state.runtime.clone() else {
@@ -340,7 +427,7 @@ async fn chat_completions_handler(
         return placeholder_chat_response(&state.model_name, started);
     };
 
-    let result = run_chat_completion(runtime, req).await;
+    let result = run_chat_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await;
 
     if is_stream {
         let sse_stream = async_stream::stream! {
@@ -358,7 +445,7 @@ async fn chat_completions_handler(
                 }],
             };
             yield Ok::<_, std::convert::Infallible>(
-                Event::default().data(serde_json::to_string(&role_chunk).unwrap())
+                Event::default().data(serialize_sse(&role_chunk))
             );
 
             if let Ok(completion) = result {
@@ -373,7 +460,7 @@ async fn chat_completions_handler(
                         finish_reason: None,
                     }],
                 };
-                yield Ok(Event::default().data(serde_json::to_string(&content_chunk).unwrap()));
+                yield Ok(Event::default().data(serialize_sse(&content_chunk)));
             }
 
             let done_chunk = ChatCompletionChunk {
@@ -387,7 +474,7 @@ async fn chat_completions_handler(
                     finish_reason: Some("stop".into()),
                 }],
             };
-            yield Ok(Event::default().data(serde_json::to_string(&done_chunk).unwrap()));
+            yield Ok(Event::default().data(serialize_sse(&done_chunk)));
             yield Ok(Event::default().data("[DONE]"));
         };
 
@@ -420,7 +507,8 @@ async fn chat_completions_handler(
             Json(response).into_response()
         }
         Err(err) => {
-            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &err.to_string(), started)
+            tracing::error!("chat completion error: {:?}", err);
+            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred while processing your request.", started)
         }
     }
 }
@@ -433,11 +521,22 @@ async fn completions_handler(
     let started = std::time::Instant::now();
     rllm_metrics::counter!("rllm_http_requests_total").increment(1);
 
+    if let PromptInput::Multiple(items) = &req.prompt {
+        if items.len() > 16 {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                "too many prompt variants: max is 16",
+                "invalid_request_error",
+                started,
+            );
+        }
+    }
+
     let Some(runtime) = state.runtime.clone() else {
         return placeholder_completion_response(&state.model_name, started);
     };
 
-    match run_text_completion(runtime, req).await {
+    match run_text_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await {
         Ok(completion) => {
             let response = CompletionResponse {
                 id: generate_completion_id("cmpl"),
@@ -456,7 +555,8 @@ async fn completions_handler(
             Json(response).into_response()
         }
         Err(err) => {
-            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &err.to_string(), started)
+            tracing::error!("completion error: {:?}", err);
+            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred while processing your request.", started)
         }
     }
 }
@@ -470,6 +570,7 @@ struct EngineCompletion {
 async fn run_chat_completion(
     runtime: ModelRuntime,
     req: ChatCompletionRequest,
+    timeout: Duration,
 ) -> Result<EngineCompletion> {
     let messages = req
         .messages
@@ -489,12 +590,13 @@ async fn run_chat_completion(
     let sampling_params = chat_request_to_sampling_params(&req);
     sampling_params.validate().context("invalid sampling params")?;
 
-    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params).await
+    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params, timeout).await
 }
 
 async fn run_text_completion(
     runtime: ModelRuntime,
     req: CompletionRequest,
+    timeout: Duration,
 ) -> Result<EngineCompletion> {
     let prompt = match &req.prompt {
         PromptInput::Single(text) => text.clone(),
@@ -508,7 +610,7 @@ async fn run_text_completion(
     let sampling_params = completion_request_to_sampling_params(&req);
     sampling_params.validate().context("invalid sampling params")?;
 
-    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params).await
+    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params, timeout).await
 }
 
 async fn submit_and_collect(
@@ -516,6 +618,7 @@ async fn submit_and_collect(
     prompt: Option<String>,
     token_ids: Vec<u32>,
     sampling_params: rllm_core::request::SamplingParams,
+    timeout: Duration,
 ) -> Result<EngineCompletion> {
     let request_id = RequestId::new();
     let max_tokens = sampling_params.max_tokens.unwrap_or(16);
@@ -561,7 +664,7 @@ async fn submit_and_collect(
             }
         }
     };
-    tokio::time::timeout(REQUEST_TIMEOUT, collect)
+    tokio::time::timeout(timeout, collect)
         .await
         .context("request timed out waiting for model output")??;
 
@@ -580,11 +683,19 @@ async fn submit_and_collect(
     Ok(EngineCompletion {
         text,
         usage: UsageInfo {
-            prompt_tokens: token_ids.len() as u32,
-            completion_tokens: generated_ids.len() as u32,
-            total_tokens: (token_ids.len() + generated_ids.len()) as u32,
+            prompt_tokens: u32::try_from(token_ids.len()).unwrap_or(u32::MAX),
+            completion_tokens: u32::try_from(generated_ids.len()).unwrap_or(u32::MAX),
+            total_tokens: u32::try_from(token_ids.len()).unwrap_or(u32::MAX)
+                .saturating_add(u32::try_from(generated_ids.len()).unwrap_or(u32::MAX)),
         },
         finish_reason,
+    })
+}
+
+fn serialize_sse<T: Serialize>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_else(|e| {
+        tracing::error!("SSE serialization failed: {}", e);
+        r#"{"error":"internal serialization error"}"#.to_string()
     })
 }
 
@@ -643,7 +754,7 @@ fn placeholder_chat_stream_response(
             }],
         };
         yield Ok::<_, std::convert::Infallible>(
-            Event::default().data(serde_json::to_string(&done_chunk).unwrap())
+            Event::default().data(serialize_sse(&done_chunk))
         );
         yield Ok(Event::default().data("[DONE]"));
     };

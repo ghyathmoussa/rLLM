@@ -356,7 +356,31 @@ fn load_shard_index(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
         .collect();
     shard_files.sort();
 
-    let paths: Vec<PathBuf> = shard_files.iter().map(|f| dir.join(f)).collect();
+    let paths: Vec<PathBuf> = shard_files
+        .iter()
+        .map(|f| {
+            // Sanitize: reject filenames with path traversal components
+            let p = Path::new(f);
+            if f.starts_with('/') || f.starts_with('\\') || f.contains("..") {
+                anyhow::bail!(
+                    "path traversal detected in shard filename: {}",
+                    p.display()
+                );
+            }
+            // Canonicalize to verify the path stays within dir
+            let joined = dir.join(f);
+            let canonical = joined.canonicalize().with_context(|| {
+                format!("resolving shard path: {}", joined.display())
+            })?;
+            if !canonical.starts_with(&dir.canonicalize()?) {
+                anyhow::bail!(
+                    "shard path escapes model directory: {}",
+                    joined.display()
+                );
+            }
+            Ok(joined)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     for p in &paths {
         if dir != Path::new(".") && !p.exists() {
