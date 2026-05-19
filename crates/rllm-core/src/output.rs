@@ -55,21 +55,13 @@ mod tests {
 
     #[test]
     fn usage_fields() {
-        let usage = Usage {
-            prompt_tokens: 10,
-            completion_tokens: 20,
-            total_tokens: 30,
-        };
+        let usage = Usage { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 };
         assert_eq!(usage.prompt_tokens + usage.completion_tokens, usage.total_tokens);
     }
 
     #[test]
     fn usage_serde_roundtrip() {
-        let usage = Usage {
-            prompt_tokens: 5,
-            completion_tokens: 15,
-            total_tokens: 20,
-        };
+        let usage = Usage { prompt_tokens: 5, completion_tokens: 15, total_tokens: 20 };
         let json = serde_json::to_string(&usage).unwrap();
         let back: Usage = serde_json::from_str(&json).unwrap();
         assert_eq!(usage, back);
@@ -77,7 +69,9 @@ mod tests {
 
     #[test]
     fn finish_reason_serde_roundtrip() {
-        for reason in [FinishReason::Stop, FinishReason::Length, FinishReason::Aborted, FinishReason::Error] {
+        for reason in
+            [FinishReason::Stop, FinishReason::Length, FinishReason::Aborted, FinishReason::Error]
+        {
             let json = serde_json::to_string(&reason).unwrap();
             let back: FinishReason = serde_json::from_str(&json).unwrap();
             assert_eq!(reason, back);
@@ -100,11 +94,7 @@ mod tests {
                 }]),
             }],
             finished: true,
-            usage: Usage {
-                prompt_tokens: 5,
-                completion_tokens: 3,
-                total_tokens: 8,
-            },
+            usage: Usage { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
         };
         let json = serde_json::to_string(&output).unwrap();
         let back: RequestOutput = serde_json::from_str(&json).unwrap();

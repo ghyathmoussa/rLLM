@@ -22,12 +22,7 @@ impl AsyncTokenizerPool {
             .collect::<Option<Vec<_>>>()
             .unwrap_or_else(|| vec![tokenizer]);
 
-        Self {
-            inner: Arc::new(Mutex::new(PoolInner {
-                tokenizers,
-                index: 0,
-            })),
-        }
+        Self { inner: Arc::new(Mutex::new(PoolInner { tokenizers, index: 0 })) }
     }
 
     pub async fn encode(&self, text: String, add_special_tokens: bool) -> Result<Vec<u32>> {

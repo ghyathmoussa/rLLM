@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, HeaderValue, Method};
+use axum::http::{HeaderValue, Method, header};
 use axum::middleware::from_fn_with_state;
 use axum::response::sse::Event;
 use axum::response::{Html, IntoResponse};
@@ -85,6 +85,7 @@ impl AppState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_runtime(
         model_name: String,
         metrics_handle: PrometheusHandle,
@@ -142,10 +143,8 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
     if origins == "*" {
         return CorsLayer::permissive();
     }
-    let origins: Vec<HeaderValue> = origins
-        .split(',')
-        .map(|s| s.trim().parse().expect("invalid CORS origin"))
-        .collect();
+    let origins: Vec<HeaderValue> =
+        origins.split(',').map(|s| s.trim().parse().expect("invalid CORS origin")).collect();
     CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
@@ -351,11 +350,7 @@ async fn health_handler() -> Json<HealthResponse> {
 /// Prometheus metrics endpoint.
 async fn metrics_handler(State(state): State<AppState>) -> String {
     let rendered = state.metrics_handle.render();
-    if rendered.is_empty() {
-        "# no metrics recorded yet\n".to_string()
-    } else {
-        rendered
-    }
+    if rendered.is_empty() { "# no metrics recorded yet\n".to_string() } else { rendered }
 }
 
 #[derive(Serialize)]
@@ -427,7 +422,8 @@ async fn chat_completions_handler(
         return placeholder_chat_response(&state.model_name, started);
     };
 
-    let result = run_chat_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await;
+    let result =
+        run_chat_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await;
 
     if is_stream {
         let sse_stream = async_stream::stream! {
@@ -508,7 +504,11 @@ async fn chat_completions_handler(
         }
         Err(err) => {
             tracing::error!("chat completion error: {:?}", err);
-            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred while processing your request.", started)
+            error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "An internal error occurred while processing your request.",
+                started,
+            )
         }
     }
 }
@@ -556,7 +556,11 @@ async fn completions_handler(
         }
         Err(err) => {
             tracing::error!("completion error: {:?}", err);
-            error_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred while processing your request.", started)
+            error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "An internal error occurred while processing your request.",
+                started,
+            )
         }
     }
 }
@@ -685,7 +689,8 @@ async fn submit_and_collect(
         usage: UsageInfo {
             prompt_tokens: u32::try_from(token_ids.len()).unwrap_or(u32::MAX),
             completion_tokens: u32::try_from(generated_ids.len()).unwrap_or(u32::MAX),
-            total_tokens: u32::try_from(token_ids.len()).unwrap_or(u32::MAX)
+            total_tokens: u32::try_from(token_ids.len())
+                .unwrap_or(u32::MAX)
                 .saturating_add(u32::try_from(generated_ids.len()).unwrap_or(u32::MAX)),
         },
         finish_reason,

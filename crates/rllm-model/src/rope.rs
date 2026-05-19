@@ -1,5 +1,5 @@
 #[cfg(feature = "candle-backend")]
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 
 /// Precomputed RoPE (Rotary Position Embedding) cache.
 #[cfg(feature = "candle-backend")]
@@ -11,13 +11,12 @@ pub struct RotaryEmbedding {
 #[cfg(feature = "candle-backend")]
 impl RotaryEmbedding {
     pub fn new(dim: usize, max_seq_len: usize, theta: f32, device: &Device) -> Result<Self> {
-        let inv_freq: Vec<f64> = (0..dim)
-            .step_by(2)
-            .map(|i| 1.0 / (theta as f64).powf(i as f64 / dim as f64))
-            .collect();
+        let inv_freq: Vec<f64> =
+            (0..dim).step_by(2).map(|i| 1.0 / (theta as f64).powf(i as f64 / dim as f64)).collect();
 
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), device)?.to_dtype(DType::F64)?;
+        let inv_freq =
+            Tensor::from_vec(inv_freq, (1, inv_freq_len), device)?.to_dtype(DType::F64)?;
 
         let positions = Tensor::arange(0u32, max_seq_len as u32, device)?
             .to_dtype(DType::F64)?
@@ -28,19 +27,11 @@ impl RotaryEmbedding {
         let cos_cache = freqs.cos()?.to_dtype(DType::F32)?;
         let sin_cache = freqs.sin()?.to_dtype(DType::F32)?;
 
-        Ok(Self {
-            cos_cache,
-            sin_cache,
-        })
+        Ok(Self { cos_cache, sin_cache })
     }
 
     /// Apply rotary embeddings to query and key tensors.
-    pub fn apply(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
+    pub fn apply(&self, q: &Tensor, k: &Tensor, positions: &[usize]) -> Result<(Tensor, Tensor)> {
         let cos = self.gather_cache(&self.cos_cache, positions)?;
         let sin = self.gather_cache(&self.sin_cache, positions)?;
 
@@ -75,12 +66,8 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 
     // Reshape cos/sin for broadcasting: [1, 1, seq_len, dim/2]
     // Then repeat along last dim to match head_dim: [1, 1, seq_len, dim]
-    let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?
-        .unsqueeze(0)?
-        .unsqueeze(0)?;
-    let sin = Tensor::cat(&[&sin, &sin], D::Minus1)?
-        .unsqueeze(0)?
-        .unsqueeze(0)?;
+    let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?.unsqueeze(0)?.unsqueeze(0)?;
+    let sin = Tensor::cat(&[&sin, &sin], D::Minus1)?.unsqueeze(0)?.unsqueeze(0)?;
 
     // rotate_half: [-x2, x1]
     let rotated = Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)?;

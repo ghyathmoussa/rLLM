@@ -22,13 +22,7 @@ pub struct TensorView {
 
 impl TensorView {
     pub fn new(dtype: DType, shape: Vec<usize>, strides: Vec<usize>, device: Device) -> Self {
-        Self {
-            dtype,
-            shape,
-            strides,
-            device,
-            data_ptr: None,
-        }
+        Self { dtype, shape, strides, device, data_ptr: None }
     }
 
     pub fn with_data_ptr(mut self, ptr: NonNull<u8>) -> Self {
@@ -82,13 +76,7 @@ impl TensorView {
     /// Create a TensorView with contiguous strides.
     pub fn contiguous(dtype: DType, shape: Vec<usize>, device: Device) -> Self {
         let strides = Self::contiguous_strides(&shape);
-        Self {
-            dtype,
-            shape,
-            strides,
-            device,
-            data_ptr: None,
-        }
+        Self { dtype, shape, strides, device, data_ptr: None }
     }
 }
 

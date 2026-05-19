@@ -20,10 +20,7 @@ pub enum BatchingStrategy {
     /// Wait for a fixed number of requests before scheduling.
     FixedSize { batch_size: usize },
     /// Send requests after a timeout, up to a max batch size.
-    Timeout {
-        max_batch_size: usize,
-        max_latency: Duration,
-    },
+    Timeout { max_batch_size: usize, max_latency: Duration },
     /// Send requests immediately (no batching).
     Immediate,
 }
@@ -120,9 +117,7 @@ impl BatchQueue {
 
         let batch_size = match self.strategy {
             BatchingStrategy::Immediate => 1,
-            BatchingStrategy::FixedSize { batch_size } => {
-                batch_size.min(self.pending.len())
-            }
+            BatchingStrategy::FixedSize { batch_size } => batch_size.min(self.pending.len()),
             BatchingStrategy::Timeout { max_batch_size, .. } => {
                 max_batch_size.min(self.pending.len())
             }

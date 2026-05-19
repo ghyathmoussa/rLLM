@@ -94,8 +94,7 @@ impl Executor for MultiProcExecutor {
         );
         // In production: spawn worker processes, establish IPC channels,
         // initialize NCCL communicators, shard and load model weights.
-        for rank in 0..self.tensor_parallel_size {
-            let config = &kv_cache_configs[rank];
+        for (rank, config) in kv_cache_configs.iter().enumerate() {
             tracing::debug!(rank, num_blocks = config.num_blocks, "Worker KV cache configured");
         }
         self.initialized = true;

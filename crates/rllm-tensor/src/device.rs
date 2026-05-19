@@ -22,17 +22,11 @@ impl Device {
     }
 
     pub fn cuda(index: usize) -> Self {
-        Self::Cuda {
-            index,
-            stream: None,
-        }
+        Self::Cuda { index, stream: None }
     }
 
     pub fn cuda_with_stream(index: usize, stream: CudaStreamHandle) -> Self {
-        Self::Cuda {
-            index,
-            stream: Some(stream),
-        }
+        Self::Cuda { index, stream: Some(stream) }
     }
 
     pub fn is_cuda(&self) -> bool {
@@ -88,16 +82,9 @@ impl PartialEq for Device {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Cpu, Self::Cpu) => true,
-            (
-                Self::Cuda {
-                    index: a,
-                    stream: sa,
-                },
-                Self::Cuda {
-                    index: b,
-                    stream: sb,
-                },
-            ) => a == b && sa == sb,
+            (Self::Cuda { index: a, stream: sa }, Self::Cuda { index: b, stream: sb }) => {
+                a == b && sa == sb
+            }
             _ => false,
         }
     }

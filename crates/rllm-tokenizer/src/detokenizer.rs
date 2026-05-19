@@ -78,15 +78,12 @@ impl StreamingDetokenizer {
 
     pub fn decode_token(&mut self, token_text: &str) -> Option<String> {
         if self.output_mode == OutputMode::FinalOnly {
-            self.cumulative_text.push_str(&decode_utf8_partial(
-                &mut self.partial_bytes,
-                token_text.as_bytes(),
-            ));
+            self.cumulative_text
+                .push_str(&decode_utf8_partial(&mut self.partial_bytes, token_text.as_bytes()));
             return None;
         }
 
-        let decoded =
-            decode_utf8_partial(&mut self.partial_bytes, token_text.as_bytes());
+        let decoded = decode_utf8_partial(&mut self.partial_bytes, token_text.as_bytes());
 
         if self.stop_strings.is_empty() {
             self.cumulative_text.push_str(&decoded);
@@ -100,12 +97,7 @@ impl StreamingDetokenizer {
         self.stop_buffer.push_str(&decoded);
         self.cumulative_text.push_str(&decoded);
 
-        let max_stop_len = self
-            .stop_strings
-            .iter()
-            .map(|s| s.len())
-            .max()
-            .unwrap_or(0);
+        let max_stop_len = self.stop_strings.iter().map(|s| s.len()).max().unwrap_or(0);
 
         for stop in &self.stop_strings {
             if self.stop_buffer.contains(stop) {
@@ -292,32 +284,24 @@ mod tests {
 
     #[test]
     fn stop_token_id_check() {
-        let mut detok = StreamingDetokenizer::new(vec![])
-            .with_stop_token_ids(vec![50256])
-            .with_min_tokens(2);
+        let mut detok =
+            StreamingDetokenizer::new(vec![]).with_stop_token_ids(vec![50256]).with_min_tokens(2);
 
         assert_eq!(detok.check_stop_token(1), StopResult::Continue);
         assert_eq!(detok.check_stop_token(2), StopResult::Continue);
         // min_tokens reached, now stop token triggers
-        assert_eq!(
-            detok.check_stop_token(50256),
-            StopResult::StoppedByTokenId(50256)
-        );
+        assert_eq!(detok.check_stop_token(50256), StopResult::StoppedByTokenId(50256));
     }
 
     #[test]
     fn min_tokens_blocks_stop() {
-        let mut detok = StreamingDetokenizer::new(vec![])
-            .with_stop_token_ids(vec![999])
-            .with_min_tokens(3);
+        let mut detok =
+            StreamingDetokenizer::new(vec![]).with_stop_token_ids(vec![999]).with_min_tokens(3);
 
         assert_eq!(detok.check_stop_token(999), StopResult::Continue);
         assert_eq!(detok.check_stop_token(999), StopResult::Continue);
         assert_eq!(detok.check_stop_token(999), StopResult::Continue);
-        assert_eq!(
-            detok.check_stop_token(999),
-            StopResult::StoppedByTokenId(999)
-        );
+        assert_eq!(detok.check_stop_token(999), StopResult::StoppedByTokenId(999));
     }
 
     #[test]
@@ -348,8 +332,7 @@ mod tests {
 
     #[test]
     fn cumulative_output_mode() {
-        let mut detok =
-            StreamingDetokenizer::new(vec![]).with_output_mode(OutputMode::Cumulative);
+        let mut detok = StreamingDetokenizer::new(vec![]).with_output_mode(OutputMode::Cumulative);
         let out = detok.decode_token("hello ").unwrap();
         assert_eq!(out, "hello ");
         let out = detok.decode_token("world").unwrap();
@@ -358,8 +341,7 @@ mod tests {
 
     #[test]
     fn final_only_mode_accumulates() {
-        let mut detok =
-            StreamingDetokenizer::new(vec![]).with_output_mode(OutputMode::FinalOnly);
+        let mut detok = StreamingDetokenizer::new(vec![]).with_output_mode(OutputMode::FinalOnly);
         assert_eq!(detok.decode_token("hello "), None);
         assert_eq!(detok.decode_token("world"), None);
         let final_text = detok.flush();

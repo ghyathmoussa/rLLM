@@ -54,15 +54,14 @@ pub fn compute_top_n_logprobs(logits: &[f32], n: usize) -> Vec<(u32, f32)> {
     // Partial sort: we only need top-n.
     let limit = n.min(indexed.len());
     if limit < indexed.len() {
-        indexed.select_nth_unstable_by(limit, |a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.select_nth_unstable_by(limit, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
         indexed.truncate(limit);
     }
     indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    indexed
-        .into_iter()
-        .map(|(i, lp)| (i as u32, lp))
-        .collect()
+    indexed.into_iter().map(|(i, lp)| (i as u32, lp)).collect()
 }
 
 #[cfg(test)]

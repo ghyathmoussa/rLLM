@@ -229,10 +229,7 @@ fn acceptance_llama_compatible_model() {
     let outputs = engine.generate(vec![]).unwrap();
     assert_eq!(outputs.len(), 1, "Should produce exactly one output");
     assert!(outputs[0].finished, "Output should be finished");
-    assert!(
-        outputs[0].usage.completion_tokens > 0,
-        "Should generate completion tokens"
-    );
+    assert!(outputs[0].usage.completion_tokens > 0, "Should generate completion tokens");
     assert!(
         outputs[0].usage.completion_tokens <= 32,
         "Completion tokens should not exceed max_tokens"
@@ -245,17 +242,18 @@ fn acceptance_llama_compatible_model() {
 /// to internal SamplingParams works correctly.
 #[test]
 fn acceptance_openai_chat_completion() {
+    use rllm_core::ids::RequestId;
+    use rllm_core::output::CompletionOutput;
     use rllm_core::output::FinishReason;
     use rllm_core::output::RequestOutput;
-    use rllm_core::output::CompletionOutput;
-    use rllm_core::ids::RequestId;
 
     // Create a sample ChatCompletionRequest and convert to SamplingParams.
     let chat_req = rllm_server::openai::ChatCompletionRequest {
         model: "llama-2-7b".into(),
-        messages: vec![
-            rllm_server::openai::ChatMessage { role: "user".into(), content: "Hello!".into() },
-        ],
+        messages: vec![rllm_server::openai::ChatMessage {
+            role: "user".into(),
+            content: "Hello!".into(),
+        }],
         temperature: Some(0.7),
         top_p: Some(0.9),
         max_tokens: Some(100),

@@ -1,13 +1,13 @@
-pub mod registry;
 pub mod hf_config;
 pub mod loader;
+pub mod registry;
 
-#[cfg(feature = "candle-backend")]
-pub mod rope;
 #[cfg(feature = "candle-backend")]
 pub mod layers;
 #[cfg(feature = "candle-backend")]
 pub mod llama;
+#[cfg(feature = "candle-backend")]
+pub mod rope;
 #[cfg(feature = "candle-backend")]
 pub mod runner;
 

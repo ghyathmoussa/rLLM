@@ -1,5 +1,5 @@
 #[cfg(feature = "candle-backend")]
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
@@ -138,14 +138,11 @@ impl LlamaAttention {
         let v = self.v_proj.forward(hidden_states)?;
 
         // Reshape to [batch, seq_len, num_heads, head_dim] then transpose
-        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?; // [batch, num_heads, seq_len, head_dim]
+        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_heads, seq_len, head_dim]
 
-        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
+        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
 
-        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
+        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
 
         // Apply RoPE
         let (q, k) = rope.apply(&q, &k, positions)?;
@@ -188,9 +185,8 @@ impl LlamaAttention {
         let attn_output = attn_weights.matmul(&v)?;
 
         // Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden_size]
-        let attn_output = attn_output
-            .transpose(1, 2)?
-            .reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
+        let attn_output =
+            attn_output.transpose(1, 2)?.reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
 
         self.o_proj.forward(&attn_output)
     }
@@ -203,10 +199,12 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     }
     // x: [batch, num_kv_heads, seq_len, head_dim]
     let (batch, num_kv_heads, seq_len, head_dim) = x.dims4()?;
-    let x = x
-        .unsqueeze(2)?
-        .expand((batch, num_kv_heads, n_rep, seq_len, head_dim))?
-        .reshape((batch, num_kv_heads * n_rep, seq_len, head_dim))?;
+    let x = x.unsqueeze(2)?.expand((batch, num_kv_heads, n_rep, seq_len, head_dim))?.reshape((
+        batch,
+        num_kv_heads * n_rep,
+        seq_len,
+        head_dim,
+    ))?;
     Ok(x)
 }
 
@@ -214,9 +212,7 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
 fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
     // Upper triangular mask with -inf for positions that should be masked
     let mask: Vec<f32> = (0..seq_len)
-        .flat_map(|i| {
-            (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 })
-        })
+        .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
         .collect();
     let mask = Tensor::from_vec(mask, (seq_len, seq_len), device)?;
     // Broadcast to [1, 1, seq_len, seq_len]
@@ -241,12 +237,7 @@ impl LlamaDecoderLayer {
         input_layernorm: RmsNorm,
         post_attention_layernorm: RmsNorm,
     ) -> Self {
-        Self {
-            self_attn,
-            mlp,
-            input_layernorm,
-            post_attention_layernorm,
-        }
+        Self { self_attn, mlp, input_layernorm, post_attention_layernorm }
     }
 
     pub fn forward(
@@ -259,9 +250,7 @@ impl LlamaDecoderLayer {
         // Self attention with residual
         let residual = hidden_states.clone();
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
-        let hidden_states = self
-            .self_attn
-            .forward(&hidden_states, positions, kv_cache, rope)?;
+        let hidden_states = self.self_attn.forward(&hidden_states, positions, kv_cache, rope)?;
         let hidden_states = (residual + hidden_states)?;
 
         // MLP with residual

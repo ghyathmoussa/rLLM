@@ -25,9 +25,7 @@ pub fn apply_top_k(logits: &mut [f32], k: i32) {
 
     let mut indices: Vec<usize> = (0..logits.len()).collect();
     indices.select_nth_unstable_by(k, |&a, &b| {
-        logits[b]
-            .partial_cmp(&logits[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
+        logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let threshold = logits[indices[k]];
@@ -45,22 +43,15 @@ pub fn apply_top_p(logits: &mut [f32], p: f32) {
         return;
     }
 
-    let mut indexed: Vec<(usize, f32)> = logits
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|&(_, v)| v != f32::NEG_INFINITY)
-        .collect();
+    let mut indexed: Vec<(usize, f32)> =
+        logits.iter().copied().enumerate().filter(|&(_, v)| v != f32::NEG_INFINITY).collect();
     indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     if indexed.is_empty() {
         return;
     }
     let max_val = indexed.first().map(|&(_, v)| v).unwrap_or(0.0);
-    let exps: Vec<f32> = indexed
-        .iter()
-        .map(|&(_, v)| (v - max_val).exp())
-        .collect();
+    let exps: Vec<f32> = indexed.iter().map(|&(_, v)| (v - max_val).exp()).collect();
     let sum: f32 = exps.iter().copied().sum();
     if sum == 0.0 {
         return;
@@ -86,10 +77,7 @@ pub fn apply_min_p(logits: &mut [f32], min_p: f32) {
         return;
     }
 
-    let max_logit = logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if max_logit == f32::NEG_INFINITY {
         return;
     }

@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, black_box};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use rllm_bench::helpers::{
     make_inference_request, make_test_kv_cache_manager, make_test_scheduler,
@@ -342,16 +342,15 @@ fn bench_kv_cache_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("kv_cache_write");
     let num_tokens = [1, 16, 64, 256];
     for n in &num_tokens {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(n),
-            n,
-            |b, &num_tokens| {
-                // Simulate compute_slot_mappings overhead.
-                let positions: Vec<u32> = (0..num_tokens as u32).collect();
-                let block_table = vec![0u32; num_tokens.div_ceil(16)];
-                let block_size = 16usize;
-                b.iter(|| {
-                    let slots: Vec<i64> = positions.iter().map(|&pos| {
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &num_tokens| {
+            // Simulate compute_slot_mappings overhead.
+            let positions: Vec<u32> = (0..num_tokens as u32).collect();
+            let block_table = vec![0u32; num_tokens.div_ceil(16)];
+            let block_size = 16usize;
+            b.iter(|| {
+                let slots: Vec<i64> = positions
+                    .iter()
+                    .map(|&pos| {
                         let block_idx = pos as usize / block_size;
                         let offset = pos as usize % block_size;
                         if block_idx < block_table.len() {
@@ -359,11 +358,11 @@ fn bench_kv_cache_write(c: &mut Criterion) {
                         } else {
                             -1
                         }
-                    }).collect();
-                    black_box(slots);
-                });
-            },
-        );
+                    })
+                    .collect();
+                black_box(slots);
+            });
+        });
     }
     group.finish();
 }
@@ -385,7 +384,8 @@ fn bench_fused_rmsnorm(c: &mut Criterion) {
                             let start = row * hidden_size;
                             let row_input = &input[start..start + hidden_size];
                             let row_output = &mut output[start..start + hidden_size];
-                            let mean_sq: f32 = row_input.iter().map(|x| x * x).sum::<f32>() / hidden_size as f32;
+                            let mean_sq: f32 =
+                                row_input.iter().map(|x| x * x).sum::<f32>() / hidden_size as f32;
                             let rms = 1.0 / (mean_sq + 1e-6).sqrt();
                             for (o, &i) in row_output.iter_mut().zip(row_input.iter()) {
                                 *o = i * rms * weight[start % hidden_size];
@@ -407,8 +407,10 @@ fn bench_fused_silu_mul(c: &mut Criterion) {
             BenchmarkId::from_parameter(n_elements),
             &n_elements,
             |b, &n_elements| {
-                let gate: Vec<f32> = (0..n_elements).map(|i| (i as f32) / n_elements as f32).collect();
-                let up: Vec<f32> = (0..n_elements).map(|i| 1.0 - (i as f32) / n_elements as f32).collect();
+                let gate: Vec<f32> =
+                    (0..n_elements).map(|i| (i as f32) / n_elements as f32).collect();
+                let up: Vec<f32> =
+                    (0..n_elements).map(|i| 1.0 - (i as f32) / n_elements as f32).collect();
                 b.iter(|| {
                     let mut output = vec![0.0f32; n_elements];
                     for i in 0..n_elements {

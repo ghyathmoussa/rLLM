@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::ids::RequestId;
 use crate::error::{CoreError, Result};
+use crate::ids::RequestId;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OutputKind {
@@ -102,9 +102,7 @@ impl SamplingParams {
             ));
         }
         if self.repetition_penalty <= 0.0 {
-            return Err(CoreError::InvalidSamplingParams(
-                "repetition_penalty must be > 0".into(),
-            ));
+            return Err(CoreError::InvalidSamplingParams("repetition_penalty must be > 0".into()));
         }
         if !(0.0..=1.0).contains(&self.top_p) {
             return Err(CoreError::InvalidSamplingParams("top_p must be in [0, 1]".into()));
@@ -164,15 +162,18 @@ impl RequestStatus {
         matches!(
             (self, next),
             (Self::Waiting, Self::Running | Self::FinishedAborted)
-            | (Self::Running, Self::Running
-                | Self::Waiting
-                | Self::Preempted
-                | Self::FinishedStopped
-                | Self::FinishedLength
-                | Self::FinishedAborted
-                | Self::FinishedError)
-            | (Self::Preempted, Self::Waiting | Self::FinishedAborted)
-            | (Self::WaitingForRemoteKV, Self::Running | Self::FinishedAborted)
+                | (
+                    Self::Running,
+                    Self::Running
+                        | Self::Waiting
+                        | Self::Preempted
+                        | Self::FinishedStopped
+                        | Self::FinishedLength
+                        | Self::FinishedAborted
+                        | Self::FinishedError
+                )
+                | (Self::Preempted, Self::Waiting | Self::FinishedAborted)
+                | (Self::WaitingForRemoteKV, Self::Running | Self::FinishedAborted)
         )
     }
 
@@ -346,7 +347,9 @@ mod tests {
     #[test]
     fn waiting_for_remote_kv_transitions() {
         assert!(RequestStatus::WaitingForRemoteKV.can_transition_to(RequestStatus::Running));
-        assert!(RequestStatus::WaitingForRemoteKV.can_transition_to(RequestStatus::FinishedAborted));
+        assert!(
+            RequestStatus::WaitingForRemoteKV.can_transition_to(RequestStatus::FinishedAborted)
+        );
     }
 
     #[test]

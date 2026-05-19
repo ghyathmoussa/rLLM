@@ -11,12 +11,8 @@ use crate::engine_core::EngineCore;
 
 /// Commands sent to the engine background task.
 enum EngineCommand {
-    AddRequest {
-        request: Box<InferenceRequest>,
-    },
-    AbortRequest {
-        request_id: RequestId,
-    },
+    AddRequest { request: Box<InferenceRequest> },
+    AbortRequest { request_id: RequestId },
     Shutdown,
 }
 

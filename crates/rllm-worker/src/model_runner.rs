@@ -628,10 +628,7 @@ fn compute_slot_mappings(positions: &[u32], block_table: &[u32], block_size: usi
                 let bt = block_table[block_idx as usize] as i64;
                 let bs = block_size as i64;
                 let off = offset as i64;
-                match bt.checked_mul(bs).and_then(|v| v.checked_add(off)) {
-                    Some(slot) => slot,
-                    None => -1,
-                }
+                bt.checked_mul(bs).and_then(|v| v.checked_add(off)).unwrap_or(-1)
             } else {
                 -1
             }

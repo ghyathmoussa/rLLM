@@ -49,8 +49,12 @@ async fn post_json(uri: &str, body: serde_json::Value) -> ResponseX {
 
 struct ResponseX(axum::response::Response);
 impl ResponseX {
-    fn status(&self) -> StatusCode { self.0.status() }
-    fn headers(&self) -> &axum::http::HeaderMap { self.0.headers() }
+    fn status(&self) -> StatusCode {
+        self.0.status()
+    }
+    fn headers(&self) -> &axum::http::HeaderMap {
+        self.0.headers()
+    }
     async fn text(self) -> String {
         let bytes = axum::body::to_bytes(self.0.into_body(), usize::MAX).await.unwrap();
         String::from_utf8_lossy(&bytes).to_string()
@@ -141,7 +145,9 @@ fn test_chat_completions_invalid_json() {
     rt.block_on(async {
         let body = serde_json::json!({ "model": "test-model" });
         let resp = post_json("/v1/chat/completions", body).await;
-        assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            resp.status() == StatusCode::OK || resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+        );
     });
 }
 
@@ -205,10 +211,8 @@ fn test_chat_completions_streaming_response() {
         });
         let resp = post_json("/v1/chat/completions", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let content_type = resp.headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let content_type =
+            resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
         assert!(
             content_type.contains("text/event-stream"),
             "Expected SSE content type, got: {}",

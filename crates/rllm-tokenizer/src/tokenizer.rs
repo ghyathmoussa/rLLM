@@ -37,10 +37,8 @@ impl Tokenizer {
 
     #[tracing::instrument(skip(self), name = "tokenize")]
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
-        let encoding = self
-            .inner
-            .encode(text, add_special_tokens)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let encoding =
+            self.inner.encode(text, add_special_tokens).map_err(|e| anyhow::anyhow!("{e}"))?;
         let ids = encoding.get_ids().to_vec();
         tracing::trace!(num_tokens = ids.len(), "tokenize complete");
         Ok(ids)
@@ -48,10 +46,8 @@ impl Tokenizer {
 
     #[tracing::instrument(skip(self, ids), name = "detokenize")]
     pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> Result<String> {
-        let text = self
-            .inner
-            .decode(ids, skip_special_tokens)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let text =
+            self.inner.decode(ids, skip_special_tokens).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(text)
     }
 
@@ -67,7 +63,11 @@ impl Tokenizer {
         Ok(encodings.iter().map(|e| e.get_ids().to_vec()).collect())
     }
 
-    pub fn batch_decode(&self, batch: &[Vec<u32>], skip_special_tokens: bool) -> Result<Vec<String>> {
+    pub fn batch_decode(
+        &self,
+        batch: &[Vec<u32>],
+        skip_special_tokens: bool,
+    ) -> Result<Vec<String>> {
         let ids: Vec<&[u32]> = batch.iter().map(|v| v.as_slice()).collect();
         let texts = self
             .inner
@@ -127,10 +127,7 @@ impl Tokenizer {
             .or_else(|| single_token_id(&inner, "<s>"))
             .or_else(|| single_token_id(&inner, "<|begin_of_text|>"));
 
-        let pad_token_id = config
-            .pad_token
-            .as_deref()
-            .and_then(|t| token_id_from_str(&inner, t));
+        let pad_token_id = config.pad_token.as_deref().and_then(|t| token_id_from_str(&inner, t));
 
         Ok(Self {
             inner,
@@ -196,25 +193,18 @@ fn load_config_from_dir(dir: &Path) -> Result<TokenizerConfigData> {
     let eos_token = extract_token_field(&json, "eos_token");
     let bos_token = extract_token_field(&json, "bos_token");
     let pad_token = extract_token_field(&json, "pad_token");
-    let chat_template = json
-        .get("chat_template")
-        .and_then(|v| {
-            if v.is_string() {
-                v.as_str().map(|s| s.to_string())
-            } else if v.is_object() {
-                // Some models use {"default": "...", "tool_use": "..."}
-                v.get("default").and_then(|d| d.as_str().map(|s| s.to_string()))
-            } else {
-                None
-            }
-        });
+    let chat_template = json.get("chat_template").and_then(|v| {
+        if v.is_string() {
+            v.as_str().map(|s| s.to_string())
+        } else if v.is_object() {
+            // Some models use {"default": "...", "tool_use": "..."}
+            v.get("default").and_then(|d| d.as_str().map(|s| s.to_string()))
+        } else {
+            None
+        }
+    });
 
-    Ok(TokenizerConfigData {
-        eos_token,
-        bos_token,
-        pad_token,
-        chat_template,
-    })
+    Ok(TokenizerConfigData { eos_token, bos_token, pad_token, chat_template })
 }
 
 fn extract_token_field(json: &serde_json::Value, field: &str) -> Option<String> {
@@ -230,12 +220,7 @@ fn extract_token_field(json: &serde_json::Value, field: &str) -> Option<String> 
 }
 
 fn empty_config() -> TokenizerConfigData {
-    TokenizerConfigData {
-        eos_token: None,
-        bos_token: None,
-        pad_token: None,
-        chat_template: None,
-    }
+    TokenizerConfigData { eos_token: None, bos_token: None, pad_token: None, chat_template: None }
 }
 
 #[cfg(test)]

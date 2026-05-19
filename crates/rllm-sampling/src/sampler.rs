@@ -49,9 +49,7 @@ impl Sampler {
 
     /// Create a sampler with a fixed seed for reproducible sampling.
     pub fn from_seed(seed: u64) -> Self {
-        Self {
-            rng: Some(ChaCha8Rng::seed_from_u64(seed)),
-        }
+        Self { rng: Some(ChaCha8Rng::seed_from_u64(seed)) }
     }
 
     /// Sample a single token from the given input.
@@ -60,11 +58,7 @@ impl Sampler {
         let start = std::time::Instant::now();
         let vocab_size = input.logits.len();
         if vocab_size == 0 {
-            return SamplingOutput {
-                token_id: 0,
-                logprob: None,
-                top_logprobs: None,
-            };
+            return SamplingOutput { token_id: 0, logprob: None, top_logprobs: None };
         }
 
         let mut logits = input.logits.clone();
@@ -168,11 +162,7 @@ impl Sampler {
             (None, None)
         };
 
-        let output = SamplingOutput {
-            token_id,
-            logprob,
-            top_logprobs,
-        };
+        let output = SamplingOutput { token_id, logprob, top_logprobs };
 
         rllm_metrics::histogram!("rllm_sampling_duration_seconds")
             .record(start.elapsed().as_secs_f64());
@@ -233,10 +223,7 @@ mod tests {
     #[test]
     fn test_greedy_equals_argmax() {
         let logits = vec![0.1, 0.5, 0.9, 0.3, 0.2];
-        let params = SamplingParams {
-            temperature: 0.0,
-            ..SamplingParams::default()
-        };
+        let params = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
         let input = SamplingInput {
             logits: logits.clone(),
             params,
@@ -254,15 +241,9 @@ mod tests {
     #[test]
     fn test_top_k_1_equals_greedy() {
         let logits = vec![0.1, 0.5, 0.9, 0.3, 0.2];
-        let params_greedy = SamplingParams {
-            temperature: 0.0,
-            ..SamplingParams::default()
-        };
-        let params_topk1 = SamplingParams {
-            temperature: 1.0,
-            top_k: 1,
-            ..SamplingParams::default()
-        };
+        let params_greedy = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
+        let params_topk1 =
+            SamplingParams { temperature: 1.0, top_k: 1, ..SamplingParams::default() };
         let input_greedy = SamplingInput {
             logits: logits.clone(),
             params: params_greedy,
@@ -290,10 +271,7 @@ mod tests {
         let logits = vec![1.0, 5.0, 1.0]; // token 1 is favored
 
         // Without penalties: token 1 should win.
-        let params_no_penalty = SamplingParams {
-            temperature: 0.0,
-            ..SamplingParams::default()
-        };
+        let params_no_penalty = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
         let input_no_penalty = SamplingInput {
             logits: logits.clone(),
             params: params_no_penalty,
@@ -328,10 +306,7 @@ mod tests {
     fn test_bad_words_block_tokens() {
         let logits = vec![1.0, 5.0, 1.0]; // token 1 is favored
 
-        let params = SamplingParams {
-            temperature: 0.0,
-            ..SamplingParams::default()
-        };
+        let params = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
         let input = SamplingInput {
             logits: logits.clone(),
             params,
@@ -348,11 +323,8 @@ mod tests {
     #[test]
     fn test_fixed_seed_is_reproducible() {
         let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let params = SamplingParams {
-            temperature: 1.0,
-            seed: Some(42),
-            ..SamplingParams::default()
-        };
+        let params =
+            SamplingParams { temperature: 1.0, seed: Some(42), ..SamplingParams::default() };
 
         let make_input = || SamplingInput {
             logits: logits.clone(),
@@ -375,10 +347,7 @@ mod tests {
     #[test]
     fn test_fixed_seed_different_from_different_seed() {
         let logits = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let params = SamplingParams {
-            temperature: 1.0,
-            ..SamplingParams::default()
-        };
+        let params = SamplingParams { temperature: 1.0, ..SamplingParams::default() };
         let input = SamplingInput {
             logits: logits.clone(),
             params,
@@ -403,11 +372,8 @@ mod tests {
     #[test]
     fn test_logprobs_computed_when_requested() {
         let logits = vec![1.0, 2.0, 5.0, 0.5, 0.3];
-        let params = SamplingParams {
-            temperature: 0.0,
-            logprobs: Some(3),
-            ..SamplingParams::default()
-        };
+        let params =
+            SamplingParams { temperature: 0.0, logprobs: Some(3), ..SamplingParams::default() };
         let input = SamplingInput {
             logits,
             params,
@@ -432,11 +398,8 @@ mod tests {
     #[test]
     fn test_eos_suppressed_under_min_tokens() {
         let logits = vec![1.0, 1.0, 100.0]; // EOS (token 2) is dominant
-        let params = SamplingParams {
-            temperature: 0.0,
-            min_tokens: 5,
-            ..SamplingParams::default()
-        };
+        let params =
+            SamplingParams { temperature: 0.0, min_tokens: 5, ..SamplingParams::default() };
         let input = SamplingInput {
             logits,
             params,
@@ -475,10 +438,7 @@ mod tests {
     fn test_sample_batch() {
         let logits1 = vec![0.0, 0.0, 10.0];
         let logits2 = vec![10.0, 0.0, 0.0];
-        let params = SamplingParams {
-            temperature: 0.0,
-            ..SamplingParams::default()
-        };
+        let params = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
         let inputs = vec![
             SamplingInput {
                 logits: logits1,

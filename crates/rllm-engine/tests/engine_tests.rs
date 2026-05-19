@@ -37,7 +37,10 @@ impl TestExecutor {
 }
 
 impl Executor for TestExecutor {
-    fn initialize(&mut self, _kv_cache_configs: &[rllm_cache::spec::KVCacheConfig]) -> anyhow::Result<()> {
+    fn initialize(
+        &mut self,
+        _kv_cache_configs: &[rllm_cache::spec::KVCacheConfig],
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -45,7 +48,10 @@ impl Executor for TestExecutor {
         Ok(4 * 1024 * 1024 * 1024)
     }
 
-    fn execute_model(&mut self, scheduler_output: &rllm_scheduler::SchedulerOutput) -> anyhow::Result<ExecutorOutput> {
+    fn execute_model(
+        &mut self,
+        scheduler_output: &rllm_scheduler::SchedulerOutput,
+    ) -> anyhow::Result<ExecutorOutput> {
         let scheduled_ids: Vec<RequestId> = scheduler_output
             .scheduled_new
             .iter()
@@ -105,11 +111,7 @@ impl Executor for TestExecutor {
     ) {
         self.requests.insert(
             request_id,
-            TestRequestState {
-                prompt_token_ids,
-                generated_token_ids: Vec::new(),
-                sampling_params,
-            },
+            TestRequestState { prompt_token_ids, generated_token_ids: Vec::new(), sampling_params },
         );
     }
 
@@ -395,8 +397,5 @@ fn test_usage_statistics() {
     assert_eq!(out.usage.prompt_tokens, prompt_len as u32);
     assert!(out.usage.completion_tokens > 0);
     assert!(out.usage.completion_tokens <= max_tokens);
-    assert_eq!(
-        out.usage.total_tokens,
-        out.usage.prompt_tokens + out.usage.completion_tokens
-    );
+    assert_eq!(out.usage.total_tokens, out.usage.prompt_tokens + out.usage.completion_tokens);
 }

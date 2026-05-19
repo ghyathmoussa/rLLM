@@ -206,10 +206,7 @@ pub fn generate_completion_id(prefix: &str) -> String {
 
 /// Get the current unix timestamp.
 pub fn now_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 /// Convert a ChatCompletionRequest's sampling fields into rllm SamplingParams.
@@ -327,10 +324,7 @@ pub fn request_output_to_chat_completion(
 }
 
 /// Convert engine RequestOutput to a CompletionResponse.
-pub fn request_output_to_completion(
-    output: &RequestOutput,
-    model: &str,
-) -> CompletionResponse {
+pub fn request_output_to_completion(output: &RequestOutput, model: &str) -> CompletionResponse {
     let id = generate_completion_id("cmpl");
     let created = now_timestamp();
 
@@ -345,11 +339,7 @@ pub fn request_output_to_completion(
                 rllm_core::output::FinishReason::Aborted => "stop".to_string(),
                 rllm_core::output::FinishReason::Error => "stop".to_string(),
             });
-            CompletionChoice {
-                index: i as u32,
-                text: co.text.clone(),
-                finish_reason,
-            }
+            CompletionChoice { index: i as u32, text: co.text.clone(), finish_reason }
         })
         .collect();
 

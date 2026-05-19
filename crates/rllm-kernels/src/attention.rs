@@ -238,13 +238,7 @@ impl AttentionMetadata {
 
         self.seq_lens
             .iter()
-            .map(|&len| {
-                if len <= window {
-                    (0, len)
-                } else {
-                    (len - window, len)
-                }
-            })
+            .map(|&len| if len <= window { (0, len) } else { (len - window, len) })
             .collect()
     }
 
@@ -719,11 +713,7 @@ mod tests {
 
     #[test]
     fn detect_common_prefix_blocks_single_seq() {
-        let meta = AttentionMetadata::for_decode(
-            vec![10],
-            vec![vec![0, 1, 2]],
-            3,
-        );
+        let meta = AttentionMetadata::for_decode(vec![10], vec![vec![0, 1, 2]], 3);
         let mut m = meta;
         m.detect_common_prefix_blocks();
         assert_eq!(m.common_prefix_blocks, 0);
@@ -731,11 +721,8 @@ mod tests {
 
     #[test]
     fn detect_common_prefix_blocks_shared() {
-        let meta = AttentionMetadata::for_decode(
-            vec![16, 16],
-            vec![vec![0, 1, 2], vec![0, 1, 3]],
-            3,
-        );
+        let meta =
+            AttentionMetadata::for_decode(vec![16, 16], vec![vec![0, 1, 2], vec![0, 1, 3]], 3);
         let mut m = meta;
         m.detect_common_prefix_blocks();
         // First two blocks (0, 1) are shared
@@ -744,11 +731,7 @@ mod tests {
 
     #[test]
     fn detect_common_prefix_blocks_none_shared() {
-        let meta = AttentionMetadata::for_decode(
-            vec![16, 16],
-            vec![vec![0, 1], vec![5, 6]],
-            2,
-        );
+        let meta = AttentionMetadata::for_decode(vec![16, 16], vec![vec![0, 1], vec![5, 6]], 2);
         let mut m = meta;
         m.detect_common_prefix_blocks();
         assert_eq!(m.common_prefix_blocks, 0);
@@ -756,22 +739,15 @@ mod tests {
 
     #[test]
     fn test_sliding_window_ranges_none() {
-        let meta = AttentionMetadata::for_decode(
-            vec![10, 20],
-            vec![vec![0], vec![1]],
-            1,
-        );
+        let meta = AttentionMetadata::for_decode(vec![10, 20], vec![vec![0], vec![1]], 1);
         let ranges = meta.sliding_window_ranges();
         assert_eq!(ranges, vec![(0, 10), (0, 20)]);
     }
 
     #[test]
     fn test_sliding_window_ranges_with_window() {
-        let mut meta = AttentionMetadata::for_decode(
-            vec![10, 200, 50],
-            vec![vec![0], vec![1], vec![2]],
-            1,
-        );
+        let mut meta =
+            AttentionMetadata::for_decode(vec![10, 200, 50], vec![vec![0], vec![1], vec![2]], 1);
         meta.sliding_window = Some(64);
         let ranges = meta.sliding_window_ranges();
         // seq 0: len=10 <= 64, full range (0, 10)
@@ -784,11 +760,8 @@ mod tests {
 
     #[test]
     fn test_num_window_tokens() {
-        let mut meta = AttentionMetadata::for_decode(
-            vec![10, 200, 50],
-            vec![vec![0], vec![1], vec![2]],
-            1,
-        );
+        let mut meta =
+            AttentionMetadata::for_decode(vec![10, 200, 50], vec![vec![0], vec![1], vec![2]], 1);
         meta.sliding_window = Some(64);
         // windowed: min(10,64) + min(200,64) + min(50,64) = 10 + 64 + 50 = 124
         assert_eq!(meta.num_window_tokens(), 124);
@@ -796,24 +769,16 @@ mod tests {
 
     #[test]
     fn test_num_window_tokens_no_window() {
-        let meta = AttentionMetadata::for_decode(
-            vec![10, 200, 50],
-            vec![vec![0], vec![1], vec![2]],
-            1,
-        );
+        let meta =
+            AttentionMetadata::for_decode(vec![10, 200, 50], vec![vec![0], vec![1], vec![2]], 1);
         // without window: sum of all lengths
         assert_eq!(meta.num_window_tokens(), 260);
     }
 
     #[test]
     fn test_for_decode_with_options() {
-        let meta = AttentionMetadata::for_decode_with_options(
-            vec![10],
-            vec![vec![0, 1]],
-            2,
-            1,
-            Some(32),
-        );
+        let meta =
+            AttentionMetadata::for_decode_with_options(vec![10], vec![vec![0, 1]], 2, 1, Some(32));
         assert_eq!(meta.common_prefix_blocks, 1);
         assert_eq!(meta.sliding_window, Some(32));
     }

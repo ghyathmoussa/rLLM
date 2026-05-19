@@ -23,15 +23,11 @@ pub fn render_chat_template(
     add_generation_prompt: bool,
 ) -> Result<String> {
     let mut env = Environment::new();
-    env.add_template("chat", template)
-        .context("invalid chat template")?;
+    env.add_template("chat", template).context("invalid chat template")?;
 
     let tmpl_messages: Vec<TemplateMessage> = messages
         .iter()
-        .map(|m| TemplateMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
+        .map(|m| TemplateMessage { role: m.role.clone(), content: m.content.clone() })
         .collect();
 
     let ctx = TemplateContext {
@@ -42,9 +38,7 @@ pub fn render_chat_template(
     };
 
     let tmpl = env.get_template("chat")?;
-    let rendered = tmpl
-        .render(ctx)
-        .context("chat template rendering failed")?;
+    let rendered = tmpl.render(ctx).context("chat template rendering failed")?;
 
     Ok(rendered)
 }
@@ -55,10 +49,7 @@ pub fn render_chat_template_fallback(
 ) -> String {
     let mut output = String::new();
     for msg in messages {
-        output.push_str(&format!(
-            "<|{}|>\n{}\n",
-            msg.role, msg.content
-        ));
+        output.push_str(&format!("<|{}|>\n{}\n", msg.role, msg.content));
     }
     if add_generation_prompt {
         output.push_str("<|assistant|");
@@ -73,14 +64,8 @@ mod tests {
 
     fn make_messages() -> Vec<ChatMessage> {
         vec![
-            ChatMessage {
-                role: "system".into(),
-                content: "You are a helpful assistant.".into(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: "Hello!".into(),
-            },
+            ChatMessage { role: "system".into(), content: "You are a helpful assistant.".into() },
+            ChatMessage { role: "user".into(), content: "Hello!".into() },
         ]
     }
 
@@ -97,10 +82,7 @@ mod tests {
 
     #[test]
     fn fallback_without_generation_prompt() {
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: "Hello!".into(),
-        }];
+        let messages = vec![ChatMessage { role: "user".into(), content: "Hello!".into() }];
         let result = render_chat_template_fallback(&messages, false);
         assert!(!result.contains("<|assistant|"));
     }
@@ -140,10 +122,7 @@ mod tests {
         .replace("{im_start}", "<|im_start|>")
         .replace("{im_end}", "<|im_end|>");
 
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: "What is 2+2?".into(),
-        }];
+        let messages = vec![ChatMessage { role: "user".into(), content: "What is 2+2?".into() }];
         let result = render_chat_template(&template, &messages, true).unwrap();
         assert!(result.contains("user"));
         assert!(result.contains("What is 2+2?"));

@@ -1,12 +1,12 @@
 #[cfg(feature = "candle-backend")]
 use anyhow::{Context, Result};
 #[cfg(feature = "candle-backend")]
-use candle_core::{Device, Tensor, D};
+use candle_core::{D, Device, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::config::ModelConfig;
 
 #[cfg(feature = "candle-backend")]
-use crate::layers::{LlamaAttention, LlamaDecoderLayer, LlamaMLP, Linear, RmsNorm};
+use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm};
 #[cfg(feature = "candle-backend")]
 use crate::loader::WeightMap;
 #[cfg(feature = "candle-backend")]
@@ -75,7 +75,8 @@ impl CausalLM for LlamaForCausalLM {
 
         let logits = self.forward(&input_ids, &positions, &mut kv_cache)?;
         let seq_len = logits.dim(D::Minus2).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let last_logits = logits.narrow(D::Minus2, seq_len - 1, 1).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let last_logits =
+            logits.narrow(D::Minus2, seq_len - 1, 1).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut tokens = prompt.to_vec();
         let mut next_token = argmax(&last_logits)?;
@@ -180,8 +181,13 @@ impl LlamaModel {
                 .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.o_proj.weight"))?;
 
             let attn = LlamaAttention::new(
-                q_proj, k_proj, v_proj, o_proj,
-                num_heads, num_kv_heads, head_dim,
+                q_proj,
+                k_proj,
+                v_proj,
+                o_proj,
+                num_heads,
+                num_kv_heads,
+                head_dim,
             );
 
             let gate_proj = weights
@@ -230,7 +236,12 @@ impl LlamaModel {
 
         tracing::info!(
             "LlamaModel: {} layers, {} heads ({} KV heads), head_dim={}, hidden={}, vocab={}",
-            config.num_layers, num_heads, num_kv_heads, head_dim, hidden_size, config.vocab_size,
+            config.num_layers,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            hidden_size,
+            config.vocab_size,
         );
 
         Ok(Self {
@@ -311,7 +322,8 @@ mod tests {
 
         weights.insert(
             "model.embed_tokens.weight".into(),
-            Tensor::randn(0.0f32, 1.0f32, (config.vocab_size, config.hidden_size), &device).unwrap(),
+            Tensor::randn(0.0f32, 1.0f32, (config.vocab_size, config.hidden_size), &device)
+                .unwrap(),
         );
         weights.insert(
             "model.norm.weight".into(),
@@ -325,15 +337,42 @@ mod tests {
             let nq = config.num_attention_heads * config.head_dim;
             let nkv = config.num_kv_heads * config.head_dim;
 
-            weights.insert(format!("{p}.self_attn.q_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (nq, h), &device).unwrap());
-            weights.insert(format!("{p}.self_attn.k_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (nkv, h), &device).unwrap());
-            weights.insert(format!("{p}.self_attn.v_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (nkv, h), &device).unwrap());
-            weights.insert(format!("{p}.self_attn.o_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (h, nq), &device).unwrap());
-            weights.insert(format!("{p}.mlp.gate_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (ih, h), &device).unwrap());
-            weights.insert(format!("{p}.mlp.up_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (ih, h), &device).unwrap());
-            weights.insert(format!("{p}.mlp.down_proj.weight"), Tensor::randn(0.0f32, 0.02f32, (h, ih), &device).unwrap());
-            weights.insert(format!("{p}.input_layernorm.weight"), Tensor::ones(h, DType::F32, &device).unwrap());
-            weights.insert(format!("{p}.post_attention_layernorm.weight"), Tensor::ones(h, DType::F32, &device).unwrap());
+            weights.insert(
+                format!("{p}.self_attn.q_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (nq, h), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.self_attn.k_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (nkv, h), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.self_attn.v_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (nkv, h), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.self_attn.o_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (h, nq), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.mlp.gate_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (ih, h), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.mlp.up_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (ih, h), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.mlp.down_proj.weight"),
+                Tensor::randn(0.0f32, 0.02f32, (h, ih), &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.input_layernorm.weight"),
+                Tensor::ones(h, DType::F32, &device).unwrap(),
+            );
+            weights.insert(
+                format!("{p}.post_attention_layernorm.weight"),
+                Tensor::ones(h, DType::F32, &device).unwrap(),
+            );
         }
 
         let weight_map = WeightMap { weights, device: device.clone() };

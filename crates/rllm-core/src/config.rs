@@ -193,10 +193,7 @@ mod tests {
             cache: sample_cache_config(),
             scheduler: sample_scheduler_config(),
             parallel: sample_parallel_config(),
-            device: DeviceConfig {
-                device_type: DeviceType::Cuda,
-                device_index: 0,
-            },
+            device: DeviceConfig { device_type: DeviceType::Cuda, device_index: 0 },
         }
     }
 

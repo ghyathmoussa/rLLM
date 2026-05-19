@@ -180,18 +180,13 @@ fn download_one_hf_file(model_id: &str, file: &str, token: Option<String>) -> Re
     use hf_hub::api::sync::ApiBuilder;
 
     tracing::debug!(model = %model_id, file = %file, "downloading Hugging Face file");
-    let mut builder = ApiBuilder::from_env()
-        .with_retries(3)
-        .with_progress(false);
+    let mut builder = ApiBuilder::from_env().with_retries(3).with_progress(false);
     if token.is_some() {
         builder = builder.with_token(token);
     }
-    let api = builder
-        .build()
-        .with_context(|| format!("creating HF API client for {model_id}"))?;
+    let api = builder.build().with_context(|| format!("creating HF API client for {model_id}"))?;
     let repo = api.model(model_id.to_string());
-    repo.get(file)
-        .with_context(|| format!("downloading {file} for {model_id}"))?;
+    repo.get(file).with_context(|| format!("downloading {file} for {model_id}"))?;
     tracing::debug!(model = %model_id, file = %file, "downloaded Hugging Face file");
     Ok(())
 }
@@ -362,21 +357,15 @@ fn load_shard_index(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
             // Sanitize: reject filenames with path traversal components
             let p = Path::new(f);
             if f.starts_with('/') || f.starts_with('\\') || f.contains("..") {
-                anyhow::bail!(
-                    "path traversal detected in shard filename: {}",
-                    p.display()
-                );
+                anyhow::bail!("path traversal detected in shard filename: {}", p.display());
             }
             // Canonicalize to verify the path stays within dir
             let joined = dir.join(f);
-            let canonical = joined.canonicalize().with_context(|| {
-                format!("resolving shard path: {}", joined.display())
-            })?;
+            let canonical = joined
+                .canonicalize()
+                .with_context(|| format!("resolving shard path: {}", joined.display()))?;
             if !canonical.starts_with(&dir.canonicalize()?) {
-                anyhow::bail!(
-                    "shard path escapes model directory: {}",
-                    joined.display()
-                );
+                anyhow::bail!("shard path escapes model directory: {}", joined.display());
             }
             Ok(joined)
         })

@@ -39,9 +39,7 @@ pub struct ModelRegistry {
 
 impl ModelRegistry {
     pub fn new() -> Self {
-        Self {
-            factories: HashMap::new(),
-        }
+        Self { factories: HashMap::new() }
     }
 
     pub fn register(&mut self, architecture: &str, factory: ModelFactory) {

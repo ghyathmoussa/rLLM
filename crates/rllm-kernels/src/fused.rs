@@ -82,11 +82,7 @@ mod ffi {
 
 #[cfg(has_cuda)]
 fn check(rc: i32) -> Result<(), CudaKernelError> {
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(CudaKernelError::KernelError { code: rc })
-    }
+    if rc == 0 { Ok(()) } else { Err(CudaKernelError::KernelError { code: rc }) }
 }
 
 // ── Fused RMSNorm ─────────────────────────────────────────────────────────
@@ -330,8 +326,13 @@ mod tests {
         #[test]
         fn fused_rmsnorm_returns_not_available() {
             let result = fused_rmsnorm_f16(
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
-                0, 0, 1e-6, 0,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                1e-6,
+                0,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
@@ -339,25 +340,29 @@ mod tests {
         #[test]
         fn fused_rmsnorm_sync_returns_not_available() {
             let result = fused_rmsnorm_f16_sync(
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
-                0, 0, 1e-6,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                1e-6,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
 
         #[test]
         fn fused_silu_mul_returns_not_available() {
-            let result = fused_silu_mul_f16(
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
-                0, 0,
-            );
+            let result =
+                fused_silu_mul_f16(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), 0, 0);
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
 
         #[test]
         fn fused_silu_mul_sync_returns_not_available() {
             let result = fused_silu_mul_f16_sync(
-                std::ptr::null_mut(), std::ptr::null(), std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
                 0,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
@@ -366,9 +371,17 @@ mod tests {
         #[test]
         fn fused_rope_returns_not_available() {
             let result = fused_rope_f16(
-                std::ptr::null_mut(), std::ptr::null_mut(),
-                std::ptr::null(), std::ptr::null(), std::ptr::null(),
-                0, 0, 0, 0, 10000.0, 0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                10000.0,
+                0,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
@@ -376,9 +389,16 @@ mod tests {
         #[test]
         fn fused_rope_sync_returns_not_available() {
             let result = fused_rope_f16_sync(
-                std::ptr::null_mut(), std::ptr::null_mut(),
-                std::ptr::null(), std::ptr::null(), std::ptr::null(),
-                0, 0, 0, 0, 10000.0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                10000.0,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
@@ -444,7 +464,11 @@ mod tests {
 
         unsafe fn download(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
-            libc::memcpy(host.as_mut_ptr() as *mut libc::c_void, ptr as *const libc::c_void, len * 2);
+            libc::memcpy(
+                host.as_mut_ptr() as *mut libc::c_void,
+                ptr as *const libc::c_void,
+                len * 2,
+            );
             host
         }
 
@@ -477,7 +501,9 @@ mod tests {
                 assert!(
                     (actual - expected).abs() < 0.1,
                     "silu_mul[{}]: expected {:.4}, got {:.4}",
-                    i, expected, actual
+                    i,
+                    expected,
+                    actual
                 );
             }
         }
@@ -496,7 +522,9 @@ mod tests {
 
             let d_input = unsafe { upload(&input_h) };
             let d_weight = unsafe { upload(&weight_h) };
-            let d_output = unsafe { gpu_alloc(n_elements as usize * 2).expect("gpu_alloc failed") as *mut u16 };
+            let d_output = unsafe {
+                gpu_alloc(n_elements as usize * 2).expect("gpu_alloc failed") as *mut u16
+            };
 
             unsafe {
                 fused_rmsnorm_f16_sync(d_output, d_input, d_weight, hidden_size, n_elements, eps)
@@ -516,7 +544,9 @@ mod tests {
                 assert!(
                     (actual - expected).abs() < 0.1,
                     "rmsnorm row0[{}]: expected {:.4}, got {:.4}",
-                    i, expected, actual
+                    i,
+                    expected,
+                    actual
                 );
             }
 
@@ -528,7 +558,9 @@ mod tests {
                 assert!(
                     (actual - expected).abs() < 0.1,
                     "rmsnorm row1[{}]: expected {:.4}, got {:.4}",
-                    i, expected, actual
+                    i,
+                    expected,
+                    actual
                 );
             }
         }
@@ -552,9 +584,13 @@ mod tests {
 
             let d_query = unsafe { upload(&query_h) };
             let d_key = unsafe { upload(&key_h) };
-            let d_out_q = unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
-            let d_out_k = unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
-            let mut d_positions = unsafe { gpu_alloc(num_tokens as usize * 4).expect("gpu_alloc failed") as *mut i32 };
+            let d_out_q =
+                unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
+            let d_out_k =
+                unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
+            let mut d_positions = unsafe {
+                gpu_alloc(num_tokens as usize * 4).expect("gpu_alloc failed") as *mut i32
+            };
             unsafe {
                 libc::memcpy(
                     d_positions as *mut libc::c_void,
@@ -565,9 +601,18 @@ mod tests {
 
             unsafe {
                 fused_rope_f16_sync(
-                    d_out_q, d_out_k, d_query, d_key, d_positions,
-                    num_tokens, num_q_heads, num_kv_heads, head_dim, rope_theta,
-                ).expect("rope failed");
+                    d_out_q,
+                    d_out_k,
+                    d_query,
+                    d_key,
+                    d_positions,
+                    num_tokens,
+                    num_q_heads,
+                    num_kv_heads,
+                    head_dim,
+                    rope_theta,
+                )
+                .expect("rope failed");
             }
 
             let out_q = unsafe { download(d_out_q, n as usize) };
@@ -585,7 +630,9 @@ mod tests {
                 assert!(
                     (actual - expected).abs() < 0.1,
                     "rope pos0 [{}]: expected {:.4}, got {:.4}",
-                    i, expected, actual
+                    i,
+                    expected,
+                    actual
                 );
             }
 
@@ -597,7 +644,8 @@ mod tests {
             assert!(
                 (actual_0 - expected_0).abs() < 0.1,
                 "rope pos1 dim0: expected {:.4}, got {:.4}",
-                expected_0, actual_0
+                expected_0,
+                actual_0
             );
         }
     }

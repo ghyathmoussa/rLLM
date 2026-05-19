@@ -167,7 +167,8 @@ impl EngineCore {
             let req = self.requests.get(request_id);
             if let Some(req) = req {
                 let prompt_tokens = u32::try_from(req.prompt_token_ids.len()).unwrap_or(u32::MAX);
-                let completion_tokens = u32::try_from(req.generated_token_ids.len()).unwrap_or(u32::MAX);
+                let completion_tokens =
+                    u32::try_from(req.generated_token_ids.len()).unwrap_or(u32::MAX);
 
                 // Record prompt tokens on first output.
                 if completion_tokens == 1 {

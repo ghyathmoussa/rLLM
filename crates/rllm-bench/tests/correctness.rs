@@ -369,19 +369,12 @@ fn batch_determinism_same_config() {
         let req = make_inference_request_with_params(16, 8, params.clone());
         engine.add_request(req).unwrap();
         let outputs = engine.generate(vec![]).unwrap();
-        outputs[0]
-            .outputs
-            .iter()
-            .flat_map(|o| o.token_ids.clone())
-            .collect::<Vec<_>>()
+        outputs[0].outputs.iter().flat_map(|o| o.token_ids.clone()).collect::<Vec<_>>()
     };
 
     let run1 = run_test();
     let run2 = run_test();
-    assert_eq!(
-        run1, run2,
-        "Same deterministic config should produce same output"
-    );
+    assert_eq!(run1, run2, "Same deterministic config should produce same output");
 }
 
 /// Batch invariance: Running the same batch of multiple requests twice
@@ -410,12 +403,7 @@ fn batch_determinism_multiple_requests() {
         let outputs = engine.generate(vec![]).unwrap();
         outputs
             .iter()
-            .map(|o| {
-                o.outputs
-                    .iter()
-                    .flat_map(|co| co.token_ids.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|o| o.outputs.iter().flat_map(|co| co.token_ids.clone()).collect::<Vec<_>>())
             .collect::<Vec<_>>()
     };
 
@@ -449,12 +437,7 @@ fn batch_determinism_seeded_random() {
         let outputs = engine.generate(vec![]).unwrap();
         outputs
             .iter()
-            .map(|o| {
-                o.outputs
-                    .iter()
-                    .flat_map(|co| co.token_ids.clone())
-                    .collect::<Vec<_>>()
-            })
+            .map(|o| o.outputs.iter().flat_map(|co| co.token_ids.clone()).collect::<Vec<_>>())
             .collect::<Vec<_>>()
     };
 
