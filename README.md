@@ -17,7 +17,7 @@
 
 ## Overview
 
-rLLM is an LLM inference engine inspired by [vLLM](https://github.com/vllm-project/vllm), re-implemented from scratch in Rust. It leverages Rust's memory safety guarantees, zero-cost abstractions, and freedom from the Python GIL to deliver predictable performance and a single-binary deployment.
+rLLM is an LLM inference engine built in Rust. It leverages Rust's memory safety guarantees, zero-cost abstractions, and freedom from the Python GIL to deliver predictable performance and a single-binary deployment.
 
 What rLLM provides:
 - OpenAI-compatible HTTP API (drop-in replacement for OpenAI clients)
@@ -255,7 +255,6 @@ rLLM is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) f
 
 ## Acknowledgments
 
-- [vLLM](https://github.com/vllm-project/vllm) – original inspiration and PagedAttention design
 - [Candle](https://github.com/huggingface/candle) – Rust ML framework with CUDA support
 - [Axum](https://github.com/tokio-rs/axum) – ergonomic HTTP framework
 - [Hugging Face](https://huggingface.co/) – model hub and tokenizers library
