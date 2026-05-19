@@ -75,7 +75,7 @@ indexmap = "2"
 
 # Tokenizer and model loading
 tokenizers = "0.21"
-hf-hub = "0.4"
+hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
 safetensors = "0.6"
 minijinja = "2"
 
@@ -106,7 +106,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Benchmarking
 criterion = { version = "0.6", features = ["html_reports"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 proptest = "1"
 
 # Constant-time comparison

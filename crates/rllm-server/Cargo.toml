@@ -35,7 +35,7 @@ subtle.workspace = true
 metrics-exporter-prometheus.workspace = true
 
 [features]
-default = ["cuda"]
+default = ["candle-backend"]
 candle-backend = [
     "rllm-executor/candle-backend",
     "rllm-model/candle-backend",

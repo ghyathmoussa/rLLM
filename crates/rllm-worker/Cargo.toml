@@ -24,7 +24,7 @@ parking_lot.workspace = true
 rllm-core.workspace = true
 
 [features]
-default = ["cuda", "candle-backend"]
+default = ["candle-backend"]
 cpu = ["rllm-kernels/cpu", "rllm-tensor/cpu"]
 cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda", "rllm-model/cuda"]
 candle-backend = ["rllm-model/candle-backend"]
