@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_batch_queue_enqueue_all() {
         let mut queue = BatchQueue::new();
-        let requests: Vec<_> = (0..5).map(|i| make_request(i)).collect();
+        let requests: Vec<_> = (0..5).map(make_request).collect();
         let added = queue.enqueue_all(requests);
         assert_eq!(added, 5);
         assert_eq!(queue.len(), 5);

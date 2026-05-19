@@ -2,7 +2,6 @@ use std::fmt;
 use std::ptr::NonNull;
 
 /// CUDA stream handle — opaque pointer to a CUstream.
-#[cfg(feature = "cuda")]
 pub type CudaStreamHandle = NonNull<std::ffi::c_void>;
 
 /// Compute device abstraction.
@@ -46,7 +45,6 @@ impl Device {
     }
 
     /// Returns the CUDA stream handle if present, otherwise `None`.
-    #[cfg(feature = "cuda")]
     pub fn stream(&self) -> Option<CudaStreamHandle> {
         match self {
             Self::Cuda { stream, .. } => *stream,
@@ -58,9 +56,7 @@ impl Device {
 // Safety: CudaStreamHandle is just a pointer to an opaque CUDA stream.
 // It is safe to send across threads because CUDA streams are thread-safe
 // as long as synchronization is handled correctly at the call site.
-#[cfg(feature = "cuda")]
 unsafe impl Send for Device {}
-#[cfg(feature = "cuda")]
 unsafe impl Sync for Device {}
 
 impl fmt::Display for Device {

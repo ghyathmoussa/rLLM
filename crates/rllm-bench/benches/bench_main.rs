@@ -1,4 +1,6 @@
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use rllm_bench::helpers::{
     make_inference_request, make_test_kv_cache_manager, make_test_scheduler,
@@ -340,7 +342,7 @@ fn bench_paged_attention_prefill_by_context(c: &mut Criterion) {
 
 fn bench_kv_cache_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("kv_cache_write");
-    let num_tokens = [1, 16, 64, 256];
+    let num_tokens = [1usize, 16, 64, 256];
     for n in &num_tokens {
         group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, &num_tokens| {
             // Simulate compute_slot_mappings overhead.
@@ -444,6 +446,7 @@ fn bench_fused_rope(c: &mut Criterion) {
                     b.iter(|| {
                         let mut out_q = query.clone();
                         let mut out_k = key.clone();
+                        #[allow(clippy::needless_range_loop)]
                         for t in 0..num_tokens {
                             let pos = positions[t] as f32;
                             for d in (0..head_dim).step_by(2) {
