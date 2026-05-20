@@ -91,6 +91,30 @@ pub fn describe_metrics() {
         "Model forward pass duration (seconds)"
     );
     describe_histogram!("rllm_sampling_duration_seconds", "Token sampling duration (seconds)");
+
+    // Initialize all counters and gauges to default/0 so they are exported immediately by Prometheus
+    counter!("rllm_prompt_tokens_total").increment(0);
+    counter!("rllm_generated_tokens_total").increment(0);
+    counter!("rllm_requests_total").increment(0);
+    counter!("rllm_http_requests_total").increment(0);
+    counter!("rllm_requests_finished_total").increment(0);
+    counter!("rllm_preemptions_total").increment(0);
+    counter!("rllm_prefix_cache_hit_tokens_total").increment(0);
+    counter!("rllm_prefix_cache_lookups_total").increment(0);
+    counter!("rllm_prefix_cache_hits_total").increment(0);
+
+    gauge!("rllm_requests_running").set(0.0);
+    gauge!("rllm_requests_waiting").set(0.0);
+    gauge!("rllm_kv_cache_usage_ratio").set(0.0);
+    gauge!("rllm_kv_cache_active_blocks").set(0.0);
+    gauge!("rllm_kv_cache_total_blocks").set(0.0);
+    gauge!("rllm_prefix_cache_entries").set(0.0);
+    gauge!("rllm_prefix_cache_hit_rate").set(0.0);
+    gauge!("rllm_scheduler_budget_used").set(0.0);
+    gauge!("rllm_scheduler_budget_max").set(0.0);
+    gauge!("rllm_scheduler_budget_utilization").set(0.0);
+    gauge!("rllm_gpu_memory_allocated_bytes").set(0.0);
+    gauge!("rllm_tokens_per_second").set(0.0);
 }
 
 /// Record a scheduler queue and token-budget snapshot.
