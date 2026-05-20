@@ -171,11 +171,11 @@ impl LlamaAttention {
 
         // Scaled dot-product attention
         let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-        let attn_weights = q.matmul(&k.t()?)?.broadcast_mul(&Tensor::new(scale, q.device())?)?;
+        let attn_weights = q.matmul(&k.t()?)?.broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
 
         // Apply causal mask for prefill (seq_len > 1)
         let attn_weights = if seq_len > 1 {
-            let mask = causal_mask(seq_len, q.device())?;
+            let mask = causal_mask(seq_len, q.device())?.to_dtype(q.dtype())?;
             attn_weights.broadcast_add(&mask)?
         } else {
             attn_weights

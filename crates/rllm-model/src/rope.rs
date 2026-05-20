@@ -64,6 +64,10 @@ fn apply_rotary_emb(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     let x1 = x.narrow(D::Minus1, 0, half_dim)?;
     let x2 = x.narrow(D::Minus1, half_dim, half_dim)?;
 
+    let dtype = x.dtype();
+    let cos = cos.to_dtype(dtype)?;
+    let sin = sin.to_dtype(dtype)?;
+
     // Reshape cos/sin for broadcasting: [1, 1, seq_len, dim/2]
     // Then repeat along last dim to match head_dim: [1, 1, seq_len, dim]
     let cos = Tensor::cat(&[&cos, &cos], D::Minus1)?.unsqueeze(0)?.unsqueeze(0)?;

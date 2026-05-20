@@ -87,7 +87,8 @@ impl CausalLM for LlamaForCausalLM {
         tokens.push(next_token);
 
         // Decode loop
-        for _step in 1..max_tokens {
+        let num_decode_steps = max_tokens.saturating_sub(tokens.len());
+        for _step in 0..num_decode_steps {
             let input_ids = Tensor::new(&[next_token], device)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
                 .reshape((1, 1))
@@ -106,7 +107,11 @@ impl CausalLM for LlamaForCausalLM {
 #[cfg(feature = "candle-backend")]
 fn argmax(logits: &Tensor) -> Result<u32> {
     let (batch, seq, vocab) = logits.dims3().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let flat = logits.reshape((batch * seq, vocab)).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let flat = logits
+        .reshape((batch * seq, vocab))
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .to_dtype(candle_core::DType::F32)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let vals = flat.to_vec2::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
     let best = vals[0]
         .iter()

@@ -52,8 +52,7 @@ pub fn render_chat_template_fallback(
         output.push_str(&format!("<|{}|>\n{}\n", msg.role, msg.content));
     }
     if add_generation_prompt {
-        output.push_str("<|assistant|");
-        output.push('\n');
+        output.push_str("<|assistant|>\n");
     }
     output
 }
