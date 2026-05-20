@@ -439,12 +439,13 @@ async fn chat_completions_handler(
                     delta: ChunkDelta { role: Some("assistant".into()), content: None },
                     finish_reason: None,
                 }],
+                generation_time: None,
             };
             yield Ok::<_, std::convert::Infallible>(
                 Event::default().data(serialize_sse(&role_chunk))
             );
 
-            if let Ok(completion) = result {
+            if let Ok(ref completion) = result {
                 let content_chunk = ChatCompletionChunk {
                     id: id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -452,9 +453,10 @@ async fn chat_completions_handler(
                     model: model.clone(),
                     choices: vec![ChunkChoice {
                         index: 0,
-                        delta: ChunkDelta { role: None, content: Some(completion.text) },
+                        delta: ChunkDelta { role: None, content: Some(completion.text.clone()) },
                         finish_reason: None,
                     }],
+                    generation_time: Some(completion.generation_time),
                 };
                 yield Ok(Event::default().data(serialize_sse(&content_chunk)));
             }
@@ -469,6 +471,7 @@ async fn chat_completions_handler(
                     delta: ChunkDelta { role: None, content: None },
                     finish_reason: Some("stop".into()),
                 }],
+                generation_time: None,
             };
             yield Ok(Event::default().data(serialize_sse(&done_chunk)));
             yield Ok(Event::default().data("[DONE]"));
@@ -497,6 +500,7 @@ async fn chat_completions_handler(
                     finish_reason: Some(completion.finish_reason),
                 }],
                 usage: completion.usage,
+                generation_time: Some(completion.generation_time),
             };
             rllm_metrics::histogram!("rllm_http_request_duration_seconds")
                 .record(started.elapsed().as_secs_f64());
@@ -549,6 +553,7 @@ async fn completions_handler(
                     finish_reason: Some(completion.finish_reason),
                 }],
                 usage: completion.usage,
+                generation_time: Some(completion.generation_time),
             };
             rllm_metrics::histogram!("rllm_http_request_duration_seconds")
                 .record(started.elapsed().as_secs_f64());
@@ -569,6 +574,7 @@ struct EngineCompletion {
     text: String,
     usage: UsageInfo,
     finish_reason: String,
+    generation_time: f64,
 }
 
 async fn run_chat_completion(
@@ -624,6 +630,7 @@ async fn submit_and_collect(
     sampling_params: rllm_core::request::SamplingParams,
     timeout: Duration,
 ) -> Result<EngineCompletion> {
+    let start_time = std::time::Instant::now();
     let request_id = RequestId::new();
     let max_tokens = sampling_params.max_tokens.unwrap_or(16);
     tracing::info!(
@@ -677,10 +684,12 @@ async fn submit_and_collect(
         .decode(generated_ids.clone(), true)
         .await
         .context("decoding generated tokens")?;
+    let duration = start_time.elapsed();
     tracing::info!(
         request_id = ?request_id,
         completion_tokens = generated_ids.len(),
         finish_reason = %finish_reason,
+        duration = ?duration,
         "request completed"
     );
 
@@ -694,6 +703,7 @@ async fn submit_and_collect(
                 .saturating_add(u32::try_from(generated_ids.len()).unwrap_or(u32::MAX)),
         },
         finish_reason,
+        generation_time: duration.as_secs_f64(),
     })
 }
 
@@ -757,6 +767,7 @@ fn placeholder_chat_stream_response(
                 delta: ChunkDelta { role: Some("assistant".into()), content: None },
                 finish_reason: Some("stop".into()),
             }],
+            generation_time: Some(started.elapsed().as_secs_f64()),
         };
         yield Ok::<_, std::convert::Infallible>(
             Event::default().data(serialize_sse(&done_chunk))
@@ -783,6 +794,7 @@ fn placeholder_chat_response(model: &str, started: std::time::Instant) -> axum::
             finish_reason: Some("stop".into()),
         }],
         usage: UsageInfo { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        generation_time: Some(started.elapsed().as_secs_f64()),
     };
     rllm_metrics::histogram!("rllm_http_request_duration_seconds")
         .record(started.elapsed().as_secs_f64());
@@ -804,6 +816,7 @@ fn placeholder_completion_response(
             finish_reason: Some("stop".into()),
         }],
         usage: UsageInfo { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        generation_time: Some(started.elapsed().as_secs_f64()),
     };
     rllm_metrics::histogram!("rllm_http_request_duration_seconds")
         .record(started.elapsed().as_secs_f64());

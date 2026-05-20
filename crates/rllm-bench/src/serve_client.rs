@@ -127,11 +127,21 @@ pub async fn run_serve_benchmark(config: ServeBenchConfig) -> Result<BenchmarkMe
 
                         if streaming {
                             // For streaming, measure TTFT as time to first chunk.
-                            // We just consume the full body for simplicity.
-                            let ttft = None; // Would need byte-level SSE parsing for true TTFT
-                            let _ = resp.bytes().await;
+                            let mut resp = resp;
+                            let mut first_token_time = None;
+                            loop {
+                                match resp.chunk().await {
+                                    Ok(Some(_)) => {
+                                        if first_token_time.is_none() {
+                                            first_token_time = Some(req_start.elapsed());
+                                        }
+                                    }
+                                    Ok(None) => break,
+                                    Err(_) => break,
+                                }
+                            }
                             ServeRequestResult {
-                                ttft,
+                                ttft: first_token_time,
                                 e2e_latency: req_start.elapsed(),
                                 prompt_tokens: 0,
                                 completion_tokens: max_tokens,

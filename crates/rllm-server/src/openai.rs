@@ -90,6 +90,8 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatChoice>,
     pub usage: UsageInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +115,8 @@ pub struct CompletionResponse {
     pub model: String,
     pub choices: Vec<CompletionChoice>,
     pub usage: UsageInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +142,8 @@ pub struct ChatCompletionChunk {
     pub created: u64,
     pub model: String,
     pub choices: Vec<ChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,6 +326,7 @@ pub fn request_output_to_chat_completion(
             completion_tokens: output.usage.completion_tokens,
             total_tokens: output.usage.total_tokens,
         },
+        generation_time: None,
     }
 }
 
@@ -354,6 +361,7 @@ pub fn request_output_to_completion(output: &RequestOutput, model: &str) -> Comp
             completion_tokens: output.usage.completion_tokens,
             total_tokens: output.usage.total_tokens,
         },
+        generation_time: None,
     }
 }
 
