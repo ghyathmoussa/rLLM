@@ -264,7 +264,7 @@ impl Default for AttentionMetadata {
 mod ffi {
     use std::os::raw::c_int;
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn rllm_paged_attention_decode_f16(
             output: *mut u16,
             query: *const u16,

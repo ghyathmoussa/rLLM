@@ -12,7 +12,7 @@
 mod ffi {
     use std::os::raw::c_int;
 
-    extern "C" {
+    unsafe extern "C" {
         // Vector add (float32)
         pub fn rllm_vector_add_f32(
             a: *const f32,

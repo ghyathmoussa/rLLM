@@ -17,7 +17,7 @@ use crate::cuda::CudaKernelError;
 mod ffi {
     use std::os::raw::c_int;
 
-    extern "C" {
+    unsafe extern "C" {
         // Cache write (FP16)
         pub fn rllm_cache_write_f16(
             key_cache: *mut u16,      // __half*

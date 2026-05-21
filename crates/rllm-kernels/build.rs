@@ -86,7 +86,7 @@ fn main() {
     }
 
     // Tell cargo to link the static library.
-    println!("cargo:lib={}", out_dir.display());
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=rllm_cuda_kernels");
 
     // Link against CUDA runtime.

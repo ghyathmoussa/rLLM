@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include <cuda_fp16.h>
 
 extern "C" {
 

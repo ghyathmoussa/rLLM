@@ -13,7 +13,7 @@ use crate::cuda::CudaKernelError;
 mod ffi {
     use std::os::raw::c_int;
 
-    extern "C" {
+    unsafe extern "C" {
         // Fused RMSNorm (FP16)
         pub fn rllm_fused_rmsnorm_f16(
             output: *mut u16,
