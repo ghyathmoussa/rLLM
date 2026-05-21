@@ -1,0 +1,41 @@
+# Stage 1: Build the Rust application with CUDA support
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
+
+# Install system build dependencies and Rust toolchain
+RUN apt-get update && apt-get install -y \
+    curl \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /usr/src/rllm
+
+# Copy the entire workspace source
+COPY . .
+
+# Build the release binary with CUDA features enabled
+RUN cargo build --release --bin rllm --features cuda
+
+# Stage 2: Runtime image with CUDA runtime libraries
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+# Install runtime dependencies (OpenSSL and CA certificates for model downloads)
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the compiled binary from the builder
+COPY --from=builder /usr/src/rllm/target/release/rllm /usr/local/bin/rllm
+
+# Expose HTTP API and Prometheus metrics port
+EXPOSE 8000
+
+# Set entrypoint to rllm binary
+ENTRYPOINT ["rllm"]
+CMD ["serve", "--model", "meta-llama/Llama-3.2-1B-Instruct"]

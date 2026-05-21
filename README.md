@@ -81,15 +81,41 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Installation
 
-### From source
+### Cargo Installation (From Source)
 
-```bash
-git clone https://github.com/anomalyco/rLLM.git
-cd rLLM
-cargo build --release
-```
+You can compile and install the CLI tool directly to your system path:
 
-The binary is at `target/release/rllm`.
+* **For CPU execution:**
+  ```bash
+  cargo install --path .
+  ```
+
+* **For GPU execution (with CUDA acceleration):**
+  ```bash
+  cargo install --path . --features cuda
+  ```
+
+### Docker Installation
+
+We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated environments:
+
+* **For CPU-only deployment:**
+  ```bash
+  # Build the container
+  docker build -t rllm:latest .
+
+  # Run the container
+  docker run -d -p 8000:8000 --name rllm rllm:latest serve --model meta-llama/Llama-3.2-1B-Instruct
+  ```
+
+* **For GPU/CUDA deployment:**
+  ```bash
+  # Build the CUDA container
+  docker build -f Dockerfile.cuda -t rllm:cuda .
+
+  # Run the container with GPU access (requires NVIDIA Container Toolkit)
+  docker run --gpus all -d -p 8000:8000 --name rllm-cuda rllm:cuda serve --model meta-llama/Llama-3.2-1B-Instruct
+  ```
 
 ### Local model
 
