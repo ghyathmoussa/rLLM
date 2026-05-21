@@ -125,6 +125,8 @@ pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/", get(docs_handler))
         .route("/docs", get(docs_handler))
+        .route("/doc", get(docs_handler))
+        .route("/openapi.yaml", get(openapi_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .nest("/v1", v1_router)
@@ -319,27 +321,40 @@ fn num_cache_blocks(args: &ServeArgs, max_model_len: usize) -> usize {
 
 async fn docs_handler() -> Html<&'static str> {
     Html(
-        r#"<!doctype html>
-<html>
-<head><title>rLLM OpenAI API</title></head>
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>rLLM API Documentation</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@5/favicon-32x32.png" sizes="32x32" />
+  <link rel="icon" type="image/png" href="https://unpkg.com/swagger-ui-dist@5/favicon-16x16.png" sizes="16x16" />
+</head>
 <body>
-<h1>rLLM OpenAI-compatible API</h1>
-<pre>
-GET  /health
-GET  /metrics
-GET  /debug/model
-GET  /v1/models
-POST /v1/chat/completions
-POST /v1/completions
-
-curl http://localhost:8000/debug/model
-
-curl http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct","messages":[{"role":"user","content":"Say hello"}],"max_tokens":16,"temperature":0}'
-</pre>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" charset="UTF-8"></script>
+  <script>
+    window.onload = () => {
+      window.ui = SwaggerUIBundle({
+        url: '/openapi.yaml',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+        ],
+        layout: "BaseLayout"
+      });
+    };
+  </script>
 </body>
 </html>"#,
+    )
+}
+
+async fn openapi_handler() -> impl axum::response::IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/yaml")],
+        include_str!("../../../openapi.yaml"),
     )
 }
 

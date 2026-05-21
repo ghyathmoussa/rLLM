@@ -1,0 +1,491 @@
+openapi: 3.0.3
+info:
+  title: rLLM Inference Server API
+  description: |
+    OpenAI-compatible HTTP API for rLLM, a high-performance Rust Large Language Model (LLM) inference engine.
+    Supports token streaming, continuous batching, and Prometheus metrics.
+  version: 0.1.0
+servers:
+  - url: /
+    description: Current Server Host
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check the status of the rLLM inference server.
+      responses:
+        '200':
+          description: Server is healthy and running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Server is unhealthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      description: Retrieve performance and system metrics (TTFT, TPOT, memory usage, request counts, etc.).
+      responses:
+        '200':
+          description: Prometheus metrics in text exposition format.
+          content:
+            text/plain; version=0.0.4:
+              schema:
+                type: string
+                example: |
+                  # HELP rllm_requests_total Total requests received
+                  # TYPE rllm_requests_total counter
+                  rllm_requests_total 42
+
+  /v1/models:
+    get:
+      summary: List models
+      description: Retrieve the active model being served by rLLM.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of active models.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelListResponse'
+        '401':
+          description: Unauthorized. Invalid or missing API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/chat/completions:
+    post:
+      summary: Chat completions
+      description: Create a completion for the chat message sequence. Optionally streams tokens via SSE.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Successful response. Returns JSON for standard completion or Server-Sent Events (SSE) for streaming.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              description: 'SSE stream of token chunks. Each event is prefixed with "data: " and contains a chunk JSON object, ending with "data: [DONE]".'
+              schema:
+                type: string
+        '401':
+          description: Unauthorized. Invalid or missing API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: Bad request. Missing or invalid parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/completions:
+    post:
+      summary: Text completions
+      description: Create a completion for the provided prompt string or array. Optionally streams tokens via SSE.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompletionRequest'
+      responses:
+        '200':
+          description: Successful response. Returns JSON for standard completion or Server-Sent Events (SSE) for streaming.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResponse'
+            text/event-stream:
+              description: 'SSE stream of token chunks. Each event is prefixed with "data: " and contains a chunk JSON object.'
+              schema:
+                type: string
+        '401':
+          description: Unauthorized. Invalid or missing API key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '400':
+          description: Bad request. Missing or invalid parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: 'Pass the API key as a Bearer token in the Authorization header (e.g. "Authorization: Bearer <API_KEY>").'
+
+  schemas:
+    HealthResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - type
+          properties:
+            message:
+              type: string
+              example: "Model meta-llama/Llama-3.2-1B-Instruct not found"
+            type:
+              type: string
+              example: "invalid_request_error"
+            code:
+              type: string
+              nullable: true
+              example: "model_not_found"
+
+    ModelListResponse:
+      type: object
+      required:
+        - object
+        - data
+      properties:
+        object:
+          type: string
+          example: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+
+    ModelInfo:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - owned_by
+      properties:
+        id:
+          type: string
+          example: meta-llama/Llama-3.2-1B-Instruct
+        object:
+          type: string
+          example: model
+        created:
+          type: integer
+          format: int64
+          example: 1716182400
+        owned_by:
+          type: string
+          example: rllm
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant]
+          example: user
+        content:
+          type: string
+          example: "What is the capital of France?"
+
+    ChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          example: meta-llama/Llama-3.2-1B-Instruct
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        temperature:
+          type: number
+          format: float
+          nullable: true
+          default: 1.0
+          example: 0.7
+        top_p:
+          type: number
+          format: float
+          nullable: true
+          default: 1.0
+          example: 0.9
+        max_tokens:
+          type: integer
+          nullable: true
+          example: 256
+        stream:
+          type: boolean
+          nullable: true
+          default: false
+          example: true
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          nullable: true
+          example: ["\n", "User:"]
+        n:
+          type: integer
+          nullable: true
+          default: 1
+          example: 1
+        logprobs:
+          type: boolean
+          nullable: true
+          default: false
+        top_logprobs:
+          type: integer
+          nullable: true
+          example: 5
+        presence_penalty:
+          type: number
+          format: float
+          nullable: true
+          default: 0.0
+          example: 0.0
+        frequency_penalty:
+          type: number
+          format: float
+          nullable: true
+          default: 0.0
+          example: 0.0
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+          example: 42
+
+    ChatCompletionResponse:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+        - usage
+      properties:
+        id:
+          type: string
+          example: chatcmpl-fdfd7d9a-14d2-4467-bc21-a461b782b199
+        object:
+          type: string
+          example: chat.completion
+        created:
+          type: integer
+          format: int64
+          example: 1716182400
+        model:
+          type: string
+          example: meta-llama/Llama-3.2-1B-Instruct
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatChoice'
+        usage:
+          $ref: '#/components/schemas/UsageInfo'
+        generation_time:
+          type: number
+          format: double
+          nullable: true
+          description: Total time of generation in seconds (rLLM custom telemetry metric).
+          example: 1.245
+
+    ChatChoice:
+      type: object
+      required:
+        - index
+        - message
+        - finish_reason
+      properties:
+        index:
+          type: integer
+          example: 0
+        message:
+          $ref: '#/components/schemas/ChatMessage'
+        finish_reason:
+          type: string
+          nullable: true
+          enum: [stop, length, content_filter, null]
+          example: stop
+
+    UsageInfo:
+      type: object
+      required:
+        - prompt_tokens
+        - completion_tokens
+        - total_tokens
+      properties:
+        prompt_tokens:
+          type: integer
+          example: 12
+        completion_tokens:
+          type: integer
+          example: 24
+        total_tokens:
+          type: integer
+          example: 36
+
+    CompletionRequest:
+      type: object
+      required:
+        - model
+        - prompt
+      properties:
+        model:
+          type: string
+          example: meta-llama/Llama-3.2-1B-Instruct
+        prompt:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          example: "Once upon a time,"
+        suffix:
+          type: string
+          nullable: true
+          example: "and they lived happily ever after."
+        temperature:
+          type: number
+          format: float
+          nullable: true
+          default: 1.0
+        top_p:
+          type: number
+          format: float
+          nullable: true
+          default: 1.0
+        max_tokens:
+          type: integer
+          nullable: true
+          example: 128
+        stream:
+          type: boolean
+          nullable: true
+          default: false
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+          nullable: true
+        n:
+          type: integer
+          nullable: true
+          default: 1
+        logprobs:
+          type: integer
+          nullable: true
+        presence_penalty:
+          type: number
+          format: float
+          nullable: true
+          default: 0.0
+        frequency_penalty:
+          type: number
+          format: float
+          nullable: true
+          default: 0.0
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+
+    CompletionResponse:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+        - usage
+      properties:
+        id:
+          type: string
+          example: cmpl-59e51c89-21ad-467f-8551-3fa422a5789b
+        object:
+          type: string
+          example: text_completion
+        created:
+          type: integer
+          format: int64
+          example: 1716182400
+        model:
+          type: string
+          example: meta-llama/Llama-3.2-1B-Instruct
+        choices:
+          type: array
+          items:
+            $ref: '#/components/schemas/CompletionChoice'
+        usage:
+          $ref: '#/components/schemas/UsageInfo'
+        generation_time:
+          type: number
+          format: double
+          nullable: true
+          description: Total time of generation in seconds (rLLM custom telemetry metric).
+          example: 0.892
+
+    CompletionChoice:
+      type: object
+      required:
+        - index
+        - text
+        - finish_reason
+      properties:
+        index:
+          type: integer
+          example: 0
+        text:
+          type: string
+          example: " there was a little rustaceous wizard."
+        finish_reason:
+          type: string
+          nullable: true
+          enum: [stop, length, content_filter, null]
+          example: stop
