@@ -3,8 +3,10 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use rllm_core::output::RequestOutput;
 
-use crate::metrics::{BenchmarkMetrics, LatencyStats};
-use crate::workload::synthetic_prompt;
+use crate::{
+    metrics::{BenchmarkMetrics, LatencyStats},
+    workload::synthetic_prompt,
+};
 
 /// Which endpoint to benchmark.
 #[derive(Debug, Clone)]

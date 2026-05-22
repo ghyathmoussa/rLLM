@@ -2,14 +2,13 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use rllm_bench::{
+    helpers::make_test_scheduler,
+    mock_executor::{MockExecutor, MockExecutorConfig, MockMode},
+    workload::{LengthDistribution, SyntheticWorkload, WorkloadConfig, sharegpt_prompts},
+};
 use rllm_core::request::SamplingParams;
 use rllm_engine::{EngineCore, LLMEngine};
-
-use rllm_bench::helpers::make_test_scheduler;
-use rllm_bench::mock_executor::{MockExecutor, MockExecutorConfig, MockMode};
-use rllm_bench::workload::{
-    LengthDistribution, SyntheticWorkload, WorkloadConfig, sharegpt_prompts,
-};
 
 #[derive(Parser)]
 #[command(name = "rllm-bench", about = "Benchmarking and correctness harness for rLLM")]

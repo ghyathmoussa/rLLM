@@ -3,8 +3,10 @@ use std::path::Path;
 use anyhow::Result;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use rllm_core::ids::RequestId;
-use rllm_core::request::{InferenceRequest, SamplingParams};
+use rllm_core::{
+    ids::RequestId,
+    request::{InferenceRequest, SamplingParams},
+};
 
 use crate::helpers::make_inference_request_with_params;
 
