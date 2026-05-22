@@ -359,13 +359,15 @@ fn load_shard_index(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
             if f.starts_with('/') || f.starts_with('\\') || f.contains("..") {
                 anyhow::bail!("path traversal detected in shard filename: {}", p.display());
             }
-            // Canonicalize to verify the path stays within dir
+            // Canonicalize to verify the path stays within dir (only if the file already exists)
             let joined = dir.join(f);
-            let canonical = joined
-                .canonicalize()
-                .with_context(|| format!("resolving shard path: {}", joined.display()))?;
-            if !canonical.starts_with(&dir.canonicalize()?) {
-                anyhow::bail!("shard path escapes model directory: {}", joined.display());
+            if joined.exists() {
+                let canonical = joined
+                    .canonicalize()
+                    .with_context(|| format!("resolving shard path: {}", joined.display()))?;
+                if !canonical.starts_with(&dir.canonicalize()?) {
+                    anyhow::bail!("shard path escapes model directory: {}", joined.display());
+                }
             }
             Ok(joined)
         })
@@ -388,6 +390,33 @@ mod tests {
     fn find_shards_in_missing_dir() {
         let result = find_safetensor_shards(Path::new("/nonexistent"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_shard_index_nonexistent_shards() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("model.safetensors.index.json");
+        
+        let index_content = serde_json::json!({
+            "weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                "lm_head.weight": "model-00002-of-00002.safetensors"
+            }
+        });
+        
+        std::fs::write(&index_path, serde_json::to_string(&index_content).unwrap()).unwrap();
+        
+        // When dir is Path::new("."), the shards don't exist and we should successfully get their paths
+        // without getting an OS error 2 due to canonicalization of non-existent files.
+        let paths = load_shard_index(&index_path, Path::new(".")).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], Path::new(".").join("model-00001-of-00002.safetensors"));
+        assert_eq!(paths[1], Path::new(".").join("model-00002-of-00002.safetensors"));
+        
+        // When dir is not Path::new(".") and files don't exist, load_shard_index should error
+        let result = load_shard_index(&index_path, temp_dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shard file not found"));
     }
 
     #[cfg(feature = "candle-backend")]

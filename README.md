@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/anomalyco/rLLM/actions"><img src="https://img.shields.io/github/actions/workflow/status/anomalyco/rLLM/ci.yml?style=flat-square" alt="CI"></a>
+  <a href="https://github.com/ghyathmoussa/rLLM/actions"><img src="https://img.shields.io/github/actions/workflow/status/ghyathmoussa/rLLM/ci-main.yml?style=flat-square" alt="CI"></a>
   <a href="https://crates.io/crates/rllm"><img src="https://img.shields.io/crates/v/rllm?style=flat-square" alt="crates.io"></a>
-  <a href="https://github.com/anomalyco/rLLM/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
+  <a href="https://github.com/ghyathmoussa/rLLM/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
   <a href="https://rust-lang.github.io/rustup/"><img src="https://img.shields.io/badge/MSRV-1.85-orange?style=flat-square" alt="MSRV"></a>
 </p>
 
@@ -50,7 +50,7 @@ What rLLM provides:
 
 ```bash
 # Clone and build
-git clone https://github.com/anomalyco/rLLM.git
+git clone https://github.com/ghyathmoussa/rLLM.git
 cd rLLM
 cargo build --release
 
