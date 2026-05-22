@@ -1,12 +1,12 @@
 use proptest::prelude::*;
-
-use rllm_bench::helpers::{
-    make_inference_request, make_inference_request_with_params, make_test_kv_cache_manager,
-    make_test_kv_cache_manager_with_prefix, make_test_scheduler,
+use rllm_bench::{
+    helpers::{
+        make_inference_request, make_inference_request_with_params, make_test_kv_cache_manager,
+        make_test_kv_cache_manager_with_prefix, make_test_scheduler,
+    },
+    mock_executor::{MockExecutor, MockExecutorConfig, MockMode},
 };
-use rllm_bench::mock_executor::{MockExecutor, MockExecutorConfig, MockMode};
-use rllm_core::ids::RequestId;
-use rllm_core::request::SamplingParams;
+use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_engine::{EngineCore, LLMEngine};
 use rllm_sampling::{Sampler, SamplingInput};
 

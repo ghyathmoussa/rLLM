@@ -1,6 +1,5 @@
 use indexmap::IndexMap;
-use rllm_core::config::SchedulingPolicy;
-use rllm_core::ids::RequestId;
+use rllm_core::{config::SchedulingPolicy, ids::RequestId};
 
 /// Metadata tracked for each queued request.
 #[derive(Debug, Clone)]
@@ -97,8 +96,9 @@ impl RequestQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rllm_core::ids::RequestId;
+
+    use super::*;
 
     fn instant(offset_ms: u64) -> std::time::Instant {
         std::time::Instant::now() - std::time::Duration::from_millis(1000 - offset_ms)

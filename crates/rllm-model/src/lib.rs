@@ -11,9 +11,8 @@ pub mod rope;
 #[cfg(feature = "candle-backend")]
 pub mod runner;
 
-pub use registry::{CausalLM, Model};
-
 #[cfg(feature = "candle-backend")]
 pub use llama::LlamaForCausalLM;
+pub use registry::{CausalLM, Model};
 #[cfg(feature = "candle-backend")]
 pub use runner::ModelRunner;

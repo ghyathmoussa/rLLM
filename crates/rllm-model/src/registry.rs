@@ -1,10 +1,9 @@
-use anyhow::Result;
 use std::collections::HashMap;
 
-use rllm_core::config::ModelConfig;
-
+use anyhow::Result;
 #[cfg(feature = "candle-backend")]
 use candle_core::Tensor;
+use rllm_core::config::ModelConfig;
 
 #[cfg(feature = "candle-backend")]
 pub trait Model: Send + Sync {

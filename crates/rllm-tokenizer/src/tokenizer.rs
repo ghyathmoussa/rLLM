@@ -1,5 +1,6 @@
-use anyhow::{Context, Result};
 use std::path::Path;
+
+use anyhow::{Context, Result};
 use tokenizers::Tokenizer as HfTokenizer;
 
 pub struct Tokenizer {

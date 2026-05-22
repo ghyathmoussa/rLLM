@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
-use rllm_core::config::ModelConfig;
-use rllm_core::ids::RequestId;
+use rllm_core::{config::ModelConfig, ids::RequestId};
 use rllm_kernels::AttentionMetadata;
 use rllm_sampling::Sampler;
 use rllm_scheduler::SchedulerOutput;
@@ -638,12 +636,16 @@ fn compute_slot_mappings(positions: &[u32], block_table: &[u32], block_size: usi
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rllm_core::config::ModelConfig;
-    use rllm_core::dtype::DType;
-    use rllm_core::ids::{BlockId, RequestId};
-    use rllm_scheduler::SchedulerStats;
     use std::collections::HashMap;
+
+    use rllm_core::{
+        config::ModelConfig,
+        dtype::DType,
+        ids::{BlockId, RequestId},
+    };
+    use rllm_scheduler::SchedulerStats;
+
+    use super::*;
 
     fn test_model_config() -> ModelConfig {
         ModelConfig {

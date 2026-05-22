@@ -1,5 +1,4 @@
-use std::fmt;
-use std::ptr::NonNull;
+use std::{fmt, ptr::NonNull};
 
 use rllm_core::dtype::DType;
 

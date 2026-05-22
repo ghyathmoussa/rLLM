@@ -1,13 +1,12 @@
 use anyhow::Result;
 use rllm_cache::spec::KVCacheConfig;
 use rllm_core::config::ModelConfig;
+#[cfg(feature = "candle-backend")]
+use rllm_model::ModelRunner as CandleModelRunner;
 use rllm_sampling::Sampler;
 use rllm_tensor::Device;
 
 use crate::model_runner::ModelRunner;
-
-#[cfg(feature = "candle-backend")]
-use rllm_model::ModelRunner as CandleModelRunner;
 
 const DEFAULT_GPU_MEMORY: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
 

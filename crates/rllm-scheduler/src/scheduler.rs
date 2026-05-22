@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 
-use rllm_cache::manager::KVCacheManager;
-use rllm_cache::spec::KVCacheConfig;
-use rllm_core::config::{CacheConfig, SchedulerConfig};
-use rllm_core::ids::{BlockId, RequestId};
-use rllm_core::request::{InferenceRequest, RequestStatus};
+use rllm_cache::{manager::KVCacheManager, spec::KVCacheConfig};
+use rllm_core::{
+    config::{CacheConfig, SchedulerConfig},
+    ids::{BlockId, RequestId},
+    request::{InferenceRequest, RequestStatus},
+};
 
-use crate::output::{SchedulerOutput, SchedulerStats};
-use crate::policy::RequestQueue;
+use crate::{
+    output::{SchedulerOutput, SchedulerStats},
+    policy::RequestQueue,
+};
 
 /// Internal scheduling state for a single request.
 #[derive(Debug)]
@@ -646,11 +649,14 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rllm_cache::spec::{KVCacheConfig, KVCacheSpec};
-    use rllm_core::config::{PrefixHashAlgorithm, SchedulingPolicy};
-    use rllm_core::dtype::DType;
-    use rllm_core::request::SamplingParams;
+    use rllm_core::{
+        config::{PrefixHashAlgorithm, SchedulingPolicy},
+        dtype::DType,
+        request::SamplingParams,
+    };
+
+    use super::*;
 
     fn make_scheduler(block_size: usize, num_blocks: usize, max_seqs: usize) -> Scheduler {
         let kv_config = KVCacheConfig {

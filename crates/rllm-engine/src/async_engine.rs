@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use rllm_core::{ids::RequestId, output::RequestOutput, request::InferenceRequest};
 use tokio::sync::{mpsc, watch};
-
-use rllm_core::ids::RequestId;
-use rllm_core::output::RequestOutput;
-use rllm_core::request::InferenceRequest;
 
 use crate::engine_core::EngineCore;
 

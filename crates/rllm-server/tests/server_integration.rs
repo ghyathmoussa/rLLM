@@ -1,11 +1,11 @@
 use std::sync::OnceLock;
 
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Method, Request, StatusCode},
+};
+use rllm_server::{openai::*, server::AppState};
 use tower::ServiceExt;
-
-use rllm_server::openai::*;
-use rllm_server::server::AppState;
 
 static APP: OnceLock<axum::Router> = OnceLock::new();
 

@@ -1,9 +1,13 @@
-use rllm_cache::manager::KVCacheManager;
-use rllm_cache::spec::{KVCacheConfig, KVCacheSpec};
-use rllm_core::config::{CacheConfig, PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy};
-use rllm_core::dtype::DType;
-use rllm_core::ids::RequestId;
-use rllm_core::request::{InferenceRequest, SamplingParams};
+use rllm_cache::{
+    manager::KVCacheManager,
+    spec::{KVCacheConfig, KVCacheSpec},
+};
+use rllm_core::{
+    config::{CacheConfig, PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy},
+    dtype::DType,
+    ids::RequestId,
+    request::{InferenceRequest, SamplingParams},
+};
 use rllm_scheduler::Scheduler;
 
 /// Create a test `Scheduler` with reasonable defaults.

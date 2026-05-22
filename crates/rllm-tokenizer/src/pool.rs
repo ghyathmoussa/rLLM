@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use parking_lot::Mutex;
 use rllm_core::request::ChatMessage;
-use std::sync::Arc;
 
-use crate::chat_template::{render_chat_template, render_chat_template_fallback};
-use crate::tokenizer::Tokenizer;
+use crate::{
+    chat_template::{render_chat_template, render_chat_template_fallback},
+    tokenizer::Tokenizer,
+};
 
 struct PoolInner {
     tokenizers: Vec<Tokenizer>,

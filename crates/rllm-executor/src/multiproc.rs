@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use rllm_cache::spec::KVCacheConfig;
-use rllm_core::ids::RequestId;
-use rllm_core::request::SamplingParams;
+use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_sampling::Sampler;
 use rllm_scheduler::SchedulerOutput;
 

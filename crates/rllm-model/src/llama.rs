@@ -297,9 +297,11 @@ fn embedding_lookup(weight: &Tensor, ids: &Tensor) -> candle_core::Result<Tensor
 
 #[cfg(all(test, feature = "candle-backend"))]
 mod tests {
-    use super::*;
-    use candle_core::DType;
     use std::collections::HashMap;
+
+    use candle_core::DType;
+
+    use super::*;
 
     fn toy_config() -> ModelConfig {
         ModelConfig {

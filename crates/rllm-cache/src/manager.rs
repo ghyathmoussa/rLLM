@@ -1,11 +1,15 @@
 use std::collections::HashMap;
 
-use rllm_core::config::PrefixHashAlgorithm;
-use rllm_core::ids::{BlockId, RequestId};
+use rllm_core::{
+    config::PrefixHashAlgorithm,
+    ids::{BlockId, RequestId},
+};
 
-use crate::block_pool::BlockPool;
-use crate::prefix::{self, BlockHash};
-use crate::spec::{KVCacheConfig, KVCacheSpec};
+use crate::{
+    block_pool::BlockPool,
+    prefix::{self, BlockHash},
+    spec::{KVCacheConfig, KVCacheSpec},
+};
 
 /// Result of a prefix cache lookup for a request.
 #[derive(Debug, Clone)]
@@ -241,8 +245,9 @@ impl KVCacheManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rllm_core::dtype::DType;
+
+    use super::*;
 
     fn make_spec(block_size: usize) -> KVCacheSpec {
         KVCacheSpec {

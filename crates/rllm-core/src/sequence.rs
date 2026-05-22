@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::ids::RequestId;
-use crate::request::RequestStatus;
+use crate::{ids::RequestId, request::RequestStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestState {

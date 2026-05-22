@@ -201,8 +201,7 @@ pub struct HealthResponse {
 
 // ── Conversion helpers ─────────────────────────────────────────────────────
 
-use rllm_core::output::RequestOutput;
-use rllm_core::request::SamplingParams;
+use rllm_core::{output::RequestOutput, request::SamplingParams};
 use uuid::Uuid;
 
 /// Generate a completion ID (e.g., "cmpl-abc123").

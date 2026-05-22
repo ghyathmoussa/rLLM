@@ -4,8 +4,7 @@ pub mod fused;
 
 pub mod cuda;
 
-/// Re-export error type.
-pub use cuda::CudaKernelError;
-
 pub use attention::{AttentionMetadata, AttentionParams};
 pub use cache_ops::GpuKVCache;
+/// Re-export error type.
+pub use cuda::CudaKernelError;

@@ -1,10 +1,8 @@
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-
 use rllm_core::request::SamplingParams;
 
-use crate::logits;
-use crate::logprobs;
+use crate::{logits, logprobs};
 
 /// Per-request input for sampling.
 pub struct SamplingInput {
@@ -217,8 +215,9 @@ fn random_sample(logits: &mut [f32], rng: &mut Option<ChaCha8Rng>) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashSet;
+
+    use super::*;
 
     #[test]
     fn test_greedy_equals_argmax() {

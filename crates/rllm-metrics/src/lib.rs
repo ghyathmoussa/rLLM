@@ -4,13 +4,12 @@
 //! for recording counters, gauges, and histograms throughout the inference
 //! pipeline. An optional `otel` feature adds OpenTelemetry trace export.
 
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-
 // Re-export the metrics facade macros so downstream crates only need
 // `rllm-metrics` as a dependency.
 pub use metrics::{
     counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram,
 };
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 /// Install the global Prometheus metrics recorder.
 ///

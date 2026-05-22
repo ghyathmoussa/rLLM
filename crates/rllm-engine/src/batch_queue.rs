@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
-use rllm_core::ids::RequestId;
-use rllm_core::request::InferenceRequest;
+use rllm_core::{ids::RequestId, request::InferenceRequest};
 
 /// A batch queue that accumulates requests before scheduling them.
 ///
@@ -200,8 +198,9 @@ impl Default for BatchQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rllm_core::request::SamplingParams;
+
+    use super::*;
 
     fn make_request(id: u32) -> InferenceRequest {
         InferenceRequest {

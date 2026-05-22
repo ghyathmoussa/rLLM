@@ -1,5 +1,4 @@
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 fn main() {
     // Declare the has_cuda cfg key so cargo check doesn't warn about it.

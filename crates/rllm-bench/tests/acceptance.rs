@@ -1,10 +1,11 @@
-use rllm_bench::helpers::{
-    make_inference_request, make_test_kv_cache_manager, make_test_scheduler,
-    make_test_scheduler_with_options,
+use rllm_bench::{
+    helpers::{
+        make_inference_request, make_test_kv_cache_manager, make_test_scheduler,
+        make_test_scheduler_with_options,
+    },
+    mock_executor::{MockExecutor, MockExecutorConfig, MockMode},
 };
-use rllm_bench::mock_executor::{MockExecutor, MockExecutorConfig, MockMode};
-use rllm_core::ids::RequestId;
-use rllm_core::request::SamplingParams;
+use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_engine::{AsyncLLMEngine, EngineCore, LLMEngine};
 
 /// Acceptance: engine serves 32 concurrent requests on one "GPU".
@@ -242,10 +243,10 @@ fn acceptance_llama_compatible_model() {
 /// to internal SamplingParams works correctly.
 #[test]
 fn acceptance_openai_chat_completion() {
-    use rllm_core::ids::RequestId;
-    use rllm_core::output::CompletionOutput;
-    use rllm_core::output::FinishReason;
-    use rllm_core::output::RequestOutput;
+    use rllm_core::{
+        ids::RequestId,
+        output::{CompletionOutput, FinishReason, RequestOutput},
+    };
 
     // Create a sample ChatCompletionRequest and convert to SamplingParams.
     let chat_req = rllm_server::openai::ChatCompletionRequest {

@@ -1,8 +1,11 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::error::{CoreError, Result};
-use crate::ids::RequestId;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    error::{CoreError, Result},
+    ids::RequestId,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OutputKind {

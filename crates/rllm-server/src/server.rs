@@ -1,40 +1,35 @@
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderValue, Method, header};
-use axum::middleware::from_fn_with_state;
-use axum::response::sse::Event;
-use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
+    http::{HeaderValue, Method, header},
+    middleware::from_fn_with_state,
+    response::{Html, IntoResponse, sse::Event},
+    routing::{get, post},
+};
 use metrics_exporter_prometheus::PrometheusHandle;
 use rllm_cache::spec::{KVCacheConfig, KVCacheSpec};
-use rllm_core::config::{
-    CacheConfig, ModelConfig, PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy,
+use rllm_core::{
+    config::{CacheConfig, ModelConfig, PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy},
+    dtype::DType,
+    ids::RequestId,
+    output::FinishReason,
+    request::InferenceRequest,
 };
-use rllm_core::dtype::DType;
-use rllm_core::ids::RequestId;
-use rllm_core::output::FinishReason;
-use rllm_core::request::InferenceRequest;
 use rllm_engine::{AsyncLLMEngine, EngineCore};
 use rllm_executor::{Executor, UniProcExecutor};
 use rllm_model::{hf_config, loader};
 use rllm_scheduler::Scheduler;
-use rllm_tokenizer::pool::AsyncTokenizerPool;
-use rllm_tokenizer::tokenizer::Tokenizer;
+use rllm_tokenizer::{pool::AsyncTokenizerPool, tokenizer::Tokenizer};
 use rllm_worker::Worker;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::auth;
-use crate::cli::ServeArgs;
-use crate::openai::*;
+use crate::{auth, cli::ServeArgs, openai::*};
 
 const BLOCK_SIZE: usize = 16;
 
@@ -352,10 +347,7 @@ async fn docs_handler() -> Html<&'static str> {
 }
 
 async fn openapi_handler() -> impl axum::response::IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/yaml")],
-        include_str!("../../../openapi.yaml"),
-    )
+    ([(axum::http::header::CONTENT_TYPE, "text/yaml")], include_str!("../../../openapi.yaml"))
 }
 
 async fn health_handler() -> Json<HealthResponse> {

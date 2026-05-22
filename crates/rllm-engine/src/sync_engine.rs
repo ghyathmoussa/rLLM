@@ -1,7 +1,5 @@
 use anyhow::Result;
-use rllm_core::ids::RequestId;
-use rllm_core::output::RequestOutput;
-use rllm_core::request::InferenceRequest;
+use rllm_core::{ids::RequestId, output::RequestOutput, request::InferenceRequest};
 
 use crate::engine_core::EngineCore;
 

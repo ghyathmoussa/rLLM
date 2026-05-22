@@ -1,11 +1,13 @@
-use anyhow::{Context, Result};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-#[cfg(feature = "candle-backend")]
-use candle_core::Device;
 #[cfg(feature = "candle-backend")]
 use std::io::{self, IsTerminal, Write};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result};
+#[cfg(feature = "candle-backend")]
+use candle_core::Device;
 
 #[cfg(feature = "candle-backend")]
 pub struct WeightMap {
@@ -396,23 +398,23 @@ mod tests {
     fn test_load_shard_index_nonexistent_shards() {
         let temp_dir = tempfile::tempdir().unwrap();
         let index_path = temp_dir.path().join("model.safetensors.index.json");
-        
+
         let index_content = serde_json::json!({
             "weight_map": {
                 "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
                 "lm_head.weight": "model-00002-of-00002.safetensors"
             }
         });
-        
+
         std::fs::write(&index_path, serde_json::to_string(&index_content).unwrap()).unwrap();
-        
+
         // When dir is Path::new("."), the shards don't exist and we should successfully get their paths
         // without getting an OS error 2 due to canonicalization of non-existent files.
         let paths = load_shard_index(&index_path, Path::new(".")).unwrap();
         assert_eq!(paths.len(), 2);
         assert_eq!(paths[0], Path::new(".").join("model-00001-of-00002.safetensors"));
         assert_eq!(paths[1], Path::new(".").join("model-00002-of-00002.safetensors"));
-        
+
         // When dir is not Path::new(".") and files don't exist, load_shard_index should error
         let result = load_shard_index(&index_path, temp_dir.path());
         assert!(result.is_err());

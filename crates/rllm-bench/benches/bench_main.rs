@@ -1,14 +1,12 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-
-use rllm_bench::helpers::{
-    make_inference_request, make_test_kv_cache_manager, make_test_scheduler,
+use rllm_bench::{
+    helpers::{make_inference_request, make_test_kv_cache_manager, make_test_scheduler},
+    mock_executor::{MockExecutor, MockExecutorConfig, MockMode},
+    workload::{LengthDistribution, SyntheticWorkload, WorkloadConfig},
 };
-use rllm_bench::mock_executor::{MockExecutor, MockExecutorConfig, MockMode};
-use rllm_bench::workload::{LengthDistribution, SyntheticWorkload, WorkloadConfig};
-use rllm_core::ids::RequestId;
-use rllm_core::request::SamplingParams;
+use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_engine::{EngineCore, LLMEngine};
 use rllm_kernels::{AttentionMetadata, AttentionParams};
 use rllm_sampling::{Sampler, SamplingInput};

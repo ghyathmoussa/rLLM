@@ -1,5 +1,4 @@
-use std::fmt;
-use std::ptr::NonNull;
+use std::{fmt, ptr::NonNull};
 
 /// CUDA stream handle — opaque pointer to a CUstream.
 pub type CudaStreamHandle = NonNull<std::ffi::c_void>;

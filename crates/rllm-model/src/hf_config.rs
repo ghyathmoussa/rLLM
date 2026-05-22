@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::path::Path;
 
-use rllm_core::config::ModelConfig;
-use rllm_core::dtype::DType;
+use anyhow::{Context, Result};
+use rllm_core::{config::ModelConfig, dtype::DType};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -128,9 +127,11 @@ fn normalize_architecture(architecture: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
+
     use tempfile::NamedTempFile;
+
+    use super::*;
 
     fn write_config_json(json: &str) -> NamedTempFile {
         let mut f = NamedTempFile::new().unwrap();

@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 
-use smallvec::SmallVec;
-
 use rllm_core::ids::BlockId;
+use smallvec::SmallVec;
 
 use crate::prefix::BlockHash;
 

@@ -1,7 +1,9 @@
-use std::alloc::{self, Layout};
-use std::ptr::NonNull;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::{
+    alloc::{self, Layout},
+    ptr::NonNull,
+    sync::mpsc::{self, Receiver},
+    thread,
+};
 
 /// Page-locked ("pinned") host buffer for async CPU/GPU transfers.
 ///

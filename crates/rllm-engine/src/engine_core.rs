@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use rllm_core::ids::RequestId;
-use rllm_core::output::{CompletionOutput, FinishReason, RequestOutput, Usage};
-use rllm_core::request::{InferenceRequest, SamplingParams};
+use rllm_core::{
+    ids::RequestId,
+    output::{CompletionOutput, FinishReason, RequestOutput, Usage},
+    request::{InferenceRequest, SamplingParams},
+};
 use rllm_executor::Executor;
 use rllm_scheduler::Scheduler;
 

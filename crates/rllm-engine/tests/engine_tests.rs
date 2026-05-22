@@ -1,9 +1,10 @@
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use rllm_core::ids::RequestId;
-use rllm_core::output::FinishReason;
-use rllm_core::request::{InferenceRequest, SamplingParams};
+use rllm_core::{
+    ids::RequestId,
+    output::FinishReason,
+    request::{InferenceRequest, SamplingParams},
+};
 use rllm_engine::{AsyncLLMEngine, EngineCore, LLMEngine};
 use rllm_executor::executor::{Executor, ExecutorOutput};
 use rllm_sampling::{Sampler, SamplingInput};
@@ -123,10 +124,14 @@ impl Executor for TestExecutor {
 // ── Test helpers ──────────────────────────────────────────────────────────
 
 fn make_test_scheduler(max_seqs: usize, budget: usize) -> Scheduler {
-    use rllm_cache::manager::KVCacheManager;
-    use rllm_cache::spec::{KVCacheConfig, KVCacheSpec};
-    use rllm_core::config::{PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy};
-    use rllm_core::dtype::DType;
+    use rllm_cache::{
+        manager::KVCacheManager,
+        spec::{KVCacheConfig, KVCacheSpec},
+    };
+    use rllm_core::{
+        config::{PrefixHashAlgorithm, SchedulerConfig, SchedulingPolicy},
+        dtype::DType,
+    };
 
     let kv_config = KVCacheConfig {
         num_blocks: 1024,
