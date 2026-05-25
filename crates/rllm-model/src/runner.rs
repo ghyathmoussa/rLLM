@@ -82,6 +82,30 @@ impl ModelRunner {
     pub fn generate(&self, prompt: &[u32], max_tokens: usize) -> Result<Vec<u32>> {
         self.model.generate(prompt, max_tokens)
     }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &candle_core::Tensor,
+        positions: &[usize],
+        kv_cache: &mut [Option<(candle_core::Tensor, candle_core::Tensor)>],
+    ) -> Result<candle_core::Tensor> {
+        self.model.forward(input_ids, positions, kv_cache)
+    }
+
+    /// Paged forward pass using global GPU KV cache and PagedAttention kernels.
+    pub fn forward_paged(
+        &self,
+        input_ids: &candle_core::Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+    ) -> Result<candle_core::Tensor> {
+        self.model.forward_paged(input_ids, positions, gpu_kv_cache, attn_meta)
+    }
 }
 
 #[cfg(test)]

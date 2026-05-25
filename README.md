@@ -49,19 +49,21 @@ What rLLM provides:
 ## Quick Start
 
 ```bash
-# Clone and build
+# Clone the repository
 git clone https://github.com/ghyathmoussa/rLLM.git
 cd rLLM
-cargo build --release
 
-# Serve a model
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct --dtype bf16
+# Option A: Serve on CPU
+cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
+
+# Option B: Serve on GPU (CUDA accelerated)
+cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
 
 # In another terminal, send a request
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"meta-llama/Llama-3.1-8B-Instruct",
+    "model":"meta-llama/Llama-3.2-1B-Instruct",
     "messages":[{"role":"user","content":"Say hello"}],
     "max_tokens":16,
     "temperature":0
@@ -119,20 +121,37 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 
 ### Local model
 
-```bash
-cargo run --release -- serve /path/to/model-directory --dtype bf16
-```
+* **For CPU:**
+  ```bash
+  cargo run --release -- serve /path/to/model-directory
+  ```
+
+* **For GPU:**
+  ```bash
+  cargo run --release --features cuda -- serve /path/to/model-directory --dtype bf16
+  ```
 
 ### Hugging Face models
 
-```bash
-# Public models
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct
+* **For CPU:**
+  ```bash
+  # Public models
+  cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
 
-# Gated/private models (set HF_TOKEN)
-export HF_TOKEN=hf_xxxxxxxxxxxx
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct
-```
+  # Gated/private models (set HF_TOKEN)
+  export HF_TOKEN=hf_xxxxxxxxxxxx
+  cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
+  ```
+
+* **For GPU:**
+  ```bash
+  # Public models
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
+
+  # Gated/private models (set HF_TOKEN)
+  export HF_TOKEN=hf_xxxxxxxxxxxx
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
+  ```
 
 ---
 
@@ -258,6 +277,27 @@ rLLM exports the following Prometheus metrics on the `/metrics` endpoint:
 | `rllm_e2e_latency_seconds` | Histogram | End-to-end request latency |
 | `rllm_sampling_duration_seconds` | Histogram | Sampling step duration |
 | `rllm_tokens_per_second` | Histogram | Token generation throughput |
+
+## Benchmarking & Concurrency Testing
+
+### Concurrency Load Generator (Python Script)
+A helper script is provided in `scripts/concurrency_test.py` to test the concurrency and throughput of the running server without external dependencies:
+
+```bash
+# Run with 10 concurrent clients submitting 50 total requests
+./scripts/concurrency_test.py --concurrency 10 --total-requests 50 --max-tokens 32
+
+# Run in streaming mode to calculate Time-to-First-Token (TTFT)
+./scripts/concurrency_test.py --concurrency 20 --total-requests 100 --max-tokens 64 --stream
+```
+
+### Rust Benchmarking Harness (rllm-bench)
+For local and simulated offline benchmarks, you can use the built-in `rllm-bench` tool:
+
+```bash
+# Run offline benchmark with 100 requests
+cargo run --release -p rllm-bench -- offline --num-requests 100 --concurrency 32
+```
 
 ---
 

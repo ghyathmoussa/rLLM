@@ -9,12 +9,32 @@ use rllm_core::config::ModelConfig;
 pub trait Model: Send + Sync {
     fn config(&self) -> &ModelConfig;
 
+    /// Legacy forward pass using per-request Candle KV cache tensors.
     fn forward(
         &self,
         input_ids: &Tensor,
         positions: &[usize],
         kv_cache: &mut [Option<(Tensor, Tensor)>],
     ) -> Result<Tensor>;
+
+    /// Paged forward pass using global GPU KV cache and PagedAttention kernels.
+    ///
+    /// Uses `GpuKVCache` for block-addressed K/V storage and `AttentionMetadata`
+    /// for batched attention computation. Falls back to `forward()` when CUDA
+    /// is not available.
+    fn forward_paged(
+        &self,
+        input_ids: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+    ) -> Result<Tensor> {
+        // Default: fall back to legacy forward (no paged attention).
+        // Models that support PagedAttention should override this.
+        let _ = (gpu_kv_cache, attn_meta);
+        let mut kv_cache: Vec<Option<(Tensor, Tensor)>> = vec![None; self.config().num_layers];
+        self.forward(input_ids, positions, &mut kv_cache)
+    }
 }
 
 #[cfg(not(feature = "candle-backend"))]

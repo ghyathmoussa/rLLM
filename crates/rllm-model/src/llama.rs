@@ -58,6 +58,18 @@ impl Model for LlamaForCausalLM {
         let logits = self.model.lm_head.forward(&hidden).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(logits)
     }
+
+    fn forward_paged(
+        &self,
+        input_ids: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+    ) -> Result<Tensor> {
+        let hidden = self.model.forward_paged(input_ids, positions, gpu_kv_cache, attn_meta)?;
+        let logits = self.model.lm_head.forward(&hidden).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(logits)
+    }
 }
 
 #[cfg(feature = "candle-backend")]
@@ -273,6 +285,27 @@ impl LlamaModel {
         for (i, layer) in self.layers.iter().enumerate() {
             hidden_states = layer
                 .forward(&hidden_states, positions, &mut kv_cache[i], &self.rope)
+                .map_err(|e| anyhow::anyhow!("layer {i}: {e}"))?;
+        }
+
+        self.norm.forward(&hidden_states).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Paged forward pass using PagedAttention kernels for all layers.
+    pub fn forward_paged(
+        &self,
+        input_ids: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+    ) -> Result<Tensor> {
+        let hidden_states = embedding_lookup(self.embed_tokens.weight(), input_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut hidden_states = hidden_states;
+        for (i, layer) in self.layers.iter().enumerate() {
+            hidden_states = layer
+                .forward_paged(&hidden_states, positions, gpu_kv_cache, attn_meta, i, &self.rope)
                 .map_err(|e| anyhow::anyhow!("layer {i}: {e}"))?;
         }
 

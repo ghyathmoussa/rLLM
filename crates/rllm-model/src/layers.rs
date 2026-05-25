@@ -192,6 +192,204 @@ impl LlamaAttention {
 
         self.o_proj.forward(&attn_output)
     }
+
+    /// Paged attention forward pass.
+    ///
+    /// Computes Q/K/V projections and RoPE, then writes K/V into the global
+    /// GPU KV cache and computes attention using PagedAttention kernels.
+    ///
+    /// This replaces the native Candle matmul-based attention with block-addressed
+    /// attention for efficient KV cache reuse across requests.
+    ///
+    /// # Arguments
+    /// * `hidden_states` - Input hidden states [batch, seq_len, hidden_size]
+    /// * `positions` - Token positions for RoPE
+    /// * `gpu_kv_cache` - Global GPU KV cache with block-addressed storage
+    /// * `attn_meta` - Attention metadata (block tables, slot mappings, seq lens)
+    /// * `layer_idx` - Layer index for KV cache addressing
+    pub fn forward_paged(
+        &self,
+        hidden_states: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+        layer_idx: usize,
+        rope: &RotaryEmbedding,
+    ) -> Result<Tensor> {
+        let (bsz, seq_len, _) = hidden_states.dims3()?;
+
+        let q = self.q_proj.forward(hidden_states)?;
+        let k = self.k_proj.forward(hidden_states)?;
+        let v = self.v_proj.forward(hidden_states)?;
+
+        // Reshape to [batch, seq_len, num_heads, head_dim] then transpose
+        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+
+        // Apply RoPE
+        let (q, k) = rope.apply(&q, &k, positions)?;
+
+        // Write K/V into the global GPU cache at slot-mapped positions.
+        //
+        // When CUDA is available, we call cache_write_f16 to scatter-write
+        // the new K/V data into the physical cache blocks. Without CUDA,
+        // we fall back to the native Candle attention path (this branch
+        // should not be reached in production paged mode).
+        #[cfg(has_cuda)]
+        {
+            use rllm_kernels::cache_ops;
+
+            // Flatten K/V for cache write: [num_tokens, num_kv_heads, head_dim]
+            let k_flat = k.transpose(1, 2)?.reshape((bsz * seq_len, self.num_kv_heads, self.head_dim))?;
+            let v_flat = v.transpose(1, 2)?.reshape((bsz * seq_len, self.num_kv_heads, self.head_dim))?;
+
+            // Convert to F16 for cache write
+            let k_f16 = k_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
+            let v_f16 = v_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
+
+            let k_ptr = k_f16.as_ptr() as *const u16;
+            let v_ptr = v_f16.as_ptr() as *const u16;
+
+            let key_cache_ptr = gpu_kv_cache.key_ptr(layer_idx) as *mut u16;
+            let value_cache_ptr = gpu_kv_cache.value_ptr(layer_idx) as *mut u16;
+
+            // Build slot mapping tensor on device
+            let slot_mapping = &attn_meta.slot_mapping;
+
+            if !slot_mapping.is_empty() {
+                unsafe {
+                    cache_ops::cache_write_f16(
+                        key_cache_ptr,
+                        value_cache_ptr,
+                        k_ptr,
+                        v_ptr,
+                        slot_mapping.as_ptr(),
+                        (bsz * seq_len) as i64,
+                        self.num_kv_heads as i64,
+                        self.head_dim as i64,
+                        gpu_kv_cache.block_size() as i64,
+                        gpu_kv_cache.num_blocks() as i64,
+                        0, // default stream
+                    ).map_err(|e| candle_core::Error::Msg(format!("cache_write_f16 failed: {e}")))?;
+                }
+            }
+
+            // Run PagedAttention kernel for attention computation.
+            // Flatten query for kernel: [num_tokens, num_q_heads * head_dim]
+            let q_flat = q.transpose(1, 2)?.reshape((bsz * seq_len, self.num_heads * self.head_dim))?;
+            let q_f16 = q_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
+            let q_ptr = q_f16.as_ptr() as *const u16;
+
+            // Allocate output buffer
+            let out_elems = bsz * seq_len * self.num_heads * self.head_dim;
+            let out_bytes = out_elems * 2; // FP16
+            let out_ptr = unsafe { cache_ops::gpu_alloc(out_bytes)? } as *mut u16;
+
+            let flat_block_tables = attn_meta.flatten_block_tables();
+            let seq_lens_i32: Vec<i32> = attn_meta.seq_lens.iter().map(|&s| s as i32).collect();
+            let scale = 1.0f32 / (self.head_dim as f32).sqrt();
+
+            let is_prefill = attn_meta.num_prefill_tokens > 0 && attn_meta.num_decode_tokens == 0;
+
+            let kernel_result = if is_prefill {
+                let query_start_loc_i32: Vec<i32> = attn_meta.query_start_loc.iter().map(|&s| s as i32).collect();
+                unsafe {
+                    rllm_kernels::paged_attention_prefill_f16(
+                        out_ptr,
+                        q_ptr,
+                        gpu_kv_cache.key_ptr(layer_idx) as *const u16,
+                        gpu_kv_cache.value_ptr(layer_idx) as *const u16,
+                        flat_block_tables.as_ptr(),
+                        seq_lens_i32.as_ptr(),
+                        query_start_loc_i32.as_ptr(),
+                        attn_meta.num_seqs() as i64,
+                        (bsz * seq_len) as i64,
+                        self.num_heads as i64,
+                        self.num_kv_heads as i64,
+                        self.head_dim as i64,
+                        gpu_kv_cache.block_size() as i64,
+                        attn_meta.max_num_blocks_per_seq as i64,
+                        scale,
+                        0, // default stream
+                    )
+                }
+            } else {
+                unsafe {
+                    rllm_kernels::paged_attention_decode_f16(
+                        out_ptr,
+                        q_ptr,
+                        gpu_kv_cache.key_ptr(layer_idx) as *const u16,
+                        gpu_kv_cache.value_ptr(layer_idx) as *const u16,
+                        flat_block_tables.as_ptr(),
+                        seq_lens_i32.as_ptr(),
+                        attn_meta.num_seqs() as i64,
+                        self.num_heads as i64,
+                        self.num_kv_heads as i64,
+                        self.head_dim as i64,
+                        gpu_kv_cache.block_size() as i64,
+                        attn_meta.max_num_blocks_per_seq as i64,
+                        scale,
+                        0, // default stream
+                    )
+                }
+            };
+
+            kernel_result.map_err(|e| candle_core::Error::Msg(format!("paged_attention failed: {e}")))?;
+
+            // Convert output back to a Candle tensor
+            // Read from GPU pointer into a Vec, then create tensor
+            let mut out_host = vec![0u16; out_elems];
+            unsafe {
+                std::ptr::copy_nonoverlapping(out_ptr, out_host.as_mut_ptr(), out_elems);
+                cache_ops::gpu_free(out_ptr as *mut u8)
+                    .map_err(|e| candle_core::Error::Msg(format!("gpu_free failed: {e}")))?;
+            }
+
+            // Build Candle tensor from the F16 output
+            let attn_output = Tensor::from_raw_buffer(
+                &out_host.iter().flat_map(|h| h.to_le_bytes()).collect::<Vec<u8>>(),
+                candle_core::DType::F16,
+                &[bsz, seq_len, self.num_heads * self.head_dim],
+                hidden_states.device(),
+            )?.to_dtype(hidden_states.dtype())?;
+
+            return self.o_proj.forward(&attn_output).map_err(|e| anyhow::anyhow!("{e}"));
+        }
+
+        // Non-CUDA fallback: use native attention
+        #[cfg(not(has_cuda))]
+        {
+            let _ = (gpu_kv_cache, attn_meta, layer_idx);
+
+            // GQA: repeat K, V to match num_heads if needed
+            let (k, v) = if self.num_kv_heads < self.num_heads {
+                let n_rep = self.num_heads / self.num_kv_heads;
+                (repeat_kv(k, n_rep)?, repeat_kv(v, n_rep)?)
+            } else {
+                (k, v)
+            };
+
+            let scale = 1.0f32 / (self.head_dim as f32).sqrt();
+            let attn_weights = q
+                .matmul(&k.t()?)?
+                .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
+
+            let attn_weights = if seq_len > 1 {
+                let mask = causal_mask(seq_len, q.device())?.to_dtype(q.dtype())?;
+                attn_weights.broadcast_add(&mask)?
+            } else {
+                attn_weights
+            };
+
+            let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+            let attn_output = attn_weights.matmul(&v)?;
+            let attn_output =
+                attn_output.transpose(1, 2)?.reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
+
+            self.o_proj.forward(&attn_output)
+        }
+    }
 }
 
 #[cfg(feature = "candle-backend")]
@@ -256,6 +454,31 @@ impl LlamaDecoderLayer {
         let hidden_states = (residual + hidden_states)?;
 
         // MLP with residual
+        let residual = hidden_states.clone();
+        let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
+        let hidden_states = self.mlp.forward(&hidden_states)?;
+        residual + hidden_states
+    }
+
+    /// Paged forward pass using PagedAttention kernels.
+    pub fn forward_paged(
+        &self,
+        hidden_states: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+        layer_idx: usize,
+        rope: &RotaryEmbedding,
+    ) -> Result<Tensor> {
+        // Self attention with residual (paged)
+        let residual = hidden_states.clone();
+        let hidden_states = self.input_layernorm.forward(hidden_states)?;
+        let hidden_states = self.self_attn.forward_paged(
+            &hidden_states, positions, gpu_kv_cache, attn_meta, layer_idx, rope,
+        )?;
+        let hidden_states = (residual + hidden_states)?;
+
+        // MLP with residual (unchanged)
         let residual = hidden_states.clone();
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;

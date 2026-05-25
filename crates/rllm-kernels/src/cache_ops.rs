@@ -258,6 +258,9 @@ pub struct GpuKVCache {
     element_size: usize,
 }
 
+unsafe impl Send for GpuKVCache {}
+unsafe impl Sync for GpuKVCache {}
+
 impl GpuKVCache {
     /// Create a new GPU KV cache, allocating device memory for all layers.
     ///
