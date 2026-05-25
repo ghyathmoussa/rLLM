@@ -197,8 +197,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.max_model_len = max_len;
     }
     model_config.dtype = parse_dtype(&args.dtype).unwrap_or(model_config.dtype);
+    model_config.quantization = parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size);
 
-    let tokenizer = load_tokenizer(model_ref, &model_dir)?;
+    let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
+    let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);
     let tokenizer = Arc::new(AsyncTokenizerPool::new(tokenizer, 4));
 
@@ -266,13 +268,53 @@ fn parse_dtype(dtype: &str) -> Option<DType> {
     }
 }
 
+fn parse_quantization(quant_str: &str, bits: Option<usize>, group_size: Option<usize>) -> Option<rllm_core::config::QuantizationConfig> {
+    use rllm_core::config::{QuantizationConfig, QuantizationKind};
+    let kind = match quant_str.to_lowercase().as_str() {
+        "none" => return None,
+        "fp8" => QuantizationKind::FP8,
+        "mxfp8" => QuantizationKind::MXFP8,
+        "mxfp4" => QuantizationKind::MXFP4,
+        "nvfp4" => QuantizationKind::NVFP4,
+        "int8" => QuantizationKind::Int8,
+        "int4" => QuantizationKind::Int4,
+        "gptq" => QuantizationKind::GPTQ,
+        "awq" => QuantizationKind::AWQ,
+        "gguf" => QuantizationKind::Gguf,
+        "compressed-tensors" | "compressed_tensors" => QuantizationKind::CompressedTensors,
+        "modelopt" => QuantizationKind::ModelOpt,
+        "torchao" => QuantizationKind::TorchAO,
+        _ => return None,
+    };
+    Some(QuantizationConfig {
+        kind,
+        group_size,
+        bits,
+    })
+}
+
 fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
+    let cache_dtype = match args.kv_cache_dtype.to_lowercase().as_str() {
+        "f16" => rllm_core::dtype::DType::F16,
+        "bf16" => rllm_core::dtype::DType::BF16,
+        "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
+        "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        _ => {
+            if let Some(ref q) = model_config.quantization {
+                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                plan.kv_cache_dtype
+            } else {
+                model_config.dtype
+            }
+        }
+    };
+
     CacheConfig {
         block_size: BLOCK_SIZE,
         hash_block_size: BLOCK_SIZE,
         gpu_memory_utilization: args.gpu_memory_utilization,
         cpu_swap_bytes: 0,
-        cache_dtype: model_config.dtype,
+        cache_dtype,
         num_gpu_blocks: num_cache_blocks(args, model_config.max_model_len),
         enable_prefix_caching: args.enable_prefix_caching,
         prefix_hash_algorithm: PrefixHashAlgorithm::Sha256Cbor,
@@ -294,6 +336,21 @@ fn scheduler_config(args: &ServeArgs) -> SchedulerConfig {
 }
 
 fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfig {
+    let cache_dtype = match args.kv_cache_dtype.to_lowercase().as_str() {
+        "f16" => rllm_core::dtype::DType::F16,
+        "bf16" => rllm_core::dtype::DType::BF16,
+        "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
+        "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        _ => {
+            if let Some(ref q) = model_config.quantization {
+                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                plan.kv_cache_dtype
+            } else {
+                model_config.dtype
+            }
+        }
+    };
+
     KVCacheConfig {
         num_blocks: num_cache_blocks(args, model_config.max_model_len),
         spec: KVCacheSpec {
@@ -301,7 +358,7 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
             num_layers: model_config.num_layers,
             num_kv_heads: model_config.num_kv_heads,
             head_dim: model_config.head_dim,
-            dtype: model_config.dtype,
+            dtype: cache_dtype,
             sliding_window: None,
         },
     }

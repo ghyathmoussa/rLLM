@@ -2782,6 +2782,7 @@ name = "rllm-kernels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rllm-core",
  "rllm-tensor",
  "thiserror 2.0.18",

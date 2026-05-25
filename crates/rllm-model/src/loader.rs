@@ -91,6 +91,7 @@ pub fn download_model_from_hub(model_id: &str) -> Result<PathBuf> {
                     "Hugging Face model '{model_id}' requires authentication. Set HF_TOKEN or run on an interactive terminal to enter a token."
                 );
             };
+            unsafe { std::env::set_var("HF_TOKEN", &token); }
             download_model_from_hub_with_token(model_id, Some(token))
         }
         Err(err) => Err(err),
@@ -356,22 +357,15 @@ fn load_shard_index(index_path: &Path, dir: &Path) -> Result<Vec<PathBuf>> {
     let paths: Vec<PathBuf> = shard_files
         .iter()
         .map(|f| {
-            // Sanitize: reject filenames with path traversal components
+            // Sanitize: reject absolute paths and paths containing traversal components (e.g. "..")
             let p = Path::new(f);
-            if f.starts_with('/') || f.starts_with('\\') || f.contains("..") {
+            let has_traversal = p.components().any(|c| {
+                !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)
+            });
+            if has_traversal {
                 anyhow::bail!("path traversal detected in shard filename: {}", p.display());
             }
-            // Canonicalize to verify the path stays within dir (only if the file already exists)
-            let joined = dir.join(f);
-            if joined.exists() {
-                let canonical = joined
-                    .canonicalize()
-                    .with_context(|| format!("resolving shard path: {}", joined.display()))?;
-                if !canonical.starts_with(&dir.canonicalize()?) {
-                    anyhow::bail!("shard path escapes model directory: {}", joined.display());
-                }
-            }
-            Ok(joined)
+            Ok(dir.join(f))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -419,6 +413,34 @@ mod tests {
         let result = load_shard_index(&index_path, temp_dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("shard file not found"));
+    }
+
+    #[test]
+    fn test_load_shard_index_path_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let index_path = temp_dir.path().join("model.safetensors.index.json");
+
+        // Test relative path traversal (..)
+        let index_content_rel = serde_json::json!({
+            "weight_map": {
+                "model.embed_tokens.weight": "../escaped.safetensors"
+            }
+        });
+        std::fs::write(&index_path, serde_json::to_string(&index_content_rel).unwrap()).unwrap();
+        let result = load_shard_index(&index_path, temp_dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path traversal detected"));
+
+        // Test absolute path
+        let index_content_abs = serde_json::json!({
+            "weight_map": {
+                "model.embed_tokens.weight": "/absolute/path.safetensors"
+            }
+        });
+        std::fs::write(&index_path, serde_json::to_string(&index_content_abs).unwrap()).unwrap();
+        let result = load_shard_index(&index_path, temp_dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path traversal detected"));
     }
 
     #[cfg(feature = "candle-backend")]

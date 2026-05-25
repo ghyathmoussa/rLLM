@@ -9,7 +9,17 @@ pub enum QuantizedWeightFormat {
     Awq,
     Gguf,
     BitsAndBytes,
+    Mxfp8,
+    Mxfp4,
+    Nvfp4,
+    Int8,
+    Int4,
+    CompressedTensors,
+    ModelOpt,
+    TorchAo,
+    Unquantized,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationPlan {
@@ -20,7 +30,73 @@ pub struct QuantizationPlan {
     pub kv_cache_dtype: DType,
 }
 
+impl Default for QuantizationPlan {
+    fn default() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Unquantized,
+            bits: None,
+            group_size: None,
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
+        }
+    }
+}
+
 impl QuantizationPlan {
+    pub fn from_config(config: &crate::config::QuantizationConfig) -> Result<Self, String> {
+        use crate::config::QuantizationKind;
+        let plan = match config.kind {
+            QuantizationKind::None => Self::default(),
+            QuantizationKind::FP8 => Self::fp8_kv_cache(),
+            QuantizationKind::GPTQ => {
+                let mut p = Self::int4();
+                p.format = QuantizedWeightFormat::Gptq;
+                p.group_size = config.group_size.or(p.group_size);
+                if let Some(b) = config.bits {
+                    p.bits = Some(b as u8);
+                }
+                p
+            }
+            QuantizationKind::AWQ => {
+                let mut p = Self::int4();
+                p.format = QuantizedWeightFormat::Awq;
+                p.group_size = config.group_size.or(p.group_size);
+                if let Some(b) = config.bits {
+                    p.bits = Some(b as u8);
+                }
+                p
+            }
+            QuantizationKind::MXFP8 => Self::mxfp8(),
+            QuantizationKind::MXFP4 => Self::mxfp4(),
+            QuantizationKind::NVFP4 => Self::nvfp4(),
+            QuantizationKind::Int8 => {
+                let mut p = Self::int8();
+                p.group_size = config.group_size;
+                p
+            }
+            QuantizationKind::Int4 => {
+                let mut p = Self::int4();
+                p.group_size = config.group_size.or(p.group_size);
+                p
+            }
+            QuantizationKind::Gguf => {
+                let mut p = Self::default();
+                p.format = QuantizedWeightFormat::Gguf;
+                p
+            }
+            QuantizationKind::CompressedTensors => Self::compressed_tensors(),
+            QuantizationKind::ModelOpt => Self::model_opt(),
+            QuantizationKind::TorchAO => Self::torch_ao(),
+            QuantizationKind::BitsAndBytes => {
+                let mut p = Self::default();
+                p.format = QuantizedWeightFormat::BitsAndBytes;
+                p
+            }
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
     pub fn fp8_kv_cache() -> Self {
         Self {
             format: QuantizedWeightFormat::Fp8KvCache,
@@ -28,6 +104,86 @@ impl QuantizationPlan {
             group_size: None,
             activation_dtype: DType::F16,
             kv_cache_dtype: DType::FP8E4M3,
+        }
+    }
+
+    pub fn mxfp8() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Mxfp8,
+            bits: Some(8),
+            group_size: Some(32),
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::FP8E4M3,
+        }
+    }
+
+    pub fn mxfp4() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Mxfp4,
+            bits: Some(4),
+            group_size: Some(32),
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::FP8E4M3,
+        }
+    }
+
+    pub fn nvfp4() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Nvfp4,
+            bits: Some(4),
+            group_size: Some(16),
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::FP8E4M3,
+        }
+    }
+
+    pub fn int8() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Int8,
+            bits: Some(8),
+            group_size: None,
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
+        }
+    }
+
+    pub fn int4() -> Self {
+        Self {
+            format: QuantizedWeightFormat::Int4,
+            bits: Some(4),
+            group_size: Some(128),
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
+        }
+    }
+
+    pub fn compressed_tensors() -> Self {
+        Self {
+            format: QuantizedWeightFormat::CompressedTensors,
+            bits: Some(8),
+            group_size: None,
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
+        }
+    }
+
+    pub fn model_opt() -> Self {
+        Self {
+            format: QuantizedWeightFormat::ModelOpt,
+            bits: Some(8),
+            group_size: None,
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
+        }
+    }
+
+    pub fn torch_ao() -> Self {
+        Self {
+            format: QuantizedWeightFormat::TorchAo,
+            bits: Some(8),
+            group_size: None,
+            activation_dtype: DType::F16,
+            kv_cache_dtype: DType::F16,
         }
     }
 
@@ -46,10 +202,45 @@ impl QuantizationPlan {
                     return Err("FP8 KV cache requires an FP8 cache dtype".into());
                 }
             }
-            QuantizedWeightFormat::Gguf | QuantizedWeightFormat::BitsAndBytes => {}
+            QuantizedWeightFormat::Mxfp8 => {
+                if self.bits != Some(8) {
+                    return Err("MXFP8 requires 8 bits".into());
+                }
+                if self.group_size.unwrap_or(0) == 0 {
+                    return Err("MXFP8 requires a positive group size".into());
+                }
+            }
+            QuantizedWeightFormat::Mxfp4 => {
+                if self.bits != Some(4) {
+                    return Err("MXFP4 requires 4 bits".into());
+                }
+                if self.group_size.unwrap_or(0) == 0 {
+                    return Err("MXFP4 requires a positive group size".into());
+                }
+            }
+            QuantizedWeightFormat::Nvfp4 => {
+                if self.bits != Some(4) {
+                    return Err("NVFP4 requires 4 bits".into());
+                }
+                if self.group_size.unwrap_or(0) == 0 {
+                    return Err("NVFP4 requires a positive group size".into());
+                }
+            }
+            QuantizedWeightFormat::Int8 => {
+                if self.bits != Some(8) {
+                    return Err("INT8 requires 8 bits".into());
+                }
+            }
+            QuantizedWeightFormat::Int4 => {
+                if self.bits != Some(4) {
+                    return Err("INT4 requires 4 bits".into());
+                }
+            }
+            QuantizedWeightFormat::Gguf | QuantizedWeightFormat::BitsAndBytes | QuantizedWeightFormat::CompressedTensors | QuantizedWeightFormat::ModelOpt | QuantizedWeightFormat::TorchAo | QuantizedWeightFormat::Unquantized => {}
         }
         Ok(())
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +359,16 @@ mod tests {
         };
         assert!(bad.validate().is_err());
         assert!(QuantizationPlan::fp8_kv_cache().validate().is_ok());
+        assert!(QuantizationPlan::mxfp8().validate().is_ok());
+        assert!(QuantizationPlan::mxfp4().validate().is_ok());
+        assert!(QuantizationPlan::nvfp4().validate().is_ok());
+        assert!(QuantizationPlan::int8().validate().is_ok());
+        assert!(QuantizationPlan::int4().validate().is_ok());
+        assert!(QuantizationPlan::compressed_tensors().validate().is_ok());
+        assert!(QuantizationPlan::model_opt().validate().is_ok());
+        assert!(QuantizationPlan::torch_ao().validate().is_ok());
     }
+
 
     #[test]
     fn cpu_offload_capacity_uses_whole_blocks() {

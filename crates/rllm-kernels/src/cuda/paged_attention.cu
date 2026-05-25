@@ -5,7 +5,70 @@
 #include <cmath>
 #include <cuda_fp16.h>
 
+// FP8 conversion helpers (software emulated)
+// E4M3 (1 sign bit, 4 exponent bits, 3 mantissa bits, bias = 7)
+// E5M2 (1 sign bit, 5 exponent bits, 2 mantissa bits, bias = 15)
+
+__device__ inline float fp8_e4m3_to_float(uint8_t val) {
+    uint32_t sign = (val >> 7) & 0x01;
+    uint32_t exp = (val >> 3) & 0x0F;
+    uint32_t mant = val & 0x07;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            return sign ? -0.0f : 0.0f;
+        }
+        float f = (float)mant * 0.0078125f; // mant / 128
+        return sign ? -f : f;
+    } else if (exp == 15 && mant == 7) {
+        return nanf(""); // NaN
+    }
+
+    int shift = (int)exp - 7;
+    float f = 1.0f + (float)mant * 0.125f;
+    if (shift >= 0) {
+        f *= (float)(1 << shift);
+    } else {
+        f /= (float)(1 << (-shift));
+    }
+    return sign ? -f : f;
+}
+
+__device__ inline float fp8_e5m2_to_float(uint8_t val) {
+    uint32_t sign = (val >> 7) & 0x01;
+    uint32_t exp = (val >> 2) & 0x1F;
+    uint32_t mant = val & 0x03;
+
+    if (exp == 0) {
+        if (mant == 0) {
+            return sign ? -0.0f : 0.0f;
+        }
+        float f = (float)mant * 0.000015258789f; // mant * 2^(-16)
+        return sign ? -f : f;
+    } else if (exp == 31) {
+        return nanf("");
+    }
+
+    int shift = (int)exp - 15;
+    float f = 1.0f + (float)mant * 0.25f;
+    if (shift >= 0) {
+        f *= (float)(1 << shift);
+    } else {
+        f /= (float)(1 << (-shift));
+    }
+    return sign ? -f : f;
+}
+
+__device__ inline float fp8_to_float(uint8_t val, bool is_e5m2) {
+    if (is_e5m2) {
+        return fp8_e5m2_to_float(val);
+    } else {
+        return fp8_e4m3_to_float(val);
+    }
+}
+
 extern "C" {
+
 
 // ── Decode PagedAttention (FP16) ──────────────────────────────────────────
 //
@@ -343,4 +406,319 @@ int32_t rllm_paged_attention_prefill_f16_sync(
     return 0;
 }
 
+}
+
+__global__ void paged_attention_decode_fp8_kernel(
+    __half* __restrict__ output,
+    const __half* __restrict__ query,
+    const uint8_t* __restrict__ key_cache,
+    const uint8_t* __restrict__ value_cache,
+    const int32_t* __restrict__ block_tables,
+    const int32_t* __restrict__ seq_lens,
+    int64_t num_seqs,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2) {
+
+    int64_t seq_idx = blockIdx.x / num_q_heads;
+    int64_t q_head  = blockIdx.x % num_q_heads;
+    int64_t tid     = threadIdx.x;
+
+    if (seq_idx >= num_seqs) return;
+
+    int64_t seq_len = seq_lens[seq_idx];
+    if (seq_len == 0 || tid >= head_dim) return;
+
+    // GQA: map Q head to KV head
+    int64_t kv_head = q_head * num_kv_heads / num_q_heads;
+
+    // Each thread loads its Q element once
+    int64_t q_idx = (seq_idx * num_q_heads + q_head) * head_dim + tid;
+    float q_val = __half2float(query[q_idx]);
+
+    // Shared memory for block reduction of dot products
+    extern __shared__ float s_data[];
+
+    // Online softmax state
+    float max_logits = -INFINITY;
+    float exp_sum = 0.0f;
+    float out_val = 0.0f;
+
+    int64_t num_blocks_needed = (seq_len + block_size - 1) / block_size;
+
+    for (int64_t b = 0; b < num_blocks_needed; b++) {
+        int64_t physical_block = block_tables[seq_idx * max_num_blocks_per_seq + b];
+        if (physical_block < 0) continue;
+
+        int64_t block_start = b * block_size;
+        int64_t block_end = block_start + block_size;
+        if (block_end > seq_len) block_end = seq_len;
+
+        for (int64_t offset = block_start; offset < block_end; offset++) {
+            int64_t blk_off = offset - block_start;
+
+            // Load K for this (kv_head, position) — each thread gets one element
+            int64_t k_idx = ((physical_block * num_kv_heads + kv_head) * head_dim + tid)
+                            * block_size + blk_off;
+            float k_val = fp8_to_float(key_cache[k_idx], is_e5m2 != 0);
+
+            // Partial QK dot product
+            s_data[tid] = q_val * k_val;
+            __syncthreads();
+
+            // Parallel reduction in shared memory
+            for (int64_t stride = (head_dim + 1) / 2; stride > 0; stride >>= 1) {
+                if (tid < stride && (tid + stride) < head_dim) {
+                    s_data[tid] += s_data[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float logit = s_data[0] * scale;
+
+            // Online softmax update
+            float old_max = max_logits;
+            max_logits = fmaxf(max_logits, logit);
+            float correction = expf(old_max - max_logits);
+            exp_sum = exp_sum * correction + expf(logit - max_logits);
+
+            // Weighted V accumulation
+            int64_t v_idx = ((physical_block * num_kv_heads + kv_head) * head_dim + tid)
+                            * block_size + blk_off;
+            float v_val = fp8_to_float(value_cache[v_idx], is_e5m2 != 0);
+            out_val = out_val * correction + v_val * expf(logit - max_logits);
+        }
+    }
+
+    // Normalize and write output
+    if (exp_sum > 0.0f) {
+        out_val /= exp_sum;
+    }
+    int64_t out_idx = (seq_idx * num_q_heads + q_head) * head_dim + tid;
+    output[out_idx] = __float2half(out_val);
+}
+
+__global__ void paged_attention_prefill_fp8_kernel(
+    __half* __restrict__ output,
+    const __half* __restrict__ query,
+    const uint8_t* __restrict__ key_cache,
+    const uint8_t* __restrict__ value_cache,
+    const int32_t* __restrict__ block_tables,
+    const int32_t* __restrict__ seq_lens,
+    const int32_t* __restrict__ query_start_loc,
+    int64_t num_seqs,
+    int64_t num_tokens,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2) {
+
+    int64_t token_idx = blockIdx.x / num_q_heads;
+    int64_t q_head   = blockIdx.x % num_q_heads;
+    int64_t tid      = threadIdx.x;
+
+    if (token_idx >= num_tokens || tid >= head_dim) return;
+
+    // Find which sequence this token belongs to (binary search on query_start_loc)
+    int64_t seq_idx = 0;
+    for (int64_t s = num_seqs - 1; s >= 0; s--) {
+        if (token_idx >= query_start_loc[s]) {
+            seq_idx = s;
+            break;
+        }
+    }
+
+    // Position within the sequence (0-indexed, for causal masking)
+    int64_t position = token_idx - query_start_loc[seq_idx];
+    int64_t causal_len = position + 1; // attend to positions 0..position
+
+    // GQA
+    int64_t kv_head = q_head * num_kv_heads / num_q_heads;
+
+    // Load Q element
+    int64_t q_idx = (token_idx * num_q_heads + q_head) * head_dim + tid;
+    float q_val = __half2float(query[q_idx]);
+
+    extern __shared__ float s_data[];
+
+    float max_logits = -INFINITY;
+    float exp_sum = 0.0f;
+    float out_val = 0.0f;
+
+    int64_t num_blocks_needed = (causal_len + block_size - 1) / block_size;
+
+    for (int64_t b = 0; b < num_blocks_needed; b++) {
+        int64_t physical_block = block_tables[seq_idx * max_num_blocks_per_seq + b];
+        if (physical_block < 0) continue;
+
+        int64_t block_start = b * block_size;
+        int64_t block_end = block_start + block_size;
+        if (block_end > causal_len) block_end = causal_len;
+
+        for (int64_t offset = block_start; offset < block_end; offset++) {
+            int64_t blk_off = offset - block_start;
+
+            int64_t k_idx = ((physical_block * num_kv_heads + kv_head) * head_dim + tid)
+                            * block_size + blk_off;
+            float k_val = fp8_to_float(key_cache[k_idx], is_e5m2 != 0);
+
+            s_data[tid] = q_val * k_val;
+            __syncthreads();
+
+            for (int64_t stride = (head_dim + 1) / 2; stride > 0; stride >>= 1) {
+                if (tid < stride && (tid + stride) < head_dim) {
+                    s_data[tid] += s_data[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float logit = s_data[0] * scale;
+
+            float old_max = max_logits;
+            max_logits = fmaxf(max_logits, logit);
+            float correction = expf(old_max - max_logits);
+            exp_sum = exp_sum * correction + expf(logit - max_logits);
+
+            int64_t v_idx = ((physical_block * num_kv_heads + kv_head) * head_dim + tid)
+                            * block_size + blk_off;
+            float v_val = fp8_to_float(value_cache[v_idx], is_e5m2 != 0);
+            out_val = out_val * correction + v_val * expf(logit - max_logits);
+        }
+    }
+
+    if (exp_sum > 0.0f) {
+        out_val /= exp_sum;
+    }
+    int64_t out_idx = (token_idx * num_q_heads + q_head) * head_dim + tid;
+    output[out_idx] = __float2half(out_val);
+}
+
+int32_t rllm_paged_attention_decode_fp8(
+    __half* output,
+    const __half* query,
+    const uint8_t* key_cache,
+    const uint8_t* value_cache,
+    const int32_t* block_tables,
+    const int32_t* seq_lens,
+    int64_t num_seqs,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2,
+    cudaStream_t stream) {
+
+    if (num_seqs <= 0) return 0;
+    int64_t grid = num_seqs * num_q_heads;
+    int64_t threads = ((head_dim + 31) / 32) * 32;
+    if (threads > 1024) threads = 1024;
+    int64_t shared_mem = threads * sizeof(float);
+
+    paged_attention_decode_fp8_kernel<<<grid, threads, shared_mem, stream>>>(
+        output, query, key_cache, value_cache, block_tables, seq_lens,
+        num_seqs, num_q_heads, num_kv_heads, head_dim, block_size,
+        max_num_blocks_per_seq, scale, is_e5m2);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+int32_t rllm_paged_attention_decode_fp8_sync(
+    __half* output,
+    const __half* query,
+    const uint8_t* key_cache,
+    const uint8_t* value_cache,
+    const int32_t* block_tables,
+    const int32_t* seq_lens,
+    int64_t num_seqs,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2) {
+
+    int32_t rc = rllm_paged_attention_decode_fp8(
+        output, query, key_cache, value_cache, block_tables, seq_lens,
+        num_seqs, num_q_heads, num_kv_heads, head_dim, block_size,
+        max_num_blocks_per_seq, scale, is_e5m2, 0);
+    if (rc != 0) return rc;
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+int32_t rllm_paged_attention_prefill_fp8(
+    __half* output,
+    const __half* query,
+    const uint8_t* key_cache,
+    const uint8_t* value_cache,
+    const int32_t* block_tables,
+    const int32_t* seq_lens,
+    const int32_t* query_start_loc,
+    int64_t num_seqs,
+    int64_t num_tokens,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2,
+    cudaStream_t stream) {
+
+    if (num_tokens <= 0) return 0;
+    int64_t grid = num_tokens * num_q_heads;
+    int64_t threads = ((head_dim + 31) / 32) * 32;
+    if (threads > 1024) threads = 1024;
+    int64_t shared_mem = threads * sizeof(float);
+
+    paged_attention_prefill_fp8_kernel<<<grid, threads, shared_mem, stream>>>(
+        output, query, key_cache, value_cache, block_tables, seq_lens,
+        query_start_loc, num_seqs, num_tokens, num_q_heads, num_kv_heads,
+        head_dim, block_size, max_num_blocks_per_seq, scale, is_e5m2);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+int32_t rllm_paged_attention_prefill_fp8_sync(
+    __half* output,
+    const __half* query,
+    const uint8_t* key_cache,
+    const uint8_t* value_cache,
+    const int32_t* block_tables,
+    const int32_t* seq_lens,
+    const int32_t* query_start_loc,
+    int64_t num_seqs,
+    int64_t num_tokens,
+    int64_t num_q_heads,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t max_num_blocks_per_seq,
+    float scale,
+    int32_t is_e5m2) {
+
+    int32_t rc = rllm_paged_attention_prefill_fp8(
+        output, query, key_cache, value_cache, block_tables, seq_lens,
+        query_start_loc, num_seqs, num_tokens, num_q_heads, num_kv_heads,
+        head_dim, block_size, max_num_blocks_per_seq, scale, is_e5m2, 0);
+    if (rc != 0) return rc;
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
 } // extern "C"
+

@@ -3,8 +3,120 @@ use candle_core::{D, DType, Device, Result, Tensor};
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
+#[cfg(feature = "candle-backend")]
+use rllm_core::optimizations::QuantizationPlan;
+
+#[cfg(feature = "candle-backend")]
+pub fn simulate_weight_quantization(
+    weight: &Tensor,
+    plan: &QuantizationPlan,
+) -> Result<Tensor> {
+    use rllm_core::optimizations::QuantizedWeightFormat;
+    let format = plan.format;
+    if format == QuantizedWeightFormat::Unquantized {
+        return Ok(weight.clone());
+    }
+
+    let dtype = weight.dtype();
+    let w_f32 = weight.to_dtype(DType::F32)?;
+    let q_w = match format {
+        QuantizedWeightFormat::Mxfp4 => {
+            let group_size = plan.group_size.unwrap_or(32);
+            simulate_group_quant(&w_f32, group_size, 4)?
+        }
+        QuantizedWeightFormat::Mxfp8 => {
+            let group_size = plan.group_size.unwrap_or(32);
+            simulate_group_quant(&w_f32, group_size, 8)?
+        }
+        QuantizedWeightFormat::Nvfp4 => {
+            simulate_uniform_quant(&w_f32, 4, true)?
+        }
+        QuantizedWeightFormat::Int8
+        | QuantizedWeightFormat::Gptq
+        | QuantizedWeightFormat::Awq
+        | QuantizedWeightFormat::Gguf
+        | QuantizedWeightFormat::CompressedTensors
+        | QuantizedWeightFormat::ModelOpt
+        | QuantizedWeightFormat::TorchAo => {
+            if let Some(gs) = plan.group_size {
+                simulate_group_quant(&w_f32, gs, 8)?
+            } else {
+                simulate_channel_quant(&w_f32, 8)?
+            }
+        }
+        QuantizedWeightFormat::Int4 => {
+            let group_size = plan.group_size.unwrap_or(128);
+            simulate_group_quant(&w_f32, group_size, 4)?
+        }
+        QuantizedWeightFormat::Unquantized => w_f32,
+        _ => w_f32,
+    };
+    q_w.to_dtype(dtype)
+}
+
+#[cfg(feature = "candle-backend")]
+fn simulate_uniform_quant(weight: &Tensor, bits: u32, symmetric: bool) -> Result<Tensor> {
+    let max_val = weight.flatten_all()?.max(0)?.to_scalar::<f32>()? as f64;
+    let min_val = weight.flatten_all()?.min(0)?.to_scalar::<f32>()? as f64;
+    let levels = (1 << bits) - 1;
+    let (scale, zero_point) = if symmetric {
+        let abs_max = max_val.max(min_val.abs());
+        let scale = if abs_max > 0.0 { abs_max / (levels as f64 / 2.0) } else { 1.0 };
+        (scale, 0.0)
+    } else {
+        let range = max_val - min_val;
+        let scale = if range > 0.0 { range / levels as f64 } else { 1.0 };
+        (scale, min_val)
+    };
+
+    let q = weight.broadcast_sub(&Tensor::new(zero_point as f32, weight.device())?)?
+        .broadcast_div(&Tensor::new(scale as f32, weight.device())?)?
+        .round()?
+        .clamp(-(levels as f32 / 2.0), levels as f32 / 2.0)?
+        .broadcast_mul(&Tensor::new(scale as f32, weight.device())?)?
+        .broadcast_add(&Tensor::new(zero_point as f32, weight.device())?)?;
+    Ok(q)
+}
+
+#[cfg(feature = "candle-backend")]
+fn simulate_channel_quant(weight: &Tensor, bits: usize) -> Result<Tensor> {
+    let _out_features = weight.dim(0)?;
+    let _in_features = weight.dim(1)?;
+    let abs_w = weight.abs()?;
+    let max_abs = abs_w.max_keepdim(1)?;
+    let q_max = (1 << (bits - 1)) - 1;
+    let scale = max_abs.broadcast_div(&Tensor::new(q_max as f32, weight.device())?)?;
+    let eps = Tensor::new(1e-8f32, weight.device())?;
+    let scale_safe = scale.broadcast_add(&eps)?;
+    let w_quant = weight.broadcast_div(&scale_safe)?.round()?;
+    let w_clamp = w_quant.clamp(-(q_max as f32), q_max as f32)?;
+    let w_dequant = w_clamp.broadcast_mul(&scale_safe)?;
+    Ok(w_dequant)
+}
+
+#[cfg(feature = "candle-backend")]
+fn simulate_group_quant(weight: &Tensor, group_size: usize, bits: usize) -> Result<Tensor> {
+    let out_features = weight.dim(0)?;
+    let in_features = weight.dim(1)?;
+    if in_features % group_size != 0 {
+        return simulate_channel_quant(weight, bits);
+    }
+    let num_groups = in_features / group_size;
+    let w_reshaped = weight.reshape((out_features * num_groups, group_size))?;
+    let abs_w = w_reshaped.abs()?;
+    let max_abs = abs_w.max_keepdim(1)?;
+    let q_max = (1 << (bits - 1)) - 1;
+    let scale = max_abs.broadcast_div(&Tensor::new(q_max as f32, weight.device())?)?;
+    let eps = Tensor::new(1e-8f32, weight.device())?;
+    let scale_safe = scale.broadcast_add(&eps)?;
+    let w_quant = w_reshaped.broadcast_div(&scale_safe)?.round()?;
+    let w_clamp = w_quant.clamp(-(q_max as f32), q_max as f32)?;
+    let w_dequant = w_clamp.broadcast_mul(&scale_safe)?;
+    w_dequant.reshape((out_features, in_features))
+}
 
 // ── RMSNorm ──────────────────────────────────────────────────────────────
+
 
 #[cfg(feature = "candle-backend")]
 pub struct RmsNorm {
@@ -40,6 +152,12 @@ impl Linear {
     pub fn new(weight: Tensor) -> Self {
         Self { weight }
     }
+
+    pub fn new_quantized(weight: Tensor, plan: &QuantizationPlan) -> Result<Self> {
+        let weight = simulate_weight_quantization(&weight, plan)?;
+        Ok(Self { weight })
+    }
+
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // weight shape: [out_features, in_features]
@@ -78,6 +196,19 @@ impl LlamaMLP {
             up_proj: Linear::new(up_proj),
             down_proj: Linear::new(down_proj),
         }
+    }
+
+    pub fn new_quantized(
+        gate_proj: Tensor,
+        up_proj: Tensor,
+        down_proj: Tensor,
+        plan: &QuantizationPlan,
+    ) -> Result<Self> {
+        Ok(Self {
+            gate_proj: Linear::new_quantized(gate_proj, plan)?,
+            up_proj: Linear::new_quantized(up_proj, plan)?,
+            down_proj: Linear::new_quantized(down_proj, plan)?,
+        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -123,6 +254,28 @@ impl LlamaAttention {
             head_dim,
         }
     }
+
+    pub fn new_quantized(
+        q_proj: Tensor,
+        k_proj: Tensor,
+        v_proj: Tensor,
+        o_proj: Tensor,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        plan: &QuantizationPlan,
+    ) -> Result<Self> {
+        Ok(Self {
+            q_proj: Linear::new_quantized(q_proj, plan)?,
+            k_proj: Linear::new_quantized(k_proj, plan)?,
+            v_proj: Linear::new_quantized(v_proj, plan)?,
+            o_proj: Linear::new_quantized(o_proj, plan)?,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        })
+    }
+
 
     pub fn forward(
         &self,
@@ -251,27 +404,45 @@ impl LlamaAttention {
             let k_ptr = k_f16.as_ptr() as *const u16;
             let v_ptr = v_f16.as_ptr() as *const u16;
 
-            let key_cache_ptr = gpu_kv_cache.key_ptr(layer_idx) as *mut u16;
-            let value_cache_ptr = gpu_kv_cache.value_ptr(layer_idx) as *mut u16;
+            let cache_dtype = gpu_kv_cache.dtype();
+            let is_fp8 = cache_dtype == rllm_core::dtype::DType::FP8E4M3 || cache_dtype == rllm_core::dtype::DType::FP8E5M2;
+            let is_e5m2 = if cache_dtype == rllm_core::dtype::DType::FP8E5M2 { 1 } else { 0 };
 
             // Build slot mapping tensor on device
             let slot_mapping = &attn_meta.slot_mapping;
 
             if !slot_mapping.is_empty() {
                 unsafe {
-                    cache_ops::cache_write_f16(
-                        key_cache_ptr,
-                        value_cache_ptr,
-                        k_ptr,
-                        v_ptr,
-                        slot_mapping.as_ptr(),
-                        (bsz * seq_len) as i64,
-                        self.num_kv_heads as i64,
-                        self.head_dim as i64,
-                        gpu_kv_cache.block_size() as i64,
-                        gpu_kv_cache.num_blocks() as i64,
-                        0, // default stream
-                    ).map_err(|e| candle_core::Error::Msg(format!("cache_write_f16 failed: {e}")))?;
+                    if is_fp8 {
+                        cache_ops::cache_write_fp8(
+                            gpu_kv_cache.key_ptr(layer_idx) as *mut u8,
+                            gpu_kv_cache.value_ptr(layer_idx) as *mut u8,
+                            k_ptr,
+                            v_ptr,
+                            slot_mapping.as_ptr(),
+                            (bsz * seq_len) as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            gpu_kv_cache.num_blocks() as i64,
+                            is_e5m2,
+                            0, // default stream
+                        ).map_err(|e| candle_core::Error::Msg(format!("cache_write_fp8 failed: {e}")))?;
+                    } else {
+                        cache_ops::cache_write_f16(
+                            gpu_kv_cache.key_ptr(layer_idx) as *mut u16,
+                            gpu_kv_cache.value_ptr(layer_idx) as *mut u16,
+                            k_ptr,
+                            v_ptr,
+                            slot_mapping.as_ptr(),
+                            (bsz * seq_len) as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            gpu_kv_cache.num_blocks() as i64,
+                            0, // default stream
+                        ).map_err(|e| candle_core::Error::Msg(format!("cache_write_f16 failed: {e}")))?;
+                    }
                 }
             }
 
@@ -295,43 +466,85 @@ impl LlamaAttention {
             let kernel_result = if is_prefill {
                 let query_start_loc_i32: Vec<i32> = attn_meta.query_start_loc.iter().map(|&s| s as i32).collect();
                 unsafe {
-                    rllm_kernels::paged_attention_prefill_f16(
-                        out_ptr,
-                        q_ptr,
-                        gpu_kv_cache.key_ptr(layer_idx) as *const u16,
-                        gpu_kv_cache.value_ptr(layer_idx) as *const u16,
-                        flat_block_tables.as_ptr(),
-                        seq_lens_i32.as_ptr(),
-                        query_start_loc_i32.as_ptr(),
-                        attn_meta.num_seqs() as i64,
-                        (bsz * seq_len) as i64,
-                        self.num_heads as i64,
-                        self.num_kv_heads as i64,
-                        self.head_dim as i64,
-                        gpu_kv_cache.block_size() as i64,
-                        attn_meta.max_num_blocks_per_seq as i64,
-                        scale,
-                        0, // default stream
-                    )
+                    if is_fp8 {
+                        rllm_kernels::paged_attention_prefill_fp8(
+                            out_ptr,
+                            q_ptr,
+                            gpu_kv_cache.key_ptr(layer_idx) as *const u8,
+                            gpu_kv_cache.value_ptr(layer_idx) as *const u8,
+                            flat_block_tables.as_ptr(),
+                            seq_lens_i32.as_ptr(),
+                            query_start_loc_i32.as_ptr(),
+                            attn_meta.num_seqs() as i64,
+                            (bsz * seq_len) as i64,
+                            self.num_heads as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            attn_meta.max_num_blocks_per_seq as i64,
+                            scale,
+                            is_e5m2,
+                            0, // default stream
+                        )
+                    } else {
+                        rllm_kernels::paged_attention_prefill_f16(
+                            out_ptr,
+                            q_ptr,
+                            gpu_kv_cache.key_ptr(layer_idx) as *const u16,
+                            gpu_kv_cache.value_ptr(layer_idx) as *const u16,
+                            flat_block_tables.as_ptr(),
+                            seq_lens_i32.as_ptr(),
+                            query_start_loc_i32.as_ptr(),
+                            attn_meta.num_seqs() as i64,
+                            (bsz * seq_len) as i64,
+                            self.num_heads as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            attn_meta.max_num_blocks_per_seq as i64,
+                            scale,
+                            0, // default stream
+                        )
+                    }
                 }
             } else {
                 unsafe {
-                    rllm_kernels::paged_attention_decode_f16(
-                        out_ptr,
-                        q_ptr,
-                        gpu_kv_cache.key_ptr(layer_idx) as *const u16,
-                        gpu_kv_cache.value_ptr(layer_idx) as *const u16,
-                        flat_block_tables.as_ptr(),
-                        seq_lens_i32.as_ptr(),
-                        attn_meta.num_seqs() as i64,
-                        self.num_heads as i64,
-                        self.num_kv_heads as i64,
-                        self.head_dim as i64,
-                        gpu_kv_cache.block_size() as i64,
-                        attn_meta.max_num_blocks_per_seq as i64,
-                        scale,
-                        0, // default stream
-                    )
+                    if is_fp8 {
+                        rllm_kernels::paged_attention_decode_fp8(
+                            out_ptr,
+                            q_ptr,
+                            gpu_kv_cache.key_ptr(layer_idx) as *const u8,
+                            gpu_kv_cache.value_ptr(layer_idx) as *const u8,
+                            flat_block_tables.as_ptr(),
+                            seq_lens_i32.as_ptr(),
+                            attn_meta.num_seqs() as i64,
+                            self.num_heads as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            attn_meta.max_num_blocks_per_seq as i64,
+                            scale,
+                            is_e5m2,
+                            0, // default stream
+                        )
+                    } else {
+                        rllm_kernels::paged_attention_decode_f16(
+                            out_ptr,
+                            q_ptr,
+                            gpu_kv_cache.key_ptr(layer_idx) as *const u16,
+                            gpu_kv_cache.value_ptr(layer_idx) as *const u16,
+                            flat_block_tables.as_ptr(),
+                            seq_lens_i32.as_ptr(),
+                            attn_meta.num_seqs() as i64,
+                            self.num_heads as i64,
+                            self.num_kv_heads as i64,
+                            self.head_dim as i64,
+                            gpu_kv_cache.block_size() as i64,
+                            attn_meta.max_num_blocks_per_seq as i64,
+                            scale,
+                            0, // default stream
+                        )
+                    }
                 }
             };
 
@@ -579,6 +792,29 @@ mod tests {
         assert!(vals[2][1].is_finite());
         assert!(vals[2][2].is_finite());
         assert!(vals[2][3].is_infinite());
+        Ok(())
+    }
+
+    #[test]
+    fn weight_quantization_simulation() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::randn(0.0f32, 1.0f32, (128, 64), &device)?;
+
+        // MXFP8 test
+        let plan_mxfp8 = QuantizationPlan::mxfp8();
+        let q_mxfp8 = simulate_weight_quantization(&weight, &plan_mxfp8)?;
+        assert_eq!(q_mxfp8.dims(), weight.dims());
+
+        // INT4 test
+        let plan_int4 = QuantizationPlan::int4();
+        let q_int4 = simulate_weight_quantization(&weight, &plan_int4)?;
+        assert_eq!(q_int4.dims(), weight.dims());
+
+        // NVFP4 test
+        let plan_nvfp4 = QuantizationPlan::nvfp4();
+        let q_nvfp4 = simulate_weight_quantization(&weight, &plan_nvfp4)?;
+        assert_eq!(q_nvfp4.dims(), weight.dims());
+
         Ok(())
     }
 }
