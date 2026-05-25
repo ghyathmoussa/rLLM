@@ -214,6 +214,31 @@ impl KVCacheManager {
         self.request_blocks.get(&request_id).map(|v| v.as_slice())
     }
 
+    /// Fork block table from a parent request to a child request.
+    ///
+    /// Copies the block table list and increments the reference count of all shared blocks.
+    pub fn fork_blocks(&mut self, parent_id: RequestId, child_id: RequestId) -> Result<(), String> {
+        let parent_blocks = self.request_blocks.get(&parent_id)
+            .ok_or_else(|| format!("Parent request {:?} not found in cache manager", parent_id))?
+            .clone();
+
+        for &block_id in &parent_blocks {
+            self.block_pool.incref(block_id);
+        }
+
+        self.request_blocks.insert(child_id, parent_blocks);
+
+        if let Some(&computed) = self.request_computed_tokens.get(&parent_id) {
+            self.request_computed_tokens.insert(child_id, computed);
+        }
+
+        if let Some(hashes) = self.request_block_hashes.get(&parent_id) {
+            self.request_block_hashes.insert(child_id, hashes.clone());
+        }
+
+        Ok(())
+    }
+
     /// Get the number of computed tokens for a request.
     pub fn get_computed_tokens(&self, request_id: RequestId) -> usize {
         self.request_computed_tokens.get(&request_id).copied().unwrap_or(0)

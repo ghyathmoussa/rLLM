@@ -120,6 +120,9 @@ proptest = "1"
 # Constant-time comparison
 subtle = "2"
 
+# CUDA runtime driver API wrappers
+cudarc = { version = "0.19.7", features = ["driver"] }
+
 # Hashing
 sha2 = "0.10"
 ciborium = "0.2"

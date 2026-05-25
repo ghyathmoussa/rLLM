@@ -15,11 +15,19 @@ struct RunnerRequestState {
     prompt_token_ids: Vec<u32>,
     generated_token_ids: Vec<u32>,
     num_computed_tokens: usize,
+    #[cfg(feature = "candle-backend")]
+    kv_cache: Vec<Option<(candle_core::Tensor, candle_core::Tensor)>>,
 }
 
 impl RunnerRequestState {
-    fn new(prompt_token_ids: Vec<u32>) -> Self {
-        Self { prompt_token_ids, generated_token_ids: Vec::new(), num_computed_tokens: 0 }
+    fn new(prompt_token_ids: Vec<u32>, _num_layers: usize) -> Self {
+        Self {
+            prompt_token_ids,
+            generated_token_ids: Vec::new(),
+            num_computed_tokens: 0,
+            #[cfg(feature = "candle-backend")]
+            kv_cache: vec![None; _num_layers],
+        }
     }
 
     fn _total_tokens(&self) -> usize {
@@ -70,7 +78,8 @@ impl ModelRunner {
 
     /// Register a new request with its prompt tokens.
     pub fn add_request(&mut self, request_id: RequestId, prompt_token_ids: Vec<u32>) {
-        self.request_states.insert(request_id, RunnerRequestState::new(prompt_token_ids));
+        let num_layers = self.model_config.num_layers;
+        self.request_states.insert(request_id, RunnerRequestState::new(prompt_token_ids, num_layers));
     }
 
     /// Remove a finished or preempted request.
@@ -78,6 +87,14 @@ impl ModelRunner {
         self.request_states.remove(request_id);
         self.cached_logits.remove(request_id);
         self.request_sampling_params.remove(request_id);
+    }
+
+    #[cfg(feature = "candle-backend")]
+    pub fn get_kv_cache_mut(
+        &mut self,
+        request_id: &RequestId,
+    ) -> Option<&mut Vec<Option<(candle_core::Tensor, candle_core::Tensor)>>> {
+        self.request_states.get_mut(request_id).map(|s| &mut s.kv_cache)
     }
 
     /// Store a generated token for a running request and advance computed count.
@@ -459,60 +476,193 @@ impl ModelRunner {
 // ── CUDA Graph Capture Infrastructure ────────────────────────────────────
 
 /// Represents a captured CUDA graph instance for a specific decode batch size.
-#[derive(Debug)]
+#[cfg(has_cuda)]
 pub struct CudaGraphInstance {
-    /// Batch size this graph was captured for.
     pub batch_size: usize,
-    /// Whether this graph is captured and ready for replay.
     pub is_captured: bool,
-    /// Opaque handle to the captured graph (u64 for device pointer/handle).
-    /// When cudarc integration is complete, this will hold a `CudaGraph` handle.
-    #[allow(dead_code)]
-    graph_handle: u64,
-    /// Duration of the captured graph's execution during warmup.
+    graph_exec: cudarc::driver::sys::cudaGraphExec_t,
     pub capture_duration_ns: u64,
+    #[cfg(feature = "candle-backend")]
+    pub input_ids: Option<candle_core::Tensor>,
+    #[cfg(feature = "candle-backend")]
+    pub logits: Option<candle_core::Tensor>,
+}
+
+#[cfg(has_cuda)]
+unsafe impl Send for CudaGraphInstance {}
+#[cfg(has_cuda)]
+unsafe impl Sync for CudaGraphInstance {}
+
+#[cfg(not(has_cuda))]
+pub struct CudaGraphInstance {
+    pub batch_size: usize,
+    pub is_captured: bool,
+    pub capture_duration_ns: u64,
+    #[cfg(feature = "candle-backend")]
+    pub input_ids: Option<candle_core::Tensor>,
+    #[cfg(feature = "candle-backend")]
+    pub logits: Option<candle_core::Tensor>,
+}
+
+impl std::fmt::Debug for CudaGraphInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("CudaGraphInstance");
+        d.field("batch_size", &self.batch_size)
+         .field("is_captured", &self.is_captured)
+         .field("capture_duration_ns", &self.capture_duration_ns);
+        #[cfg(feature = "candle-backend")]
+        {
+            d.field("input_ids", &self.input_ids)
+             .field("logits", &self.logits);
+        }
+        d.finish()
+    }
 }
 
 impl CudaGraphInstance {
     /// Create a new empty graph instance.
     pub fn new(batch_size: usize) -> Self {
-        Self { batch_size, is_captured: false, graph_handle: 0, capture_duration_ns: 0 }
+        #[cfg(has_cuda)]
+        {
+            Self {
+                batch_size,
+                is_captured: false,
+                graph_exec: std::ptr::null_mut(),
+                capture_duration_ns: 0,
+                #[cfg(feature = "candle-backend")]
+                input_ids: None,
+                #[cfg(feature = "candle-backend")]
+                logits: None,
+            }
+        }
+        #[cfg(not(has_cuda))]
+        {
+            Self {
+                batch_size,
+                is_captured: false,
+                capture_duration_ns: 0,
+                #[cfg(feature = "candle-backend")]
+                input_ids: None,
+                #[cfg(feature = "candle-backend")]
+                logits: None,
+            }
+        }
     }
 
     /// Capture the current CUDA graph for this batch size.
     ///
-    /// In production, this calls `cudaStreamBeginCapture` / `cudaStreamEndCapture`.
-    /// Currently stores metadata only.
-    pub fn capture(&mut self) -> Result<()> {
+    /// Runs the provided closure to launch GPU kernels within the capture stream.
+    pub fn capture<F>(&mut self, run_fn: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+    {
         let start = std::time::Instant::now();
-        // TODO: When cudarc is available:
-        //   cudarc::driver::result::cuda_stream_begin_capture(stream, ...)?;
-        //   // replay cached operations
-        //   let graph = cudarc::driver::result::cuda_stream_end_capture(stream)?;
-        //   self.graph_handle = graph.inner() as u64;
+        #[cfg(has_cuda)]
+        {
+            use cudarc::driver::sys;
+            use std::ptr;
+
+            let stream = ptr::null_mut(); // default stream
+            let mut graph: sys::cudaGraph_t = ptr::null_mut();
+            let mut graph_exec: sys::cudaGraphExec_t = ptr::null_mut();
+
+            // Begin capture: mode global (0)
+            let res = unsafe { sys::cudaStreamBeginCapture(stream, 0) };
+            if res != sys::cudaError::cudaSuccess {
+                anyhow::bail!("cudaStreamBeginCapture failed: {:?}", res);
+            }
+
+            // Run the closure to record kernels
+            let run_res = run_fn();
+
+            // End capture
+            let end_res = unsafe { sys::cudaStreamEndCapture(stream, &mut graph) };
+
+            // Clean up and error out if execution failed
+            if let Err(e) = run_res {
+                if end_res == sys::cudaError::cudaSuccess && !graph.is_null() {
+                    unsafe { sys::cudaGraphDestroy(graph) };
+                }
+                return Err(e);
+            }
+
+            if end_res != sys::cudaError::cudaSuccess {
+                anyhow::bail!("cudaStreamEndCapture failed: {:?}", end_res);
+            }
+
+            // Instantiate graph executable
+            let inst_res = unsafe {
+                sys::cudaGraphInstantiate(
+                    &mut graph_exec,
+                    graph,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+
+            // Temporary graph is no longer needed after instantiation
+            unsafe { sys::cudaGraphDestroy(graph) };
+
+            if inst_res != sys::cudaError::cudaSuccess {
+                anyhow::bail!("cudaGraphInstantiate failed: {:?}", inst_res);
+            }
+
+            // If we already had a captured graph, destroy it
+            if !self.graph_exec.is_null() {
+                unsafe { sys::cudaGraphExecDestroy(self.graph_exec) };
+            }
+
+            self.graph_exec = graph_exec;
+        }
+        #[cfg(not(has_cuda))]
+        {
+            run_fn()?;
+        }
         self.is_captured = true;
         self.capture_duration_ns = start.elapsed().as_nanos() as u64;
-        tracing::debug!(batch_size = self.batch_size, "CUDA graph captured (stub)");
+        tracing::debug!(batch_size = self.batch_size, "CUDA graph captured successfully");
         Ok(())
     }
 
     /// Replay the captured graph.
-    ///
-    /// In production, this calls `cudaGraphLaunch` with the captured handle.
-    /// Currently a no-op that validates the graph is captured.
     pub fn replay(&self) -> Result<()> {
         if !self.is_captured {
             anyhow::bail!("CUDA graph for batch size {} not yet captured", self.batch_size);
         }
-        // TODO: When cudarc is available:
-        //   cudarc::driver::result::cuda_graph_launch(self.graph_handle, stream)?;
-        tracing::trace!(batch_size = self.batch_size, "CUDA graph replayed (stub)");
+        #[cfg(has_cuda)]
+        {
+            use cudarc::driver::sys;
+            use std::ptr;
+
+            if self.graph_exec.is_null() {
+                anyhow::bail!("CUDA graph exec handle is null for batch size {}", self.batch_size);
+            }
+
+            let stream = ptr::null_mut();
+            let res = unsafe { sys::cudaGraphLaunch(self.graph_exec, stream) };
+            if res != sys::cudaError::cudaSuccess {
+                anyhow::bail!("cudaGraphLaunch failed: {:?}", res);
+            }
+        }
+        tracing::trace!(batch_size = self.batch_size, "CUDA graph replayed successfully");
         Ok(())
     }
 
     /// Check if this graph is ready for replay.
     pub fn is_ready(&self) -> bool {
         self.is_captured
+    }
+}
+
+#[cfg(has_cuda)]
+impl Drop for CudaGraphInstance {
+    fn drop(&mut self) {
+        if !self.graph_exec.is_null() {
+            unsafe {
+                cudarc::driver::sys::cudaGraphExecDestroy(self.graph_exec);
+            }
+        }
     }
 }
 
@@ -550,12 +700,45 @@ impl CudaGraphCapture {
     /// Capture graphs for all configured batch sizes.
     ///
     /// Should be called during warmup with representative inputs.
-    pub fn capture_all(&mut self) -> Result<()> {
+    #[cfg(feature = "candle-backend")]
+    pub fn capture_all<F>(&mut self, mut run_fn: F) -> Result<()>
+    where
+        F: FnMut(usize) -> Result<(candle_core::Tensor, candle_core::Tensor)>,
+    {
         if !self.enabled {
             return Ok(());
         }
         for graph in &mut self.graphs {
-            graph.capture()?;
+            let bs = graph.batch_size;
+            let mut input_ids = None;
+            let mut logits = None;
+            graph.capture(|| {
+                let (inp, logi) = run_fn(bs)?;
+                input_ids = Some(inp);
+                logits = Some(logi);
+                Ok(())
+            })?;
+            graph.input_ids = input_ids;
+            graph.logits = logits;
+        }
+        tracing::info!(num_graphs = self.graphs.len(), "CUDA graphs captured for all batch sizes");
+        Ok(())
+    }
+
+    /// Capture graphs for all configured batch sizes.
+    ///
+    /// Should be called during warmup with representative inputs.
+    #[cfg(not(feature = "candle-backend"))]
+    pub fn capture_all<F>(&mut self, mut run_fn: F) -> Result<()>
+    where
+        F: FnMut(usize) -> Result<()>,
+    {
+        if !self.enabled {
+            return Ok(());
+        }
+        for graph in &mut self.graphs {
+            let bs = graph.batch_size;
+            graph.capture(|| run_fn(bs))?;
         }
         tracing::info!(num_graphs = self.graphs.len(), "CUDA graphs captured for all batch sizes");
         Ok(())
@@ -581,6 +764,14 @@ impl CudaGraphCapture {
         } else {
             Ok(false)
         }
+    }
+
+    /// Get the exact captured graph for a given batch size.
+    pub fn get_graph_for_batch(&self, batch_size: usize) -> Option<&CudaGraphInstance> {
+        if !self.enabled {
+            return None;
+        }
+        self.graphs.iter().find(|g| g.is_ready() && g.batch_size == batch_size)
     }
 
     /// Check if a graph exists for the given batch size.
@@ -989,5 +1180,24 @@ mod tests {
         assert_eq!(meta.num_decode_tokens, 1);
         assert_eq!(meta.seq_lens.len(), 3);
         assert_eq!(meta.query_start_loc, vec![0, 10, 30, 31]);
+    }
+
+    #[test]
+    #[cfg(feature = "candle-backend")]
+    fn test_request_kv_cache_stateful() {
+        let config = test_model_config();
+        let mut runner = ModelRunner::new(config, 16);
+        let rid = RequestId::new();
+
+        runner.add_request(rid, vec![1, 2, 3]);
+        let kv = runner.get_kv_cache_mut(&rid);
+        assert!(kv.is_some());
+        let kv = kv.unwrap();
+        assert_eq!(kv.len(), 32);
+        assert!(kv[0].is_none());
+        assert!(kv[1].is_none());
+
+        runner.remove_request(&rid);
+        assert!(runner.get_kv_cache_mut(&rid).is_none());
     }
 }

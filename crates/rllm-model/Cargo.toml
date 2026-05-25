@@ -9,6 +9,7 @@ description = "Model registry, HF config parsing, Llama model implementation, an
 [dependencies]
 rllm-core.workspace = true
 rllm-tensor.workspace = true
+rllm-kernels.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

@@ -3,6 +3,7 @@ use rllm_cache::spec::KVCacheConfig;
 use rllm_core::config::ModelConfig;
 #[cfg(feature = "candle-backend")]
 use rllm_model::ModelRunner as CandleModelRunner;
+use rllm_kernels::cache_ops::GpuKVCache;
 use rllm_sampling::Sampler;
 use rllm_tensor::Device;
 
@@ -26,6 +27,11 @@ pub struct Worker {
     sampler: Option<Sampler>,
     #[cfg(feature = "candle-backend")]
     candle_model: Option<CandleModelRunner>,
+    /// Global GPU KV cache for PagedAttention.
+    /// Allocated during `initialize_kv_cache()` when CUDA is available.
+    gpu_kv_cache: Option<GpuKVCache>,
+    /// CUDA graph replay/capture manager.
+    pub cuda_graphs: crate::model_runner::CudaGraphCapture,
 }
 
 impl Worker {
@@ -41,6 +47,8 @@ impl Worker {
             sampler: None,
             #[cfg(feature = "candle-backend")]
             candle_model: None,
+            gpu_kv_cache: None,
+            cuda_graphs: crate::model_runner::CudaGraphCapture::new(),
         }
     }
 
@@ -154,6 +162,33 @@ impl Worker {
         }
     }
 
+    /// Execute one stateful forward step on the model for a single request.
+    pub fn execute_model_step(
+        &mut self,
+        request_id: &rllm_core::ids::RequestId,
+        input_tokens: &[u32],
+        positions: &[usize],
+    ) -> Result<Option<candle_core::Tensor>> {
+        #[cfg(feature = "candle-backend")]
+        {
+            let Some(model) = &self.candle_model else {
+                return Ok(None);
+            };
+            let kv_cache = self.model_runner.get_kv_cache_mut(request_id)
+                .ok_or_else(|| anyhow::anyhow!("request state not found for {:?}", request_id))?;
+            let device = model.device();
+            let input_ids = candle_core::Tensor::new(input_tokens, device)?
+                .reshape((1, input_tokens.len()))?;
+            let logits = model.forward(&input_ids, positions, kv_cache)?;
+            Ok(Some(logits))
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            let _ = (request_id, input_tokens, positions);
+            Ok(None)
+        }
+    }
+
     /// Determine available GPU memory for KV cache allocation.
     ///
     /// Returns a 4 GiB default for CUDA devices. Real GPU memory querying
@@ -192,13 +227,83 @@ impl Worker {
             "Initializing KV cache"
         );
         rllm_metrics::record_gpu_memory_allocated(bytes_per_cache);
+
+        // Allocate physical GPU KV cache when CUDA is available.
+        #[cfg(has_cuda)]
+        {
+            let cache = GpuKVCache::new(
+                config.num_blocks,
+                config.spec.num_layers,
+                config.spec.num_kv_heads,
+                config.spec.head_dim,
+                config.spec.block_size,
+                config.spec.dtype.bytes_per_scalar(),
+            ).map_err(|e| anyhow::anyhow!("GPU KV cache allocation failed: {e}"))?;
+            tracing::info!(
+                worker_id = self.id,
+                gpu_cache_bytes = cache.total_bytes(),
+                num_layers = cache.num_layers(),
+                "GPU KV cache allocated"
+            );
+            self.gpu_kv_cache = Some(cache);
+        }
+
         self.cache_config = Some(config.clone());
         Ok(())
     }
 
-    /// Warm up kernels with dummy batches of common sizes.
+    /// Warm up kernels with dummy batches of common sizes and capture CUDA graphs.
     pub fn warm_up(&mut self) -> Result<()> {
+        #[cfg(has_cuda)]
+        {
+            if self.has_loaded_model() && self.gpu_kv_cache.is_some() {
+                tracing::info!(worker_id = self.id, "Capturing CUDA graphs during warmup...");
+                let self_ref = &*self;
+                self.cuda_graphs.capture_all(|batch_size| {
+                    self_ref.execute_dummy_decode(batch_size)
+                })?;
+            }
+        }
         tracing::info!(worker_id = self.id, "Warmup completed");
+        Ok(())
+    }
+
+    /// Execute a dummy decode step for CUDA graph capture.
+    #[cfg(feature = "candle-backend")]
+    pub fn execute_dummy_decode(&self, batch_size: usize) -> Result<()> {
+        let device = self.worker_model_device()
+            .ok_or_else(|| anyhow::anyhow!("model device not found"))?;
+
+        // 1. Create dummy input tensors
+        let token_ids = vec![0u32; batch_size];
+        let input_ids = candle_core::Tensor::new(&token_ids[..], device)?
+            .reshape((1, batch_size))?;
+
+        let positions = vec![0usize; batch_size];
+
+        // 2. Build dummy AttentionMetadata for decode
+        let seq_lens = vec![1u32; batch_size];
+        // Map each sequence to physical block 0
+        let block_tables = vec![vec![0i32]; batch_size];
+        let mut attn_meta = rllm_kernels::AttentionMetadata::for_decode(
+            seq_lens,
+            block_tables,
+            1, // max_num_blocks_per_seq
+        );
+
+        // Map tokens to block 0 offsets
+        let slot_mapping: Vec<i64> = (0..batch_size)
+            .map(|i| (i % self.block_size) as i64)
+            .collect();
+        attn_meta.slot_mapping = slot_mapping;
+
+        // 3. Run forward pass
+        let _logits = self.forward_paged_batch(&input_ids, &positions, &attn_meta)?;
+        Ok(())
+    }
+
+    #[cfg(not(feature = "candle-backend"))]
+    pub fn execute_dummy_decode(&self, _batch_size: usize) -> Result<()> {
         Ok(())
     }
 
@@ -263,5 +368,42 @@ impl Worker {
     /// Used when the executor needs ownership of the sampler.
     pub fn take_sampler(&mut self) -> Option<Sampler> {
         self.sampler.take()
+    }
+
+    /// Get a reference to the GPU KV cache, if allocated.
+    pub fn gpu_kv_cache(&self) -> Option<&GpuKVCache> {
+        self.gpu_kv_cache.as_ref()
+    }
+
+    /// Get the Candle device from the loaded model.
+    #[cfg(feature = "candle-backend")]
+    pub fn worker_model_device(&self) -> Option<&candle_core::Device> {
+        self.candle_model.as_ref().map(|m| m.device())
+    }
+
+    #[cfg(not(feature = "candle-backend"))]
+    pub fn worker_model_device(&self) -> Option<&()> {
+        None
+    }
+
+    /// Execute a batched paged forward pass using the global GPU KV cache.
+    ///
+    /// This is the high-performance path: all requests in the batch share a
+    /// single kernel launch through `model.forward_paged()`, with K/V data
+    /// scatter-written to and read from the block-addressed `GpuKVCache`.
+    #[cfg(feature = "candle-backend")]
+    pub fn forward_paged_batch(
+        &self,
+        input_ids: &candle_core::Tensor,
+        positions: &[usize],
+        attn_meta: &rllm_kernels::AttentionMetadata,
+    ) -> Result<candle_core::Tensor> {
+        let gpu_cache = self.gpu_kv_cache.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GPU KV cache not initialized"))?;
+        let model = self.candle_model.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("model not loaded"))?;
+
+        let logits = model.forward_paged(input_ids, positions, gpu_cache, attn_meta)?;
+        Ok(logits)
     }
 }

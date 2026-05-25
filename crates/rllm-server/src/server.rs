@@ -429,10 +429,70 @@ async fn chat_completions_handler(
         return placeholder_chat_response(&state.model_name, started);
     };
 
-    let result =
-        run_chat_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await;
+    let messages = req
+        .messages
+        .iter()
+        .map(|msg| rllm_core::request::ChatMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prompt = match runtime.tokenizer.render_chat(messages.clone(), true).await {
+        Ok(p) => p,
+        Err(e) => {
+            return typed_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to render chat template: {e}"),
+                "internal_error",
+                started,
+            );
+        }
+    };
+    let token_ids = match runtime.tokenizer.encode(prompt.clone(), false).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return typed_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to tokenize chat prompt: {e}"),
+                "internal_error",
+                started,
+            );
+        }
+    };
+    let sampling_params = chat_request_to_sampling_params(&req);
+    if let Err(e) = sampling_params.validate() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("invalid sampling params: {e}"),
+            "invalid_request_error",
+            started,
+        );
+    }
 
     if is_stream {
+        let inference_req = InferenceRequest {
+            request_id: RequestId::new(),
+            prompt: Some(prompt.clone()),
+            token_ids: Some(token_ids),
+            messages: None,
+            sampling_params,
+            arrival_time: std::time::Instant::now(),
+            priority: 0,
+            stream: true,
+            cache_salt: None,
+        };
+        let mut receiver = match runtime.engine.add_request_stream(inference_req) {
+            Ok(rx) => rx,
+            Err(e) => {
+                return typed_error_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to submit stream request: {e}"),
+                    "internal_error",
+                    started,
+                );
+            }
+        };
+
         let sse_stream = async_stream::stream! {
             let id = generate_completion_id("chatcmpl");
             let created = now_timestamp();
@@ -452,35 +512,40 @@ async fn chat_completions_handler(
                 Event::default().data(serialize_sse(&role_chunk))
             );
 
-            if let Ok(ref completion) = result {
-                let content_chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: ChunkDelta { role: None, content: Some(completion.text.clone()) },
-                        finish_reason: None,
-                    }],
-                    generation_time: Some(completion.generation_time),
-                };
-                yield Ok(Event::default().data(serialize_sse(&content_chunk)));
+            let elapsed_start = std::time::Instant::now();
+            while let Some(output) = receiver.recv().await {
+                let mut chunk_text = String::new();
+                for completion in &output.outputs {
+                    if !completion.token_ids.is_empty() {
+                        if let Ok(text) = runtime.tokenizer.decode(completion.token_ids.clone(), true).await {
+                            chunk_text.push_str(&text);
+                        }
+                    }
+                }
+
+                let finish_reason = output.outputs.first().and_then(|c| c.finish_reason).map(finish_reason_to_openai);
+
+                if !chunk_text.is_empty() || finish_reason.is_some() {
+                    let content_chunk = ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![ChunkChoice {
+                            index: 0,
+                            delta: ChunkDelta { role: None, content: Some(chunk_text) },
+                            finish_reason,
+                        }],
+                        generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
+                    };
+                    yield Ok(Event::default().data(serialize_sse(&content_chunk)));
+                }
+
+                if output.finished {
+                    break;
+                }
             }
 
-            let done_chunk = ChatCompletionChunk {
-                id,
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model,
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta { role: None, content: None },
-                    finish_reason: Some("stop".into()),
-                }],
-                generation_time: None,
-            };
-            yield Ok(Event::default().data(serialize_sse(&done_chunk)));
             yield Ok(Event::default().data("[DONE]"));
         };
 
@@ -490,6 +555,15 @@ async fn chat_completions_handler(
             .keep_alive(axum::response::sse::KeepAlive::default())
             .into_response();
     }
+
+    let result = submit_and_collect(
+        runtime,
+        Some(prompt),
+        token_ids,
+        sampling_params,
+        Duration::from_secs(state.request_timeout_secs),
+    )
+    .await;
 
     match result {
         Ok(completion) => {
@@ -584,31 +658,6 @@ struct EngineCompletion {
     generation_time: f64,
 }
 
-async fn run_chat_completion(
-    runtime: ModelRuntime,
-    req: ChatCompletionRequest,
-    timeout: Duration,
-) -> Result<EngineCompletion> {
-    let messages = req
-        .messages
-        .iter()
-        .map(|msg| rllm_core::request::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    let prompt = runtime
-        .tokenizer
-        .render_chat(messages.clone(), true)
-        .await
-        .context("rendering chat template")?;
-    let token_ids =
-        runtime.tokenizer.encode(prompt.clone(), false).await.context("tokenizing chat prompt")?;
-    let sampling_params = chat_request_to_sampling_params(&req);
-    sampling_params.validate().context("invalid sampling params")?;
-
-    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params, timeout).await
-}
 
 async fn run_text_completion(
     runtime: ModelRuntime,
@@ -647,8 +696,7 @@ async fn submit_and_collect(
         "submitting request to inference engine"
     );
 
-    let mut output_rx = runtime.engine.output_receiver();
-    runtime.engine.add_request(InferenceRequest {
+    let mut receiver = runtime.engine.add_request_stream(InferenceRequest {
         request_id,
         prompt,
         token_ids: Some(token_ids.clone()),
@@ -664,23 +712,18 @@ async fn submit_and_collect(
     let mut finish_reason = "length".to_string();
 
     let collect = async {
-        loop {
-            output_rx.changed().await.context("engine output channel closed")?;
-            for output in output_rx.borrow_and_update().iter() {
-                if output.request_id != request_id {
-                    continue;
-                }
-                for completion in &output.outputs {
-                    generated_ids.extend_from_slice(&completion.token_ids);
-                    if let Some(reason) = completion.finish_reason {
-                        finish_reason = finish_reason_to_openai(reason);
-                    }
-                }
-                if output.finished {
-                    return Ok::<(), anyhow::Error>(());
+        while let Some(output) = receiver.recv().await {
+            for completion in &output.outputs {
+                generated_ids.extend_from_slice(&completion.token_ids);
+                if let Some(reason) = completion.finish_reason {
+                    finish_reason = finish_reason_to_openai(reason);
                 }
             }
+            if output.finished {
+                return Ok::<(), anyhow::Error>(());
+            }
         }
+        anyhow::bail!("Engine closed output stream before finishing request")
     };
     tokio::time::timeout(timeout, collect)
         .await

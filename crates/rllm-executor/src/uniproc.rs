@@ -66,17 +66,72 @@ impl Executor for UniProcExecutor {
         }
 
         // 2. Build attention metadata.
-        let _attn_meta = self.worker.model_runner().build_attention_metadata(&batch);
+        let attn_meta = self.worker.model_runner().build_attention_metadata(&batch);
 
         // 3. Model forward pass.
-        //    Without candle-backend, generate dummy logits so the sampling
-        //    pipeline can be tested. With candle-backend, the real model
-        //    forward would produce logits here.
         let vocab_size = self.worker.model_runner().vocab_size();
-
-        // 4. For each request, extract logits and sample a token.
         let mut sampled_token_ids = Vec::with_capacity(batch.num_seqs);
         let mut logprobs = Vec::with_capacity(batch.num_seqs);
+
+        // Try CUDA Graph replay first (Phase 2 optimization) for decode-only iterations.
+        #[cfg(feature = "candle-backend")]
+        let mut batched_logits = None;
+
+        #[cfg(feature = "candle-backend")]
+        if batch.num_prefill_tokens == 0 && self.worker.has_loaded_model() && self.worker.gpu_kv_cache().is_some() {
+            let batch_size = batch.num_decode_tokens;
+            if let Some(graph) = self.worker.cuda_graphs.get_graph_for_batch(batch_size) {
+                let _ = graph;
+                #[cfg(has_cuda)]
+                {
+                    if let (Some(ref input_tensor), Some(ref logits_tensor)) = (&graph.input_ids, &graph.logits) {
+                        unsafe {
+                            let ptr = input_tensor.as_ptr() as *mut std::ffi::c_void;
+                            let bytes = batch.token_ids.len() * std::mem::size_of::<u32>();
+                            let res = cudarc::driver::sys::cudaMemcpy(
+                                ptr,
+                                batch.token_ids.as_ptr() as *const std::ffi::c_void,
+                                bytes,
+                                1, // HostToDevice
+                            );
+                            if res == cudarc::driver::sys::cudaError::cudaSuccess {
+                                if let Ok(_) = graph.replay() {
+                                    batched_logits = Some(logits_tensor.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fall back to eager batched paged forward if graph path is not active/available.
+        #[cfg(feature = "candle-backend")]
+        if batched_logits.is_none() && self.worker.has_loaded_model() && self.worker.gpu_kv_cache().is_some() {
+            let device = self.worker.worker_model_device();
+            if let Some(device) = device {
+                let input_ids = candle_core::Tensor::new(&batch.token_ids[..], device)?
+                    .to_dtype(candle_core::DType::U32)?
+                    .reshape((1, batch.token_ids.len()))?;
+                let positions: Vec<usize> = batch.positions.iter().map(|&p| p as usize).collect();
+
+                match self.worker.forward_paged_batch(&input_ids, &positions, &attn_meta) {
+                    Ok(logits) => {
+                        batched_logits = Some(logits);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Paged forward failed, falling back to legacy: {e}");
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(feature = "candle-backend"))]
+        let batched_logits: Option<()> = None;
+
+        // 4. For each request, extract logits and sample a token.
+        // Token offset for extracting per-request logits from batched output.
+        let mut token_offset = 0usize;
 
         for i in 0..batch.num_seqs {
             let request_id = batch.request_ids[i];
@@ -100,32 +155,80 @@ impl Executor for UniProcExecutor {
 
             let num_generated = generated_ids.len() as u32;
 
-            let (token_id, logprob) = match self.worker.generate_next_token(&context_token_ids)? {
-                Some(token_id) => {
-                    if sampling_params.temperature > 0.0 {
-                        tracing::warn!(
-                            request_id = ?request_id,
-                            temperature = sampling_params.temperature,
-                            "Candle model path currently uses greedy next-token generation; sampling params are applied only on the dummy fallback"
-                        );
+            let (token_id, logprob) = {
+                let mut logits_vec = None;
+
+                #[cfg(feature = "candle-backend")]
+                {
+                    // Try batched logits first (paged path).
+                    if let Some(ref all_logits) = batched_logits {
+                        // Extract this request's last-token logits from the batched output.
+                        // all_logits shape: [1, total_tokens, vocab_size]
+                        let last_token_idx = token_offset + n_tokens - 1;
+                        if let Ok(req_logits) = all_logits
+                            .narrow(1, last_token_idx, 1)
+                            .and_then(|t| t.reshape((all_logits.dim(2)?,)))
+                            .and_then(|t| t.to_dtype(candle_core::DType::F32))
+                            .and_then(|t| t.to_vec1::<f32>())
+                        {
+                            logits_vec = Some(req_logits);
+                        }
                     }
-                    (token_id, None)
+
+                    // Fallback: legacy per-request forward if batched path unavailable.
+                    if logits_vec.is_none() && self.worker.has_loaded_model() {
+                        let tokens_to_run = if is_prefill {
+                            let start = self.worker.model_runner().num_computed(&request_id);
+                            let end = start + n_tokens;
+                            let prompt_ids = self.worker.model_runner().get_context_token_ids(&request_id)
+                                .map(|(p, _)| p)
+                                .unwrap_or_default();
+                            prompt_ids[start..end].to_vec()
+                        } else {
+                            let last_token = self.worker.model_runner().get_context_token_ids(&request_id)
+                                .map(|(_, g)| g.last().copied())
+                                .flatten()
+                                .unwrap_or_else(|| {
+                                    self.worker.model_runner().get_context_token_ids(&request_id)
+                                        .map(|(p, _)| p.last().copied())
+                                        .flatten()
+                                        .unwrap_or(0)
+                                });
+                            vec![last_token]
+                        };
+
+                        let pos_usize: Vec<usize> = (0..tokens_to_run.len())
+                            .map(|j| self.worker.model_runner().num_computed(&request_id) + j)
+                            .collect();
+
+                        let logits = self.worker.execute_model_step(&request_id, &tokens_to_run, &pos_usize)?;
+                        if let Some(logits) = logits {
+                            let seq_len = logits.dim(1)?;
+                            let vocab_dim = logits.dim(2)?;
+                            let last_logits = logits.narrow(1, seq_len - 1, 1)?
+                                .reshape((vocab_dim,))?
+                                .to_dtype(candle_core::DType::F32)?
+                                .to_vec1::<f32>()?;
+                            logits_vec = Some(last_logits);
+                        }
+                    }
                 }
-                None => {
-                    // No real model loaded: keep the existing dummy-logits path
-                    // for tests and non-Candle builds.
-                    let logits = vec![0.0f32; vocab_size];
-                    let sampling_input = SamplingInput {
-                        logits,
-                        params: sampling_params.clone(),
-                        context_token_ids,
-                        num_generated,
-                        eos_token_id: self.eos_token_id,
-                        bad_word_token_ids: vec![],
-                    };
-                    let output = self.sampler.sample(&sampling_input);
-                    (output.token_id, output.logprob)
-                }
+
+                let logits = match logits_vec {
+                    Some(l) => l,
+                    None => vec![0.0f32; vocab_size],
+                };
+
+                let sampling_input = SamplingInput {
+                    logits,
+                    params: sampling_params.clone(),
+                    context_token_ids,
+                    num_generated,
+                    eos_token_id: self.eos_token_id,
+                    bad_word_token_ids: vec![],
+                };
+                let output = self.sampler.sample(&sampling_input);
+                (output.token_id, output.logprob)
             };
 
             sampled_token_ids.push(token_id);
@@ -133,16 +236,13 @@ impl Executor for UniProcExecutor {
 
             // Update model runner state.
             if is_prefill {
-                // For prefill, advance computed tokens by the number of
-                // prefill tokens. The sampled token from the last position
-                // will be stored as a generated token.
                 self.worker.model_runner_mut().advance_computed(&request_id, n_tokens)?;
-                // Store the sampled token as the first generated token.
                 self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
             } else {
-                // Decode: store the generated token.
                 self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
             }
+
+            token_offset += n_tokens;
         }
 
         // 5. Async output copy.

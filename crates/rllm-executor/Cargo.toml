@@ -16,9 +16,10 @@ rllm-sampling.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+candle-core = { workspace = true, optional = true }
 
 [features]
 default = []
-candle-backend = ["rllm-worker/candle-backend"]
+candle-backend = ["rllm-worker/candle-backend", "dep:candle-core"]
 cuda = ["rllm-worker/cuda"]
 experimental-tp = []
