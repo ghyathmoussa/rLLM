@@ -33,6 +33,21 @@ mod ffi {
             stream: usize,
         ) -> c_int;
 
+        pub fn rllm_cache_write_fp8(
+            key_cache: *mut u8,
+            value_cache: *mut u8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+            is_e5m2: c_int,
+            stream: usize,
+        ) -> c_int;
+
         pub fn rllm_cache_write_f16_sync(
             key_cache: *mut u16,
             value_cache: *mut u16,
@@ -45,6 +60,21 @@ mod ffi {
             block_size: i64,
             num_blocks: i64,
         ) -> c_int;
+
+        pub fn rllm_cache_write_fp8_sync(
+            key_cache: *mut u8,
+            value_cache: *mut u8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+            is_e5m2: c_int,
+        ) -> c_int;
+
 
         // Cache block copy
         pub fn rllm_cache_block_copy(
@@ -160,6 +190,83 @@ pub unsafe fn cache_write_f16_sync(
     check(rc)
 }
 
+/// Launch async cache write (FP8): writes new K/V into physical cache, converting from FP16.
+///
+/// # Safety
+/// - All pointers must be valid device pointers.
+/// - `slot_mapping` must have `num_tokens` entries.
+/// - `new_key` and `new_value` must have `num_tokens * num_kv_heads * head_dim` elements.
+/// - `key_cache` and `value_cache` must be large enough for the layout.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_fp8(
+    key_cache: *mut u8,
+    value_cache: *mut u8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+    is_e5m2: bool,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_fp8(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+            if is_e5m2 { 1 } else { 0 },
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous cache write for testing (FP8).
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_fp8_sync(
+    key_cache: *mut u8,
+    value_cache: *mut u8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+    is_e5m2: bool,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_fp8_sync(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+            if is_e5m2 { 1 } else { 0 },
+        )
+    };
+    check(rc)
+}
+
+
 // ── Cache Block Copy ──────────────────────────────────────────────────────
 
 /// Launch async cache block copy for prefix sharing/forking.
@@ -256,6 +363,8 @@ pub struct GpuKVCache {
     /// Bytes per scalar element.
     #[allow(dead_code)]
     element_size: usize,
+    /// Cache element data type.
+    dtype: rllm_core::dtype::DType,
 }
 
 unsafe impl Send for GpuKVCache {}
@@ -272,8 +381,9 @@ impl GpuKVCache {
         num_kv_heads: usize,
         head_dim: usize,
         block_size: usize,
-        element_size: usize,
+        dtype: rllm_core::dtype::DType,
     ) -> Result<Self, CudaKernelError> {
+        let element_size = dtype.bytes_per_scalar();
         let kv_bytes_per_layer = num_blocks * num_kv_heads * head_dim * block_size * element_size;
         let mut layer_ptrs = Vec::with_capacity(num_layers);
         let layer_sizes = vec![(kv_bytes_per_layer, kv_bytes_per_layer); num_layers];
@@ -297,8 +407,10 @@ impl GpuKVCache {
             head_dim,
             block_size,
             element_size,
+            dtype,
         })
     }
+
 
     /// Get the key tensor device pointer for a layer.
     pub fn key_ptr(&self, layer: usize) -> *const u8 {
@@ -320,6 +432,12 @@ impl GpuKVCache {
         self.key_shape()
     }
 
+    /// Data type of the cache.
+    pub fn dtype(&self) -> rllm_core::dtype::DType {
+        self.dtype
+    }
+
+
     /// Number of layers.
     pub fn num_layers(&self) -> usize {
         self.layer_ptrs.len()
@@ -339,6 +457,12 @@ impl GpuKVCache {
     pub fn block_size(&self) -> usize {
         self.block_size
     }
+
+    /// Size of cache element in bytes.
+    pub fn element_size(&self) -> usize {
+        self.element_size
+    }
+
 
     /// Compute slot mapping for a list of (block_id, block_offset) pairs.
     ///
@@ -392,6 +516,24 @@ mod stubs {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_fp8(
+        _key_cache: *mut u8,
+        _value_cache: *mut u8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+        _is_e5m2: bool,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn cache_write_f16_sync(
         _key_cache: *mut u16,
         _value_cache: *mut u16,
@@ -406,6 +548,24 @@ mod stubs {
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_fp8_sync(
+        _key_cache: *mut u8,
+        _value_cache: *mut u8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+        _is_e5m2: bool,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
 
     pub fn cache_block_copy(
         _src: *const u8,
@@ -544,7 +704,7 @@ mod tests {
                 4,  // num_kv_heads
                 64, // head_dim
                 16, // block_size
-                2,  // element_size (FP16)
+                rllm_core::dtype::DType::F16,
             )
             .expect("GpuKVCache::new failed");
 
@@ -560,7 +720,8 @@ mod tests {
 
         #[test]
         fn slot_mapping_computation() {
-            let cache = GpuKVCache::new(10, 1, 4, 64, 16, 2).expect("GpuKVCache::new failed");
+            let cache = GpuKVCache::new(10, 1, 4, 64, 16, rllm_core::dtype::DType::F16).expect("GpuKVCache::new failed");
+
 
             let slots = cache.compute_slots(&[
                 (BlockId(0), 0),

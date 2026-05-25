@@ -282,6 +282,41 @@ mod ffi {
             stream: usize,
         ) -> c_int;
 
+        pub fn rllm_paged_attention_decode_fp8(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const u8,
+            value_cache: *const u8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            num_seqs: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            is_e5m2: c_int,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_paged_attention_decode_fp8_sync(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const u8,
+            value_cache: *const u8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            num_seqs: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            is_e5m2: c_int,
+        ) -> c_int;
+
         pub fn rllm_paged_attention_decode_f16_sync(
             output: *mut u16,
             query: *const u16,
@@ -299,6 +334,7 @@ mod ffi {
         ) -> c_int;
 
         pub fn rllm_paged_attention_prefill_f16(
+
             output: *mut u16,
             query: *const u16,
             key_cache: *const u16,
@@ -317,6 +353,27 @@ mod ffi {
             stream: usize,
         ) -> c_int;
 
+        pub fn rllm_paged_attention_prefill_fp8(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const u8,
+            value_cache: *const u8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            query_start_loc: *const i32,
+            num_seqs: i64,
+            num_tokens: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            is_e5m2: c_int,
+            stream: usize,
+        ) -> c_int;
+
+
         pub fn rllm_paged_attention_prefill_f16_sync(
             output: *mut u16,
             query: *const u16,
@@ -334,6 +391,26 @@ mod ffi {
             max_num_blocks_per_seq: i64,
             scale: f32,
         ) -> c_int;
+
+        pub fn rllm_paged_attention_prefill_fp8_sync(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const u8,
+            value_cache: *const u8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            query_start_loc: *const i32,
+            num_seqs: i64,
+            num_tokens: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            is_e5m2: c_int,
+        ) -> c_int;
+
     }
 }
 
@@ -427,7 +504,95 @@ pub unsafe fn paged_attention_decode_f16_sync(
     check(rc)
 }
 
+/// Launch async decode PagedAttention (FP8).
+///
+/// # Safety
+/// - All pointers must be valid device pointers with correct sizes.
+/// - `block_tables` must have `num_seqs * max_num_blocks_per_seq` elements.
+/// - `seq_lens` must have `num_seqs` elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_decode_fp8(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const u8,
+    value_cache: *const u8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    num_seqs: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    is_e5m2: bool,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_decode_fp8(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            num_seqs,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            if is_e5m2 { 1 } else { 0 },
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous decode PagedAttention for testing (FP8).
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_decode_fp8_sync(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const u8,
+    value_cache: *const u8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    num_seqs: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    is_e5m2: bool,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_decode_fp8_sync(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            num_seqs,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            if is_e5m2 { 1 } else { 0 },
+        )
+    };
+    check(rc)
+}
+
 // ── Prefill PagedAttention ────────────────────────────────────────────────
+
 
 /// Launch async prefill PagedAttention (FP16).
 ///
@@ -519,7 +684,102 @@ pub unsafe fn paged_attention_prefill_f16_sync(
     check(rc)
 }
 
+/// Launch async prefill PagedAttention (FP8).
+///
+/// # Safety
+/// - All pointers must be valid device pointers with correct sizes.
+/// - `query_start_loc` must have `num_seqs + 1` elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_prefill_fp8(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const u8,
+    value_cache: *const u8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    query_start_loc: *const i32,
+    num_seqs: i64,
+    num_tokens: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    is_e5m2: bool,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_prefill_fp8(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            query_start_loc,
+            num_seqs,
+            num_tokens,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            if is_e5m2 { 1 } else { 0 },
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous prefill PagedAttention for testing (FP8).
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_prefill_fp8_sync(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const u8,
+    value_cache: *const u8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    query_start_loc: *const i32,
+    num_seqs: i64,
+    num_tokens: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    is_e5m2: bool,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_prefill_fp8_sync(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            query_start_loc,
+            num_seqs,
+            num_tokens,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            if is_e5m2 { 1 } else { 0 },
+        )
+    };
+    check(rc)
+}
+
 // ── Non-CUDA stubs ────────────────────────────────────────────────────────
+
 
 #[cfg(not(has_cuda))]
 pub use stubs::*;
@@ -549,6 +809,27 @@ mod stubs {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_decode_fp8(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const u8,
+        _value_cache: *const u8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _num_seqs: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _is_e5m2: bool,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn paged_attention_decode_f16_sync(
         _output: *mut u16,
         _query: *const u16,
@@ -563,6 +844,26 @@ mod stubs {
         _block_size: i64,
         _max_num_blocks_per_seq: i64,
         _scale: f32,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_decode_fp8_sync(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const u8,
+        _value_cache: *const u8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _num_seqs: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _is_e5m2: bool,
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
@@ -590,6 +891,29 @@ mod stubs {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_prefill_fp8(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const u8,
+        _value_cache: *const u8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _query_start_loc: *const i32,
+        _num_seqs: i64,
+        _num_tokens: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _is_e5m2: bool,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn paged_attention_prefill_f16_sync(
         _output: *mut u16,
         _query: *const u16,
@@ -609,6 +933,29 @@ mod stubs {
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_prefill_fp8_sync(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const u8,
+        _value_cache: *const u8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _query_start_loc: *const i32,
+        _num_seqs: i64,
+        _num_tokens: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _is_e5m2: bool,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
 }
 
 #[cfg(test)]

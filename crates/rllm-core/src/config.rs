@@ -37,7 +37,17 @@ pub enum QuantizationKind {
     GPTQ,
     AWQ,
     BitsAndBytes,
+    MXFP8,
+    MXFP4,
+    NVFP4,
+    Int8,
+    Int4,
+    Gguf,
+    CompressedTensors,
+    ModelOpt,
+    TorchAO,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizationConfig {
@@ -295,6 +305,16 @@ mod tests {
     fn all_enums_roundtrip() {
         assert_eq!(QuantizationKind::None, roundtrip(&QuantizationKind::None));
         assert_eq!(QuantizationKind::FP8, roundtrip(&QuantizationKind::FP8));
+        assert_eq!(QuantizationKind::MXFP8, roundtrip(&QuantizationKind::MXFP8));
+        assert_eq!(QuantizationKind::MXFP4, roundtrip(&QuantizationKind::MXFP4));
+        assert_eq!(QuantizationKind::NVFP4, roundtrip(&QuantizationKind::NVFP4));
+        assert_eq!(QuantizationKind::Int8, roundtrip(&QuantizationKind::Int8));
+        assert_eq!(QuantizationKind::Int4, roundtrip(&QuantizationKind::Int4));
+        assert_eq!(QuantizationKind::Gguf, roundtrip(&QuantizationKind::Gguf));
+        assert_eq!(QuantizationKind::CompressedTensors, roundtrip(&QuantizationKind::CompressedTensors));
+        assert_eq!(QuantizationKind::ModelOpt, roundtrip(&QuantizationKind::ModelOpt));
+        assert_eq!(QuantizationKind::TorchAO, roundtrip(&QuantizationKind::TorchAO));
+
         assert_eq!(TokenizerMode::Auto, roundtrip(&TokenizerMode::Auto));
         assert_eq!(TokenizerMode::Slow, roundtrip(&TokenizerMode::Slow));
         assert_eq!(PrefixHashAlgorithm::Sha256Cbor, roundtrip(&PrefixHashAlgorithm::Sha256Cbor));

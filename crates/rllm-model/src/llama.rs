@@ -156,6 +156,13 @@ impl LlamaModel {
         let head_dim = config.head_dim;
         let hidden_size = config.hidden_size;
 
+        let quant_plan = if let Some(q_config) = &config.quantization {
+            rllm_core::optimizations::QuantizationPlan::from_config(q_config)
+                .map_err(|e| anyhow::anyhow!("Invalid quantization config: {e}"))?
+        } else {
+            rllm_core::optimizations::QuantizationPlan::default()
+        };
+
         // Embedding
         let embed_weight = weights
             .weights
@@ -197,7 +204,7 @@ impl LlamaModel {
                 .remove(&format!("{prefix}.self_attn.o_proj.weight"))
                 .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.o_proj.weight"))?;
 
-            let attn = LlamaAttention::new(
+            let attn = LlamaAttention::new_quantized(
                 q_proj,
                 k_proj,
                 v_proj,
@@ -205,7 +212,8 @@ impl LlamaModel {
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            );
+                &quant_plan,
+            )?;
 
             let gate_proj = weights
                 .weights
@@ -219,7 +227,7 @@ impl LlamaModel {
                 .weights
                 .remove(&format!("{prefix}.mlp.down_proj.weight"))
                 .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.down_proj.weight"))?;
-            let mlp = LlamaMLP::new(gate_proj, up_proj, down_proj);
+            let mlp = LlamaMLP::new_quantized(gate_proj, up_proj, down_proj, &quant_plan)?;
 
             let input_ln_w = weights
                 .weights

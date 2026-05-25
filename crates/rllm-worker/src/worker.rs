@@ -237,7 +237,7 @@ impl Worker {
                 config.spec.num_kv_heads,
                 config.spec.head_dim,
                 config.spec.block_size,
-                config.spec.dtype.bytes_per_scalar(),
+                config.spec.dtype,
             ).map_err(|e| anyhow::anyhow!("GPU KV cache allocation failed: {e}"))?;
             tracing::info!(
                 worker_id = self.id,
