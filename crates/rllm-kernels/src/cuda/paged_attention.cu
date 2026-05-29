@@ -406,7 +406,6 @@ int32_t rllm_paged_attention_prefill_f16_sync(
     return 0;
 }
 
-}
 
 __global__ void paged_attention_decode_fp8_kernel(
     __half* __restrict__ output,
