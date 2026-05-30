@@ -82,7 +82,10 @@ smallvec = "1"
 indexmap = "2"
 
 # Tokenizer and model loading
-tokenizers = "0.21"
+# default features dropped: `esaxx_fast` (C++ suffix-automaton, BPE *training* only)
+# and `progressbar` are never used for inference, and `esaxx_fast` breaks musl-static
+# builds (needs a musl C++ toolchain). `onig` is kept for tokenizer regex support.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
 safetensors = "0.6"
 minijinja = "2"
