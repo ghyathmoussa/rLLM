@@ -121,7 +121,10 @@ proptest = "1"
 subtle = "2"
 
 # CUDA runtime driver API wrappers
-cudarc = { version = "0.19.7", features = ["driver"] }
+# `fallback-latest` makes cudarc use its highest known bindings instead of
+# panicking when the installed CUDA toolkit is newer than it recognizes
+# (e.g. CUDA 13.3). Prefer matching the toolkit (CUDA 12.x) for tested builds.
+cudarc = { version = "0.19.7", features = ["driver", "fallback-latest"] }
 libc = "0.2"
 
 

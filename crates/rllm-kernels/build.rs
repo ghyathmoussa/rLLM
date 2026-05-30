@@ -143,7 +143,10 @@ fn cuda_arch_flags() -> Vec<String> {
             .collect();
     }
 
-    let default_archs = ["7.0", "7.5", "8.0", "8.6", "8.9", "9.0"];
+    // Turing (7.5) through Hopper (9.0). `sm_70` (Volta) is intentionally
+    // omitted: CUDA 13 removed Volta support, so a `compute_70` gencode line
+    // makes nvcc from a CUDA-13 toolkit fail. Override with CUDA_ARCH if needed.
+    let default_archs = ["7.5", "8.0", "8.6", "8.9", "9.0"];
     default_archs
         .iter()
         .map(|a| {
