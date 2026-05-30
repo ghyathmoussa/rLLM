@@ -75,9 +75,22 @@ curl http://localhost:8000/v1/chat/completions \
 ## Requirements
 
 - **Rust** 1.85 or newer
-- **NVIDIA GPU** with compute capability 7.0+ (Volta or newer)
-- **CUDA** 12.x toolkit (`nvcc` on `PATH`)
-- **Linux** (Ubuntu 22.04+, CentOS 7+)
+- **NVIDIA GPU** with compute capability 7.5+ (Turing or newer; e.g. RTX 20xx,
+  Titan RTX, A100, H100). Volta `sm_70` is no longer targeted, as CUDA 13 drops it.
+- **CUDA** 12.x toolkit (`nvcc` on `PATH`). **CUDA 13.x is not yet supported** —
+  the pinned `cudarc`/`candle` versions only ship bindings up to CUDA 13.2, and a
+  13.3 toolkit makes the build fail with `Unsupported cuda toolkit version: 13.3`.
+  Install CUDA 12.x (e.g. 12.8) and point `CUDA_HOME`/`PATH` at it; your GPU driver
+  can stay newer (drivers are backward compatible).
+- **Linux** (Ubuntu 22.04+, RHEL/AlmaLinux/Rocky 8+, CentOS 7+)
+
+> **Building CUDA kernels for a specific GPU:** by default kernels are compiled for
+> `sm_75`–`sm_90`. To build only for your card (faster compile) set `CUDA_ARCH`,
+> e.g. `export CUDA_ARCH=7.5` for a Titan RTX before `cargo build --features cuda`.
+
+> **Pre-built release binaries** are statically linked (`x86_64-unknown-linux-musl`)
+> and **CPU-only** — they run on any Linux without a glibc dependency, but do not use
+> the GPU. For GPU inference, build from source with `--features cuda`.
 
 ---
 
