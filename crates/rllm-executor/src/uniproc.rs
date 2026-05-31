@@ -238,6 +238,7 @@ impl Executor for UniProcExecutor {
                 self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
             } else {
                 self.worker.model_runner_mut().store_generated_token(&request_id, token_id)?;
+                self.worker.model_runner_mut().advance_computed(&request_id, 1)?;
             }
 
             token_offset += n_tokens;

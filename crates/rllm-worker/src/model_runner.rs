@@ -97,14 +97,13 @@ impl ModelRunner {
         self.request_states.get_mut(request_id).map(|s| &mut s.kv_cache)
     }
 
-    /// Store a generated token for a running request and advance computed count.
+    /// Store a generated token for a running request.
     pub fn store_generated_token(&mut self, request_id: &RequestId, token_id: u32) -> Result<()> {
         let state = self
             .request_states
             .get_mut(request_id)
             .ok_or_else(|| anyhow::anyhow!("request {:?} not found", request_id))?;
         state.generated_token_ids.push(token_id);
-        state.num_computed_tokens += 1;
         Ok(())
     }
 
@@ -896,6 +895,7 @@ mod tests {
 
         // Store a generated token (simulating sampling output).
         runner.store_generated_token(&rid, 99).unwrap();
+        runner.advance_computed(&rid, 1).unwrap();
         assert_eq!(runner.num_computed(&rid), 9);
 
         // Step 2: Decode — schedule running request with 1 token.
@@ -1014,6 +1014,7 @@ mod tests {
         assert_eq!(runner.num_computed(&rid), 2);
 
         runner.store_generated_token(&rid, 42).unwrap();
+        runner.advance_computed(&rid, 1).unwrap();
         assert_eq!(runner.num_computed(&rid), 3);
 
         runner.remove_request(&rid);
