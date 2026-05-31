@@ -4,7 +4,17 @@ use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_scheduler::SchedulerOutput;
 
 pub trait Executor: Send + Sync {
-    fn initialize(&mut self, kv_cache_configs: &[KVCacheConfig]) -> Result<()>;
+    /// Initialize the device, load weights, and allocate the KV cache.
+    ///
+    /// The requested `kv_cache_configs[*].num_blocks` is treated as an upper
+    /// bound; the executor profiles real GPU memory and may allocate fewer
+    /// blocks to fit. Returns the **actual** number of GPU blocks allocated,
+    /// which the caller must use to size the scheduler's block manager.
+    fn initialize(
+        &mut self,
+        kv_cache_configs: &[KVCacheConfig],
+        gpu_memory_utilization: f32,
+    ) -> Result<usize>;
     fn determine_available_memory(&self) -> Result<usize>;
     fn execute_model(&mut self, scheduler_output: &SchedulerOutput) -> Result<ExecutorOutput>;
     fn add_request(

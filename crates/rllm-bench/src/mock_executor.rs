@@ -113,8 +113,12 @@ impl MockExecutor {
 }
 
 impl Executor for MockExecutor {
-    fn initialize(&mut self, _kv_cache_configs: &[KVCacheConfig]) -> Result<()> {
-        Ok(())
+    fn initialize(
+        &mut self,
+        kv_cache_configs: &[KVCacheConfig],
+        _gpu_memory_utilization: f32,
+    ) -> Result<usize> {
+        Ok(kv_cache_configs.first().map(|c| c.num_blocks).unwrap_or(0))
     }
 
     fn determine_available_memory(&self) -> Result<usize> {

@@ -96,6 +96,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Installation
 
+> 📦 For portable static (musl) release builds, AlmaLinux/RHEL build steps, and the CUDA
+> GPU build, see the [Building guide](docs/building.md). To verify a CUDA build on a GPU host,
+> run [`scripts/verify_cuda_build.sh`](scripts/verify_cuda_build.sh).
+
 ### Cargo Installation (From Source)
 
 You can compile and install the CLI tool directly to your system path:

@@ -476,24 +476,16 @@ impl ModelRunner {
 // ── CUDA Graph Capture Infrastructure ────────────────────────────────────
 
 /// Represents a captured CUDA graph instance for a specific decode batch size.
-#[cfg(has_cuda)]
-pub struct CudaGraphInstance {
-    pub batch_size: usize,
-    pub is_captured: bool,
-    graph_exec: cudarc::driver::sys::cudaGraphExec_t,
-    pub capture_duration_ns: u64,
-    #[cfg(feature = "candle-backend")]
-    pub input_ids: Option<candle_core::Tensor>,
-    #[cfg(feature = "candle-backend")]
-    pub logits: Option<candle_core::Tensor>,
-}
-
-#[cfg(has_cuda)]
-unsafe impl Send for CudaGraphInstance {}
-#[cfg(has_cuda)]
-unsafe impl Sync for CudaGraphInstance {}
-
-#[cfg(not(has_cuda))]
+///
+/// NOTE: Real CUDA graph capture/replay is not yet implemented. The previous
+/// implementation referenced CUDA *runtime* graph symbols (`cudaGraph_t`,
+/// `cudaStreamBeginCapture`, ...) through `cudarc::driver::sys`, but cudarc only
+/// exposes those under its `runtime` module and with a different
+/// `cudaGraphInstantiate` signature, so it never compiled. Until graph capture is
+/// implemented and validated against the pinned cudarc, this is an inert
+/// placeholder: `capture` runs the closure eagerly and `replay` reports
+/// "not captured", so the decode path stays on the normal eager forward.
+/// See docs/cuda-paged-attention-todo.md.
 pub struct CudaGraphInstance {
     pub batch_size: usize,
     pub is_captured: bool,
@@ -522,30 +514,14 @@ impl std::fmt::Debug for CudaGraphInstance {
 impl CudaGraphInstance {
     /// Create a new empty graph instance.
     pub fn new(batch_size: usize) -> Self {
-        #[cfg(has_cuda)]
-        {
-            Self {
-                batch_size,
-                is_captured: false,
-                graph_exec: std::ptr::null_mut(),
-                capture_duration_ns: 0,
-                #[cfg(feature = "candle-backend")]
-                input_ids: None,
-                #[cfg(feature = "candle-backend")]
-                logits: None,
-            }
-        }
-        #[cfg(not(has_cuda))]
-        {
-            Self {
-                batch_size,
-                is_captured: false,
-                capture_duration_ns: 0,
-                #[cfg(feature = "candle-backend")]
-                input_ids: None,
-                #[cfg(feature = "candle-backend")]
-                logits: None,
-            }
+        Self {
+            batch_size,
+            is_captured: false,
+            capture_duration_ns: 0,
+            #[cfg(feature = "candle-backend")]
+            input_ids: None,
+            #[cfg(feature = "candle-backend")]
+            logits: None,
         }
     }
 
@@ -557,112 +533,33 @@ impl CudaGraphInstance {
         F: FnOnce() -> Result<()>,
     {
         let start = std::time::Instant::now();
-        #[cfg(has_cuda)]
-        {
-            use cudarc::driver::sys;
-            use std::ptr;
-
-            let stream = ptr::null_mut(); // default stream
-            let mut graph: sys::cudaGraph_t = ptr::null_mut();
-            let mut graph_exec: sys::cudaGraphExec_t = ptr::null_mut();
-
-            // Begin capture: mode global (0)
-            let res = unsafe { sys::cudaStreamBeginCapture(stream, 0) };
-            if res != sys::cudaError::cudaSuccess {
-                anyhow::bail!("cudaStreamBeginCapture failed: {:?}", res);
-            }
-
-            // Run the closure to record kernels
-            let run_res = run_fn();
-
-            // End capture
-            let end_res = unsafe { sys::cudaStreamEndCapture(stream, &mut graph) };
-
-            // Clean up and error out if execution failed
-            if let Err(e) = run_res {
-                if end_res == sys::cudaError::cudaSuccess && !graph.is_null() {
-                    unsafe { sys::cudaGraphDestroy(graph) };
-                }
-                return Err(e);
-            }
-
-            if end_res != sys::cudaError::cudaSuccess {
-                anyhow::bail!("cudaStreamEndCapture failed: {:?}", end_res);
-            }
-
-            // Instantiate graph executable
-            let inst_res = unsafe {
-                sys::cudaGraphInstantiate(
-                    &mut graph_exec,
-                    graph,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                )
-            };
-
-            // Temporary graph is no longer needed after instantiation
-            unsafe { sys::cudaGraphDestroy(graph) };
-
-            if inst_res != sys::cudaError::cudaSuccess {
-                anyhow::bail!("cudaGraphInstantiate failed: {:?}", inst_res);
-            }
-
-            // If we already had a captured graph, destroy it
-            if !self.graph_exec.is_null() {
-                unsafe { sys::cudaGraphExecDestroy(self.graph_exec) };
-            }
-
-            self.graph_exec = graph_exec;
-        }
-        #[cfg(not(has_cuda))]
-        {
-            run_fn()?;
-        }
-        self.is_captured = true;
+        // Real CUDA graph capture is not yet implemented (see the note on
+        // CudaGraphInstance). Run the closure eagerly so any warmup work still
+        // happens, but leave `is_captured` false so `replay` is never used and the
+        // decode path stays on the eager forward.
+        run_fn()?;
         self.capture_duration_ns = start.elapsed().as_nanos() as u64;
-        tracing::debug!(batch_size = self.batch_size, "CUDA graph captured successfully");
+        tracing::debug!(
+            batch_size = self.batch_size,
+            "CUDA graph capture disabled; ran closure eagerly"
+        );
         Ok(())
     }
 
     /// Replay the captured graph.
+    ///
+    /// CUDA graph replay is disabled until capture is implemented; `is_captured`
+    /// is always false, so callers fall back to the eager forward path.
     pub fn replay(&self) -> Result<()> {
-        if !self.is_captured {
-            anyhow::bail!("CUDA graph for batch size {} not yet captured", self.batch_size);
-        }
-        #[cfg(has_cuda)]
-        {
-            use cudarc::driver::sys;
-            use std::ptr;
-
-            if self.graph_exec.is_null() {
-                anyhow::bail!("CUDA graph exec handle is null for batch size {}", self.batch_size);
-            }
-
-            let stream = ptr::null_mut();
-            let res = unsafe { sys::cudaGraphLaunch(self.graph_exec, stream) };
-            if res != sys::cudaError::cudaSuccess {
-                anyhow::bail!("cudaGraphLaunch failed: {:?}", res);
-            }
-        }
-        tracing::trace!(batch_size = self.batch_size, "CUDA graph replayed successfully");
-        Ok(())
+        anyhow::bail!(
+            "CUDA graph replay is not implemented for batch size {}",
+            self.batch_size
+        )
     }
 
     /// Check if this graph is ready for replay.
     pub fn is_ready(&self) -> bool {
         self.is_captured
-    }
-}
-
-#[cfg(has_cuda)]
-impl Drop for CudaGraphInstance {
-    fn drop(&mut self) {
-        if !self.graph_exec.is_null() {
-            unsafe {
-                cudarc::driver::sys::cudaGraphExecDestroy(self.graph_exec);
-            }
-        }
     }
 }
 

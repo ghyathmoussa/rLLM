@@ -41,13 +41,27 @@ impl UniProcExecutor {
 }
 
 impl Executor for UniProcExecutor {
-    fn initialize(&mut self, kv_cache_configs: &[KVCacheConfig]) -> Result<()> {
+    fn initialize(
+        &mut self,
+        kv_cache_configs: &[KVCacheConfig],
+        gpu_memory_utilization: f32,
+    ) -> Result<usize> {
         self.worker.initialize_cuda_device()?;
+        // Weights must be resident before profiling free memory.
         self.worker.load_model_weights()?;
-        if let Some(config) = kv_cache_configs.first() {
-            self.worker.initialize_kv_cache(config)?;
-        }
-        Ok(())
+        let num_blocks = if let Some(config) = kv_cache_configs.first() {
+            // Profile GPU memory and shrink the requested (worst-case) block
+            // count to what actually fits.
+            let fitted =
+                self.worker.fit_kv_blocks(&config.spec, gpu_memory_utilization, config.num_blocks)?;
+            let fitted_config =
+                KVCacheConfig { num_blocks: fitted, spec: config.spec.clone() };
+            self.worker.initialize_kv_cache(&fitted_config)?;
+            fitted
+        } else {
+            0
+        };
+        Ok(num_blocks)
     }
 
     fn determine_available_memory(&self) -> Result<usize> {
@@ -77,35 +91,14 @@ impl Executor for UniProcExecutor {
         #[cfg(feature = "candle-backend")]
         let mut batched_logits = None;
 
-        #[cfg(feature = "candle-backend")]
-        if batch.num_prefill_tokens == 0 && self.worker.has_loaded_model() && self.worker.gpu_kv_cache().is_some() {
-            let batch_size = batch.num_decode_tokens;
-            if let Some(graph) = self.worker.cuda_graphs.get_graph_for_batch(batch_size) {
-                let _ = graph;
-                #[cfg(has_cuda)]
-                {
-                    if let (Some(ref input_tensor), Some(ref logits_tensor)) = (&graph.input_ids, &graph.logits) {
-                        unsafe {
-                            let ptr = input_tensor.as_ptr() as *mut std::ffi::c_void;
-                            let bytes = batch.token_ids.len() * std::mem::size_of::<u32>();
-                            let res = cudarc::driver::sys::cudaMemcpy(
-                                ptr,
-                                batch.token_ids.as_ptr() as *const std::ffi::c_void,
-                                bytes,
-                                1, // HostToDevice
-                            );
-                            if res == cudarc::driver::sys::cudaError::cudaSuccess {
-                                if let Ok(_) = graph.replay() {
-                                    batched_logits = Some(logits_tensor.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // CUDA graph replay path is disabled: graph capture is not yet implemented
+        // (see CudaGraphInstance in rllm-worker), so `replay()` always reports
+        // "not captured" and `input_ids`/`logits` are never populated. Decode goes
+        // straight to the eager forward below. The previous implementation here
+        // also depended on a raw device pointer from a candle tensor and the CUDA
+        // runtime `cudaMemcpy`, neither of which is available in this crate.
 
-        // Fall back to eager batched paged forward if graph path is not active/available.
+        // Eager batched paged forward (falls back to legacy per-request forward).
         #[cfg(feature = "candle-backend")]
         if batched_logits.is_none() && self.worker.has_loaded_model() && self.worker.gpu_kv_cache().is_some() {
             let device = self.worker.worker_model_device();
@@ -120,7 +113,12 @@ impl Executor for UniProcExecutor {
                         batched_logits = Some(logits);
                     }
                     Err(e) => {
-                        tracing::warn!("Paged forward failed, falling back to legacy: {e}");
+                        // The custom paged-attention CUDA kernel path is not yet
+                        // wired to candle tensors (see rllm-model forward_paged), so
+                        // this is an expected fallback to the legacy per-request
+                        // forward, not a failure. Logged at debug to avoid per-step
+                        // spam.
+                        tracing::debug!("Paged forward unavailable, using legacy forward: {e}");
                     }
                 }
             }
