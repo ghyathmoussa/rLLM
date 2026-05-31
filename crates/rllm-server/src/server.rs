@@ -197,7 +197,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.max_model_len = max_len;
     }
     model_config.dtype = parse_dtype(&args.dtype).unwrap_or(model_config.dtype);
-    model_config.quantization = parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size);
+    if !args.quantization.eq_ignore_ascii_case("auto") {
+        model_config.quantization =
+            parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size);
+    }
 
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
     let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
@@ -272,7 +275,11 @@ fn parse_dtype(dtype: &str) -> Option<DType> {
     }
 }
 
-fn parse_quantization(quant_str: &str, bits: Option<usize>, group_size: Option<usize>) -> Option<rllm_core::config::QuantizationConfig> {
+fn parse_quantization(
+    quant_str: &str,
+    bits: Option<usize>,
+    group_size: Option<usize>,
+) -> Option<rllm_core::config::QuantizationConfig> {
     use rllm_core::config::{QuantizationConfig, QuantizationKind};
     let kind = match quant_str.to_lowercase().as_str() {
         "none" => return None,
@@ -290,11 +297,7 @@ fn parse_quantization(quant_str: &str, bits: Option<usize>, group_size: Option<u
         "torchao" => QuantizationKind::TorchAO,
         _ => return None,
     };
-    Some(QuantizationConfig {
-        kind,
-        group_size,
-        bits,
-    })
+    Some(QuantizationConfig { kind, group_size, bits })
 }
 
 fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
@@ -305,7 +308,8 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
         _ => {
             if let Some(ref q) = model_config.quantization {
-                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
                 plan.kv_cache_dtype
             } else {
                 model_config.dtype
@@ -347,7 +351,8 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
         _ => {
             if let Some(ref q) = model_config.quantization {
-                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
                 plan.kv_cache_dtype
             } else {
                 model_config.dtype
@@ -718,7 +723,6 @@ struct EngineCompletion {
     finish_reason: String,
     generation_time: f64,
 }
-
 
 async fn run_text_completion(
     runtime: ModelRuntime,

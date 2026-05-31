@@ -5,12 +5,11 @@ use candle_core::{D, DType, Device, Result, Tensor};
 use crate::rope::RotaryEmbedding;
 #[cfg(feature = "candle-backend")]
 use rllm_core::optimizations::QuantizationPlan;
+#[cfg(feature = "candle-backend")]
+use rllm_quant::{LinearMethod, UnquantizedLinear};
 
 #[cfg(feature = "candle-backend")]
-pub fn simulate_weight_quantization(
-    weight: &Tensor,
-    plan: &QuantizationPlan,
-) -> Result<Tensor> {
+pub fn simulate_weight_quantization(weight: &Tensor, plan: &QuantizationPlan) -> Result<Tensor> {
     use rllm_core::optimizations::QuantizedWeightFormat;
     let format = plan.format;
     if format == QuantizedWeightFormat::Unquantized {
@@ -28,9 +27,7 @@ pub fn simulate_weight_quantization(
             let group_size = plan.group_size.unwrap_or(32);
             simulate_group_quant(&w_f32, group_size, 8)?
         }
-        QuantizedWeightFormat::Nvfp4 => {
-            simulate_uniform_quant(&w_f32, 4, true)?
-        }
+        QuantizedWeightFormat::Nvfp4 => simulate_uniform_quant(&w_f32, 4, true)?,
         QuantizedWeightFormat::Int8
         | QuantizedWeightFormat::Gptq
         | QuantizedWeightFormat::Awq
@@ -69,7 +66,8 @@ fn simulate_uniform_quant(weight: &Tensor, bits: u32, symmetric: bool) -> Result
         (scale, min_val)
     };
 
-    let q = weight.broadcast_sub(&Tensor::new(zero_point as f32, weight.device())?)?
+    let q = weight
+        .broadcast_sub(&Tensor::new(zero_point as f32, weight.device())?)?
         .broadcast_div(&Tensor::new(scale as f32, weight.device())?)?
         .round()?
         .clamp(-(levels as f32 / 2.0), levels as f32 / 2.0)?
@@ -117,7 +115,6 @@ fn simulate_group_quant(weight: &Tensor, group_size: usize, bits: usize) -> Resu
 
 // ── RMSNorm ──────────────────────────────────────────────────────────────
 
-
 #[cfg(feature = "candle-backend")]
 pub struct RmsNorm {
     weight: Tensor,
@@ -144,38 +141,27 @@ impl RmsNorm {
 
 #[cfg(feature = "candle-backend")]
 pub struct Linear {
-    weight: Tensor,
+    method: Box<dyn LinearMethod>,
 }
 
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self { weight }
+        Self { method: Box::new(UnquantizedLinear::new(weight)) }
     }
 
-    pub fn new_quantized(weight: Tensor, plan: &QuantizationPlan) -> Result<Self> {
-        let weight = simulate_weight_quantization(&weight, plan)?;
-        Ok(Self { weight })
+    pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
+        Self { method }
     }
-
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // weight shape: [out_features, in_features]
-        // x shape: [..., in_features]
-        let in_features = self.weight.dim(D::Minus1)?;
-        let out_features = self.weight.dim(D::Minus2)?;
-        let x_shape = x.dims();
-        let trailing = x_shape.len().saturating_sub(1);
-        let batch: usize = x_shape[..trailing].iter().product();
-        let x_2d = x.reshape((batch, in_features))?;
-        let out = x_2d.matmul(&self.weight.t()?)?;
-        let mut out_shape = x_shape[..trailing].to_vec();
-        out_shape.push(out_features);
-        out.reshape(out_shape)
+        self.method.apply(x)
     }
 
     pub fn weight(&self) -> &Tensor {
-        &self.weight
+        self.method
+            .weight()
+            .expect("Linear::weight() is only available for unquantized linear layers")
     }
 }
 
@@ -190,25 +176,16 @@ pub struct LlamaMLP {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaMLP {
+    pub fn from_linears(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
+        Self { gate_proj, up_proj, down_proj }
+    }
+
     pub fn new(gate_proj: Tensor, up_proj: Tensor, down_proj: Tensor) -> Self {
         Self {
             gate_proj: Linear::new(gate_proj),
             up_proj: Linear::new(up_proj),
             down_proj: Linear::new(down_proj),
         }
-    }
-
-    pub fn new_quantized(
-        gate_proj: Tensor,
-        up_proj: Tensor,
-        down_proj: Tensor,
-        plan: &QuantizationPlan,
-    ) -> Result<Self> {
-        Ok(Self {
-            gate_proj: Linear::new_quantized(gate_proj, plan)?,
-            up_proj: Linear::new_quantized(up_proj, plan)?,
-            down_proj: Linear::new_quantized(down_proj, plan)?,
-        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -235,6 +212,18 @@ pub struct LlamaAttention {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaAttention {
+    pub fn from_linears(
+        q_proj: Linear,
+        k_proj: Linear,
+        v_proj: Linear,
+        o_proj: Linear,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Self {
+        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
+    }
+
     pub fn new(
         q_proj: Tensor,
         k_proj: Tensor,
@@ -254,28 +243,6 @@ impl LlamaAttention {
             head_dim,
         }
     }
-
-    pub fn new_quantized(
-        q_proj: Tensor,
-        k_proj: Tensor,
-        v_proj: Tensor,
-        o_proj: Tensor,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        plan: &QuantizationPlan,
-    ) -> Result<Self> {
-        Ok(Self {
-            q_proj: Linear::new_quantized(q_proj, plan)?,
-            k_proj: Linear::new_quantized(k_proj, plan)?,
-            v_proj: Linear::new_quantized(v_proj, plan)?,
-            o_proj: Linear::new_quantized(o_proj, plan)?,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        })
-    }
-
 
     pub fn forward(
         &self,
@@ -408,7 +375,8 @@ impl LlamaAttention {
             let _ = (gpu_kv_cache, attn_meta, layer_idx, &q, &k, &v, rope, positions);
             return Err(candle_core::Error::Msg(
                 "paged-attention CUDA kernel path not yet wired to candle tensors; \
-                 caller should fall back to the legacy forward".to_string(),
+                 caller should fall back to the legacy forward"
+                    .to_string(),
             ));
         }
 
@@ -439,8 +407,11 @@ impl LlamaAttention {
 
             let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
             let attn_output = attn_weights.matmul(&v)?;
-            let attn_output =
-                attn_output.transpose(1, 2)?.reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
+            let attn_output = attn_output.transpose(1, 2)?.reshape((
+                bsz,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?;
 
             self.o_proj.forward(&attn_output)
         }
@@ -529,7 +500,12 @@ impl LlamaDecoderLayer {
         let residual = hidden_states.clone();
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
         let hidden_states = self.self_attn.forward_paged(
-            &hidden_states, positions, gpu_kv_cache, attn_meta, layer_idx, rope,
+            &hidden_states,
+            positions,
+            gpu_kv_cache,
+            attn_meta,
+            layer_idx,
+            rope,
         )?;
         let hidden_states = (residual + hidden_states)?;
 

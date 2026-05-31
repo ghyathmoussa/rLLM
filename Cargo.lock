@@ -2806,6 +2806,7 @@ dependencies = [
  "hf-hub",
  "rllm-core",
  "rllm-kernels",
+ "rllm-quant",
  "rllm-tensor",
  "safetensors 0.6.2",
  "serde",
@@ -2814,6 +2815,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rllm-quant"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "rllm-core",
+ "safetensors 0.6.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

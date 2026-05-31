@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use candle_core::{D, Device, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::config::ModelConfig;
+#[cfg(feature = "candle-backend")]
+use rllm_quant::{WeightSource, factory_from_config};
 
 #[cfg(feature = "candle-backend")]
 use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm};
@@ -156,12 +158,9 @@ impl LlamaModel {
         let head_dim = config.head_dim;
         let hidden_size = config.hidden_size;
 
-        let quant_plan = if let Some(q_config) = &config.quantization {
-            rllm_core::optimizations::QuantizationPlan::from_config(q_config)
-                .map_err(|e| anyhow::anyhow!("Invalid quantization config: {e}"))?
-        } else {
-            rllm_core::optimizations::QuantizationPlan::default()
-        };
+        let quant_factory =
+            factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())
+                .context("building quantization method factory")?;
 
         // Embedding
         let embed_weight = weights
@@ -187,47 +186,49 @@ impl LlamaModel {
         for i in 0..config.num_layers {
             let prefix = format!("model.layers.{i}");
 
-            let q_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.q_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.q_proj.weight"))?;
-            let k_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.k_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.k_proj.weight"))?;
-            let v_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.v_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.v_proj.weight"))?;
-            let o_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.o_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.o_proj.weight"))?;
+            let (attn, mlp) = {
+                let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized);
 
-            let attn = LlamaAttention::new_quantized(
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                &quant_plan,
-            )?;
+                let q_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.q_proj"), &mut source)?,
+                );
+                let k_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.k_proj"), &mut source)?,
+                );
+                let v_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.v_proj"), &mut source)?,
+                );
+                let o_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.o_proj"), &mut source)?,
+                );
 
-            let gate_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.gate_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.gate_proj.weight"))?;
-            let up_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.up_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.up_proj.weight"))?;
-            let down_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.down_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.down_proj.weight"))?;
-            let mlp = LlamaMLP::new_quantized(gate_proj, up_proj, down_proj, &quant_plan)?;
+                let gate_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.gate_proj"), &mut source)?,
+                );
+                let up_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.up_proj"), &mut source)?,
+                );
+                let down_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.down_proj"), &mut source)?,
+                );
+
+                (
+                    LlamaAttention::from_linears(
+                        q_proj,
+                        k_proj,
+                        v_proj,
+                        o_proj,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    ),
+                    LlamaMLP::from_linears(gate_proj, up_proj, down_proj),
+                )
+            };
 
             let input_ln_w = weights
                 .weights
@@ -423,7 +424,12 @@ mod tests {
             );
         }
 
-        let weight_map = WeightMap { weights, device: device.clone() };
+        let weight_map = WeightMap {
+            weights,
+            quantized: HashMap::new(),
+            quant_schema: None,
+            device: device.clone(),
+        };
         LlamaForCausalLM::from_weights(config.clone(), weight_map).unwrap()
     }
 

@@ -34,6 +34,7 @@ path = "examples/server.rs"
 resolver = "2"
 members = [
     "crates/rllm-core",
+    "crates/rllm-quant",
     "crates/rllm-tokenizer",
     "crates/rllm-model",
     "crates/rllm-tensor",
@@ -138,6 +139,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Internal crates
 rllm-core = { path = "crates/rllm-core", version = "0.1.0" }
+rllm-quant = { path = "crates/rllm-quant", version = "0.1.0", default-features = false }
 rllm-tokenizer = { path = "crates/rllm-tokenizer", version = "0.1.0" }
 rllm-model = { path = "crates/rllm-model", version = "0.1.0" }
 rllm-tensor = { path = "crates/rllm-tensor", version = "0.1.0" }

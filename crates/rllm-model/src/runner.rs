@@ -27,17 +27,33 @@ impl ModelRunner {
     pub fn from_model_ref(model_ref: &str) -> Result<Self> {
         let model_dir = loader::resolve_model_dir(model_ref)
             .with_context(|| format!("resolving model reference {model_ref}"))?;
-        Self::from_dir_path(&model_dir)
+        Self::from_dir_path_with_config(&model_dir, None)
+    }
+
+    /// Load a model from a reference while preserving server-side config overrides.
+    pub fn from_model_ref_with_config(model_ref: &str, mut config: ModelConfig) -> Result<Self> {
+        let model_dir = loader::resolve_model_dir(model_ref)
+            .with_context(|| format!("resolving model reference {model_ref}"))?;
+        config.model_id = model_dir.to_string_lossy().to_string();
+        Self::from_dir_path_with_config(&model_dir, Some(config))
     }
 
     /// Load a model from a local directory.
     pub fn from_dir(model_dir: &str) -> Result<Self> {
-        Self::from_dir_path(std::path::Path::new(model_dir))
+        Self::from_dir_path_with_config(std::path::Path::new(model_dir), None)
     }
 
-    fn from_dir_path(model_dir: &std::path::Path) -> Result<Self> {
-        let config_path = model_dir.join("config.json");
-        let config = hf_config::parse_hf_config(&config_path).context("parsing model config")?;
+    fn from_dir_path_with_config(
+        model_dir: &std::path::Path,
+        config: Option<ModelConfig>,
+    ) -> Result<Self> {
+        let config = match config {
+            Some(config) => config,
+            None => {
+                let config_path = model_dir.join("config.json");
+                hf_config::parse_hf_config(&config_path).context("parsing model config")?
+            }
+        };
 
         let device =
             Device::cuda_if_available(0).map_err(|e| anyhow::anyhow!("device init: {e}"))?;
@@ -53,6 +69,7 @@ impl ModelRunner {
         tracing::debug!(
             model_dir = %model_dir.display(),
             tensors = weight_map.weights.len(),
+            quantized_tensors = weight_map.quantized.len(),
             "model weights loaded into memory"
         );
 

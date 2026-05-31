@@ -80,8 +80,8 @@ pub struct ServeArgs {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
-    /// Quantization format (none, fp8, mxfp8, mxfp4, nvfp4, int8, int4, compressed-tensors, modelopt, torchao)
-    #[arg(long, default_value = "none")]
+    /// Quantization format (auto, none, fp8, mxfp8, mxfp4, nvfp4, int8, int4, compressed-tensors, modelopt, torchao)
+    #[arg(long, default_value = "auto")]
     pub quantization: String,
 
     /// Quantization bit width (e.g. 4 or 8)
@@ -96,7 +96,6 @@ pub struct ServeArgs {
     #[arg(long, default_value = "auto")]
     pub kv_cache_dtype: String,
 }
-
 
 fn parse_gpu_utilization(s: &str) -> Result<f32, String> {
     let val: f32 = s.parse().map_err(|_| format!("invalid float: {s}"))?;

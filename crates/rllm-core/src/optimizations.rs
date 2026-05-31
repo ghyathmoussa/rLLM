@@ -20,7 +20,6 @@ pub enum QuantizedWeightFormat {
     Unquantized,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationPlan {
     pub format: QuantizedWeightFormat,
@@ -80,17 +79,13 @@ impl QuantizationPlan {
                 p
             }
             QuantizationKind::Gguf => {
-                let mut p = Self::default();
-                p.format = QuantizedWeightFormat::Gguf;
-                p
+                Self { format: QuantizedWeightFormat::Gguf, ..Self::default() }
             }
             QuantizationKind::CompressedTensors => Self::compressed_tensors(),
             QuantizationKind::ModelOpt => Self::model_opt(),
             QuantizationKind::TorchAO => Self::torch_ao(),
             QuantizationKind::BitsAndBytes => {
-                let mut p = Self::default();
-                p.format = QuantizedWeightFormat::BitsAndBytes;
-                p
+                Self { format: QuantizedWeightFormat::BitsAndBytes, ..Self::default() }
             }
         };
         plan.validate()?;
@@ -236,11 +231,15 @@ impl QuantizationPlan {
                     return Err("INT4 requires 4 bits".into());
                 }
             }
-            QuantizedWeightFormat::Gguf | QuantizedWeightFormat::BitsAndBytes | QuantizedWeightFormat::CompressedTensors | QuantizedWeightFormat::ModelOpt | QuantizedWeightFormat::TorchAo | QuantizedWeightFormat::Unquantized => {}
+            QuantizedWeightFormat::Gguf
+            | QuantizedWeightFormat::BitsAndBytes
+            | QuantizedWeightFormat::CompressedTensors
+            | QuantizedWeightFormat::ModelOpt
+            | QuantizedWeightFormat::TorchAo
+            | QuantizedWeightFormat::Unquantized => {}
         }
         Ok(())
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,7 +367,6 @@ mod tests {
         assert!(QuantizationPlan::model_opt().validate().is_ok());
         assert!(QuantizationPlan::torch_ao().validate().is_ok());
     }
-
 
     #[test]
     fn cpu_offload_capacity_uses_whole_blocks() {

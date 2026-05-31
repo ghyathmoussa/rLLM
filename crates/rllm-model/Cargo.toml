@@ -8,6 +8,7 @@ description = "Model registry, HF config parsing, Llama model implementation, an
 
 [dependencies]
 rllm-core.workspace = true
+rllm-quant = { workspace = true, default-features = false }
 rllm-tensor.workspace = true
 rllm-kernels.workspace = true
 anyhow.workspace = true
@@ -24,12 +25,19 @@ tempfile = "3"
 
 [features]
 default = ["candle-backend"]
-candle-backend = ["candle-core", "candle-nn", "candle-transformers", "tokio"]
+candle-backend = [
+    "candle-core",
+    "candle-nn",
+    "candle-transformers",
+    "rllm-quant/candle-backend",
+    "tokio",
+]
 cuda = [
     "candle-backend",
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",
+    "rllm-quant/cuda",
 ]
 
 [dependencies.candle-core]

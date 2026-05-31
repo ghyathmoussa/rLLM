@@ -52,10 +52,12 @@ impl Executor for UniProcExecutor {
         let num_blocks = if let Some(config) = kv_cache_configs.first() {
             // Profile GPU memory and shrink the requested (worst-case) block
             // count to what actually fits.
-            let fitted =
-                self.worker.fit_kv_blocks(&config.spec, gpu_memory_utilization, config.num_blocks)?;
-            let fitted_config =
-                KVCacheConfig { num_blocks: fitted, spec: config.spec.clone() };
+            let fitted = self.worker.fit_kv_blocks(
+                &config.spec,
+                gpu_memory_utilization,
+                config.num_blocks,
+            )?;
+            let fitted_config = KVCacheConfig { num_blocks: fitted, spec: config.spec.clone() };
             self.worker.initialize_kv_cache(&fitted_config)?;
             fitted
         } else {
@@ -100,7 +102,10 @@ impl Executor for UniProcExecutor {
 
         // Eager batched paged forward (falls back to legacy per-request forward).
         #[cfg(feature = "candle-backend")]
-        if batched_logits.is_none() && self.worker.has_loaded_model() && self.worker.gpu_kv_cache().is_some() {
+        if batched_logits.is_none()
+            && self.worker.has_loaded_model()
+            && self.worker.gpu_kv_cache().is_some()
+        {
             let device = self.worker.worker_model_device();
             if let Some(device) = device {
                 let input_ids = candle_core::Tensor::new(&batch.token_ids[..], device)?
@@ -178,18 +183,24 @@ impl Executor for UniProcExecutor {
                         let tokens_to_run = if is_prefill {
                             let start = self.worker.model_runner().num_computed(&request_id);
                             let end = start + n_tokens;
-                            let prompt_ids = self.worker.model_runner().get_context_token_ids(&request_id)
+                            let prompt_ids = self
+                                .worker
+                                .model_runner()
+                                .get_context_token_ids(&request_id)
                                 .map(|(p, _)| p)
                                 .unwrap_or_default();
                             prompt_ids[start..end].to_vec()
                         } else {
-                            let last_token = self.worker.model_runner().get_context_token_ids(&request_id)
-                                .map(|(_, g)| g.last().copied())
-                                .flatten()
+                            let last_token = self
+                                .worker
+                                .model_runner()
+                                .get_context_token_ids(&request_id)
+                                .and_then(|(_, g)| g.last().copied())
                                 .unwrap_or_else(|| {
-                                    self.worker.model_runner().get_context_token_ids(&request_id)
-                                        .map(|(p, _)| p.last().copied())
-                                        .flatten()
+                                    self.worker
+                                        .model_runner()
+                                        .get_context_token_ids(&request_id)
+                                        .and_then(|(p, _)| p.last().copied())
                                         .unwrap_or(0)
                                 });
                             vec![last_token]
@@ -199,11 +210,16 @@ impl Executor for UniProcExecutor {
                             .map(|j| self.worker.model_runner().num_computed(&request_id) + j)
                             .collect();
 
-                        let logits = self.worker.execute_model_step(&request_id, &tokens_to_run, &pos_usize)?;
+                        let logits = self.worker.execute_model_step(
+                            &request_id,
+                            &tokens_to_run,
+                            &pos_usize,
+                        )?;
                         if let Some(logits) = logits {
                             let seq_len = logits.dim(1)?;
                             let vocab_dim = logits.dim(2)?;
-                            let last_logits = logits.narrow(1, seq_len - 1, 1)?
+                            let last_logits = logits
+                                .narrow(1, seq_len - 1, 1)?
                                 .reshape((vocab_dim,))?
                                 .to_dtype(candle_core::DType::F32)?
                                 .to_vec1::<f32>()?;

@@ -1,0 +1,24 @@
+[package]
+name = "rllm-quant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quantization methods and checkpoint schema handling for rLLM"
+
+[dependencies]
+rllm-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+safetensors.workspace = true
+
+[dependencies.candle-core]
+workspace = true
+optional = true
+
+[features]
+default = ["candle-backend"]
+candle-backend = ["candle-core"]
+cuda = ["candle-backend", "candle-core/cuda"]

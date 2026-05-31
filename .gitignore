@@ -22,4 +22,4 @@ target
 .env
 .env.*
 .venv
-
+graphify-out/
