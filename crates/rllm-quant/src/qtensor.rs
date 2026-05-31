@@ -29,6 +29,10 @@ impl QuantTensor {
         &self.shape
     }
 
+    pub fn data(&self) -> &[i8] {
+        &self.data
+    }
+
     pub fn num_bytes(&self) -> usize {
         self.data.len()
     }

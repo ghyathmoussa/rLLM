@@ -75,6 +75,32 @@ mod ffi {
             is_e5m2: c_int,
         ) -> c_int;
 
+        pub fn rllm_cache_write_i8(
+            key_cache: *mut i8,
+            value_cache: *mut i8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_cache_write_i8_sync(
+            key_cache: *mut i8,
+            value_cache: *mut i8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+        ) -> c_int;
 
         // Cache block copy
         pub fn rllm_cache_block_copy(
@@ -101,8 +127,16 @@ mod ffi {
         pub fn rllm_gpu_free(ptr: *mut std::ffi::c_void) -> c_int;
         pub fn rllm_gpu_alloc_host(ptr: *mut *mut std::ffi::c_void, nbytes: i64) -> c_int;
         pub fn rllm_gpu_free_host(ptr: *mut std::ffi::c_void) -> c_int;
-        pub fn rllm_gpu_memcpy_to_device(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
-        pub fn rllm_gpu_memcpy_to_host(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
+        pub fn rllm_gpu_memcpy_to_device(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
+        pub fn rllm_gpu_memcpy_to_host(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
     }
 }
 
@@ -268,6 +302,82 @@ pub unsafe fn cache_write_fp8_sync(
     check(rc)
 }
 
+/// Launch async cache write (INT8): writes new K/V into physical cache, converting from FP16.
+///
+/// This first INT8 cache format uses symmetric fixed-range quantization
+/// (`round(clamp(x, -1, 1) * 127)`) and stores one byte per scalar. Scale-side
+/// metadata is intentionally not modeled yet; paged-attention INT8 reads are a
+/// follow-up to this cache write path.
+///
+/// # Safety
+/// - All pointers must be valid device pointers.
+/// - `slot_mapping` must have `num_tokens` entries.
+/// - `new_key` and `new_value` must have `num_tokens * num_kv_heads * head_dim` elements.
+/// - `key_cache` and `value_cache` must be large enough for the layout.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_i8(
+    key_cache: *mut i8,
+    value_cache: *mut i8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_i8(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous cache write for testing (INT8).
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_i8_sync(
+    key_cache: *mut i8,
+    value_cache: *mut i8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_i8_sync(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+        )
+    };
+    check(rc)
+}
 
 // ── Cache Block Copy ──────────────────────────────────────────────────────
 
@@ -348,7 +458,11 @@ pub unsafe fn gpu_free(ptr: *mut u8) -> Result<(), CudaKernelError> {
 /// - `dst` must be a valid device pointer.
 /// - `src` must be a valid host pointer.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_to_device(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_to_device(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_to_device(
             dst as *mut std::ffi::c_void,
@@ -365,7 +479,11 @@ pub unsafe fn gpu_memcpy_to_device(dst: *mut u8, src: *const u8, nbytes: usize) 
 /// - `dst` must be a valid host pointer.
 /// - `src` must be a valid device pointer.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_to_host(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_to_host(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_to_host(
             dst as *mut std::ffi::c_void,
@@ -447,7 +565,6 @@ impl GpuKVCache {
         })
     }
 
-
     /// Get the key tensor device pointer for a layer.
     pub fn key_ptr(&self, layer: usize) -> *const u8 {
         self.layer_ptrs[layer].0
@@ -473,7 +590,6 @@ impl GpuKVCache {
         self.dtype
     }
 
-
     /// Number of layers.
     pub fn num_layers(&self) -> usize {
         self.layer_ptrs.len()
@@ -498,7 +614,6 @@ impl GpuKVCache {
     pub fn element_size(&self) -> usize {
         self.element_size
     }
-
 
     /// Compute slot mapping for a list of (block_id, block_offset) pairs.
     ///
@@ -602,6 +717,38 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_i8(
+        _key_cache: *mut i8,
+        _value_cache: *mut i8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_i8_sync(
+        _key_cache: *mut i8,
+        _value_cache: *mut i8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
 
     pub fn cache_block_copy(
         _src: *const u8,
@@ -630,11 +777,19 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
-    pub fn gpu_memcpy_to_device(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+    pub fn gpu_memcpy_to_device(
+        _dst: *mut u8,
+        _src: *const u8,
+        _nbytes: usize,
+    ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
 
-    pub fn gpu_memcpy_to_host(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+    pub fn gpu_memcpy_to_host(
+        _dst: *mut u8,
+        _src: *const u8,
+        _nbytes: usize,
+    ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
 }
@@ -650,6 +805,24 @@ mod tests {
         #[test]
         fn cache_write_returns_not_available() {
             let result = cache_write_f16(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+            assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
+        }
+
+        #[test]
+        fn cache_write_i8_returns_not_available() {
+            let result = cache_write_i8(
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null(),
@@ -691,11 +864,8 @@ mod tests {
             // Verify zeroed — copy to host
             let mut host_buf = vec![0u8; nbytes];
             unsafe {
-                gpu_memcpy_to_host(
-                    host_buf.as_mut_ptr(),
-                    ptr,
-                    nbytes,
-                ).expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(host_buf.as_mut_ptr(), ptr, nbytes)
+                    .expect("gpu_memcpy_to_host failed");
             }
             assert!(host_buf.iter().all(|&b| b == 0));
             unsafe { gpu_free(ptr).expect("gpu_free failed") };
@@ -723,16 +893,10 @@ mod tests {
             let mut src_host = vec![0u8; total];
             let mut dst_host = vec![0u8; total];
             unsafe {
-                gpu_memcpy_to_host(
-                    src_host.as_mut_ptr(),
-                    src,
-                    total,
-                ).expect("gpu_memcpy_to_host failed");
-                gpu_memcpy_to_host(
-                    dst_host.as_mut_ptr(),
-                    dst,
-                    total,
-                ).expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(src_host.as_mut_ptr(), src, total)
+                    .expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(dst_host.as_mut_ptr(), dst, total)
+                    .expect("gpu_memcpy_to_host failed");
             }
             assert_eq!(src_host, dst_host);
 
@@ -764,8 +928,8 @@ mod tests {
 
         #[test]
         fn slot_mapping_computation() {
-            let cache = GpuKVCache::new(10, 1, 4, 64, 16, rllm_core::dtype::DType::F16).expect("GpuKVCache::new failed");
-
+            let cache = GpuKVCache::new(10, 1, 4, 64, 16, rllm_core::dtype::DType::F16)
+                .expect("GpuKVCache::new failed");
 
             let slots = cache.compute_slots(&[
                 (BlockId(0), 0),

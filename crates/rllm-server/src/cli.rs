@@ -92,7 +92,7 @@ pub struct ServeArgs {
     #[arg(long)]
     pub quant_group_size: Option<usize>,
 
-    /// KV Cache data type (auto, f16, bf16, fp8_e4m3, fp8_e5m2)
+    /// KV Cache data type (auto, f16, bf16, fp8_e4m3, fp8_e5m2, int8)
     #[arg(long, default_value = "auto")]
     pub kv_cache_dtype: String,
 }

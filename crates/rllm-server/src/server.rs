@@ -306,6 +306,7 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
         "bf16" => rllm_core::dtype::DType::BF16,
         "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
         _ => {
             if let Some(ref q) = model_config.quantization {
                 let plan =
@@ -349,6 +350,7 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
         "bf16" => rllm_core::dtype::DType::BF16,
         "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
         _ => {
             if let Some(ref q) = model_config.quantization {
                 let plan =

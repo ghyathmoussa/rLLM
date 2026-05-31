@@ -2823,7 +2823,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "candle-core",
+ "half",
  "rllm-core",
+ "rllm-kernels",
  "safetensors 0.6.2",
  "serde",
  "serde_json",

@@ -1,6 +1,7 @@
 pub mod attention;
 pub mod cache_ops;
 pub mod fused;
+pub mod quant_matmul;
 
 pub mod cuda;
 

@@ -138,7 +138,7 @@ impl QuantizationPlan {
             bits: Some(8),
             group_size: None,
             activation_dtype: DType::F16,
-            kv_cache_dtype: DType::F16,
+            kv_cache_dtype: DType::INT8,
         }
     }
 
@@ -362,6 +362,7 @@ mod tests {
         assert!(QuantizationPlan::mxfp4().validate().is_ok());
         assert!(QuantizationPlan::nvfp4().validate().is_ok());
         assert!(QuantizationPlan::int8().validate().is_ok());
+        assert_eq!(QuantizationPlan::int8().kv_cache_dtype, DType::INT8);
         assert!(QuantizationPlan::int4().validate().is_ok());
         assert!(QuantizationPlan::compressed_tensors().validate().is_ok());
         assert!(QuantizationPlan::model_opt().validate().is_ok());

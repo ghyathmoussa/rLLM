@@ -411,6 +411,96 @@ int32_t rllm_cache_write_fp8_sync(
     return 0;
 }
 
+__device__ inline int8_t float_to_i8_fixed(float val) {
+    float clipped = fminf(1.0f, fmaxf(-1.0f, val));
+    return static_cast<int8_t>(nearbyintf(clipped * 127.0f));
+}
+
+__global__ void cache_write_i8_kernel(
+    int8_t* key_cache,
+    int8_t* value_cache,
+    const __half* new_key,
+    const __half* new_value,
+    const int64_t* slot_mapping,
+    int64_t num_tokens,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t num_blocks) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = num_tokens * num_kv_heads * head_dim;
+    if (idx >= total) return;
+
+    int64_t token_idx = idx / (num_kv_heads * head_dim);
+    int64_t remainder = idx % (num_kv_heads * head_dim);
+    int64_t kv_head = remainder / head_dim;
+    int64_t d = remainder % head_dim;
+
+    int64_t slot = slot_mapping[token_idx];
+    if (slot < 0) return; // skip padding tokens
+
+    int64_t block_id = slot / block_size;
+    int64_t block_offset = slot % block_size;
+
+    if (block_id >= num_blocks) return;
+
+    // NHD layout: [num_blocks, num_kv_heads, head_dim, block_size]
+    int64_t cache_idx = ((block_id * num_kv_heads + kv_head) * head_dim + d) * block_size + block_offset;
+
+    int64_t key_src = (token_idx * num_kv_heads + kv_head) * head_dim + d;
+    key_cache[cache_idx] = float_to_i8_fixed(__half2float(new_key[key_src]));
+
+    int64_t val_src = (token_idx * num_kv_heads + kv_head) * head_dim + d;
+    value_cache[cache_idx] = float_to_i8_fixed(__half2float(new_value[val_src]));
+}
+
+int32_t rllm_cache_write_i8(
+    int8_t* key_cache,
+    int8_t* value_cache,
+    const __half* new_key,
+    const __half* new_value,
+    const int64_t* slot_mapping,
+    int64_t num_tokens,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t num_blocks,
+    cudaStream_t stream) {
+
+    if (num_tokens <= 0) return 0;
+    int64_t total = num_tokens * num_kv_heads * head_dim;
+    int64_t threads = 256;
+    int64_t blocks = (total + threads - 1) / threads;
+    cache_write_i8_kernel<<<blocks, threads, 0, stream>>>(
+        key_cache, value_cache, new_key, new_value, slot_mapping,
+        num_tokens, num_kv_heads, head_dim, block_size, num_blocks);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+int32_t rllm_cache_write_i8_sync(
+    int8_t* key_cache,
+    int8_t* value_cache,
+    const __half* new_key,
+    const __half* new_value,
+    const int64_t* slot_mapping,
+    int64_t num_tokens,
+    int64_t num_kv_heads,
+    int64_t head_dim,
+    int64_t block_size,
+    int64_t num_blocks) {
+
+    int32_t rc = rllm_cache_write_i8(
+        key_cache, value_cache, new_key, new_value, slot_mapping,
+        num_tokens, num_kv_heads, head_dim, block_size, num_blocks, 0);
+    if (rc != 0) return rc;
+    cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
 // ── GPU Memory Alloc/Free ────────────────────────────────────────────────
 
 
