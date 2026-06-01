@@ -113,7 +113,7 @@ mod stubs {
     use super::CudaKernelError;
 
     #[allow(clippy::too_many_arguments)]
-    pub fn int8_matmul_w8a8_f16(
+    pub unsafe fn int8_matmul_w8a8_f16(
         _x: *const u16,
         _qweight: *const i8,
         _weight_scale: *const f32,
@@ -127,7 +127,7 @@ mod stubs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn int8_matmul_w8a8_f16_sync(
+    pub unsafe fn int8_matmul_w8a8_f16_sync(
         _x: *const u16,
         _qweight: *const i8,
         _weight_scale: *const f32,
@@ -148,16 +148,18 @@ mod tests {
     #[test]
     fn int8_matmul_returns_not_available_without_cuda() {
         let mut output = [0u16; 4];
-        let result = int8_matmul_w8a8_f16(
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            output.as_mut_ptr(),
-            0,
-            0,
-            0,
-            0,
-        );
+        let result = unsafe {
+            int8_matmul_w8a8_f16(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                output.as_mut_ptr(),
+                0,
+                0,
+                0,
+                0,
+            )
+        };
         assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
     }
 }
