@@ -204,21 +204,25 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);
     let tokenizer = Arc::new(AsyncTokenizerPool::new(tokenizer, 4));
 
+    // Worst-case block count (max_num_seqs * full context); used only as an
+    // upper bound. The executor profiles real GPU memory after loading weights
+    // and returns the actual number of blocks it could allocate.
     let kv_config = kv_cache_config(&model_config, args);
     let cache_config = cache_config(args, &model_config);
     let scheduler_config = scheduler_config(args);
-    let scheduler = Scheduler::new(
-        scheduler_config,
-        &cache_config,
-        kv_config.num_blocks,
-        model_config.max_model_len,
-    );
 
     let worker = Worker::new(0, model_config.clone(), rllm_tensor::Device::cuda(0), BLOCK_SIZE);
     let mut executor = UniProcExecutor::new(worker);
     executor.set_eos_token_id(eos_token_id);
     executor.worker_mut().initialize_rng_seed(0).context("initializing worker RNG")?;
-    executor.initialize(&[kv_config]).context("initializing executor and loading model weights")?;
+    let num_gpu_blocks = executor
+        .initialize(&[kv_config], args.gpu_memory_utilization)
+        .context("initializing executor and loading model weights")?;
+    tracing::info!(num_gpu_blocks, "KV cache allocated; sizing scheduler to match");
+
+    // Size the scheduler's block manager to the blocks actually allocated.
+    let scheduler =
+        Scheduler::new(scheduler_config, &cache_config, num_gpu_blocks, model_config.max_model_len);
 
     let device = "cuda:0".to_string();
     let architecture = model_config.architecture.clone();

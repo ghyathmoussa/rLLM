@@ -391,183 +391,25 @@ impl LlamaAttention {
         // should not be reached in production paged mode).
         #[cfg(has_cuda)]
         {
-            use rllm_kernels::cache_ops;
-
-            // Flatten K/V for cache write: [num_tokens, num_kv_heads, head_dim]
-            let k_flat = k.transpose(1, 2)?.reshape((bsz * seq_len, self.num_kv_heads, self.head_dim))?;
-            let v_flat = v.transpose(1, 2)?.reshape((bsz * seq_len, self.num_kv_heads, self.head_dim))?;
-
-            // Convert to F16 for cache write
-            let k_f16 = k_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
-            let v_f16 = v_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
-
-            let k_ptr = k_f16.as_ptr() as *const u16;
-            let v_ptr = v_f16.as_ptr() as *const u16;
-
-            let cache_dtype = gpu_kv_cache.dtype();
-            let is_fp8 = cache_dtype == rllm_core::dtype::DType::FP8E4M3 || cache_dtype == rllm_core::dtype::DType::FP8E5M2;
-            let is_e5m2 = if cache_dtype == rllm_core::dtype::DType::FP8E5M2 { 1 } else { 0 };
-
-            // Build slot mapping tensor on device
-            let slot_mapping = &attn_meta.slot_mapping;
-
-            if !slot_mapping.is_empty() {
-                unsafe {
-                    if is_fp8 {
-                        cache_ops::cache_write_fp8(
-                            gpu_kv_cache.key_ptr(layer_idx) as *mut u8,
-                            gpu_kv_cache.value_ptr(layer_idx) as *mut u8,
-                            k_ptr,
-                            v_ptr,
-                            slot_mapping.as_ptr(),
-                            (bsz * seq_len) as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            gpu_kv_cache.num_blocks() as i64,
-                            is_e5m2,
-                            0, // default stream
-                        ).map_err(|e| candle_core::Error::Msg(format!("cache_write_fp8 failed: {e}")))?;
-                    } else {
-                        cache_ops::cache_write_f16(
-                            gpu_kv_cache.key_ptr(layer_idx) as *mut u16,
-                            gpu_kv_cache.value_ptr(layer_idx) as *mut u16,
-                            k_ptr,
-                            v_ptr,
-                            slot_mapping.as_ptr(),
-                            (bsz * seq_len) as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            gpu_kv_cache.num_blocks() as i64,
-                            0, // default stream
-                        ).map_err(|e| candle_core::Error::Msg(format!("cache_write_f16 failed: {e}")))?;
-                    }
-                }
-            }
-
-            // Run PagedAttention kernel for attention computation.
-            // Flatten query for kernel: [num_tokens, num_q_heads * head_dim]
-            let q_flat = q.transpose(1, 2)?.reshape((bsz * seq_len, self.num_heads * self.head_dim))?;
-            let q_f16 = q_flat.to_dtype(candle_core::DType::F16)?.contiguous()?;
-            let q_ptr = q_f16.as_ptr() as *const u16;
-
-            // Allocate output buffer
-            let out_elems = bsz * seq_len * self.num_heads * self.head_dim;
-            let out_bytes = out_elems * 2; // FP16
-            let out_ptr = unsafe { cache_ops::gpu_alloc(out_bytes)? } as *mut u16;
-
-            let flat_block_tables = attn_meta.flatten_block_tables();
-            let seq_lens_i32: Vec<i32> = attn_meta.seq_lens.iter().map(|&s| s as i32).collect();
-            let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-
-            let is_prefill = attn_meta.num_prefill_tokens > 0 && attn_meta.num_decode_tokens == 0;
-
-            let kernel_result = if is_prefill {
-                let query_start_loc_i32: Vec<i32> = attn_meta.query_start_loc.iter().map(|&s| s as i32).collect();
-                unsafe {
-                    if is_fp8 {
-                        rllm_kernels::paged_attention_prefill_fp8(
-                            out_ptr,
-                            q_ptr,
-                            gpu_kv_cache.key_ptr(layer_idx) as *const u8,
-                            gpu_kv_cache.value_ptr(layer_idx) as *const u8,
-                            flat_block_tables.as_ptr(),
-                            seq_lens_i32.as_ptr(),
-                            query_start_loc_i32.as_ptr(),
-                            attn_meta.num_seqs() as i64,
-                            (bsz * seq_len) as i64,
-                            self.num_heads as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            attn_meta.max_num_blocks_per_seq as i64,
-                            scale,
-                            is_e5m2,
-                            0, // default stream
-                        )
-                    } else {
-                        rllm_kernels::paged_attention_prefill_f16(
-                            out_ptr,
-                            q_ptr,
-                            gpu_kv_cache.key_ptr(layer_idx) as *const u16,
-                            gpu_kv_cache.value_ptr(layer_idx) as *const u16,
-                            flat_block_tables.as_ptr(),
-                            seq_lens_i32.as_ptr(),
-                            query_start_loc_i32.as_ptr(),
-                            attn_meta.num_seqs() as i64,
-                            (bsz * seq_len) as i64,
-                            self.num_heads as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            attn_meta.max_num_blocks_per_seq as i64,
-                            scale,
-                            0, // default stream
-                        )
-                    }
-                }
-            } else {
-                unsafe {
-                    if is_fp8 {
-                        rllm_kernels::paged_attention_decode_fp8(
-                            out_ptr,
-                            q_ptr,
-                            gpu_kv_cache.key_ptr(layer_idx) as *const u8,
-                            gpu_kv_cache.value_ptr(layer_idx) as *const u8,
-                            flat_block_tables.as_ptr(),
-                            seq_lens_i32.as_ptr(),
-                            attn_meta.num_seqs() as i64,
-                            self.num_heads as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            attn_meta.max_num_blocks_per_seq as i64,
-                            scale,
-                            is_e5m2,
-                            0, // default stream
-                        )
-                    } else {
-                        rllm_kernels::paged_attention_decode_f16(
-                            out_ptr,
-                            q_ptr,
-                            gpu_kv_cache.key_ptr(layer_idx) as *const u16,
-                            gpu_kv_cache.value_ptr(layer_idx) as *const u16,
-                            flat_block_tables.as_ptr(),
-                            seq_lens_i32.as_ptr(),
-                            attn_meta.num_seqs() as i64,
-                            self.num_heads as i64,
-                            self.num_kv_heads as i64,
-                            self.head_dim as i64,
-                            gpu_kv_cache.block_size() as i64,
-                            attn_meta.max_num_blocks_per_seq as i64,
-                            scale,
-                            0, // default stream
-                        )
-                    }
-                }
-            };
-
-            kernel_result.map_err(|e| candle_core::Error::Msg(format!("paged_attention failed: {e}")))?;
-
-            // Convert output back to a Candle tensor
-            // Read from GPU pointer into a Vec, then create tensor
-            let mut out_host = vec![0u16; out_elems];
-            unsafe {
-                std::ptr::copy_nonoverlapping(out_ptr, out_host.as_mut_ptr(), out_elems);
-                cache_ops::gpu_free(out_ptr as *mut u8)
-                    .map_err(|e| candle_core::Error::Msg(format!("gpu_free failed: {e}")))?;
-            }
-
-            // Build Candle tensor from the F16 output
-            let attn_output = Tensor::from_raw_buffer(
-                &out_host.iter().flat_map(|h| h.to_le_bytes()).collect::<Vec<u8>>(),
-                candle_core::DType::F16,
-                &[bsz, seq_len, self.num_heads * self.head_dim],
-                hidden_states.device(),
-            )?.to_dtype(hidden_states.dtype())?;
-
-            return self.o_proj.forward(&attn_output).map_err(|e| anyhow::anyhow!("{e}"));
+            // The custom paged-attention CUDA kernels (cache_write_{f16,fp8} and
+            // paged_attention_{prefill,decode}_{f16,fp8}) live in rllm-kernels, but
+            // wiring them here requires (a) extracting raw CUDA device pointers from
+            // the candle Q/K/V tensors and (b) copying the kernel output back into a
+            // candle tensor. candle 0.9 + cudarc 0.17 only expose a device pointer
+            // through a stream-synchronized guard
+            // (`CudaSlice::device_ptr(&stream) -> (CUdeviceptr, SyncOnDrop)`), not a
+            // plain pointer, so this FFI integration is not yet finished or validated.
+            //
+            // Until it is, signal the caller to use the proven legacy per-request
+            // forward path (`execute_model_step` in rllm-executor), which is
+            // GPU-accelerated through candle and numerically correct. The error is
+            // expected and handled as a fallback, not a failure.
+            // See docs/cuda-paged-attention-todo.md for what remains.
+            let _ = (gpu_kv_cache, attn_meta, layer_idx, &q, &k, &v, rope, positions);
+            return Err(candle_core::Error::Msg(
+                "paged-attention CUDA kernel path not yet wired to candle tensors; \
+                 caller should fall back to the legacy forward".to_string(),
+            ));
         }
 
         // Non-CUDA fallback: use native attention

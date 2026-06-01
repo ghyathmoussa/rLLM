@@ -101,6 +101,8 @@ mod ffi {
         pub fn rllm_gpu_free(ptr: *mut std::ffi::c_void) -> c_int;
         pub fn rllm_gpu_alloc_host(ptr: *mut *mut std::ffi::c_void, nbytes: i64) -> c_int;
         pub fn rllm_gpu_free_host(ptr: *mut std::ffi::c_void) -> c_int;
+        pub fn rllm_gpu_memcpy_to_device(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
+        pub fn rllm_gpu_memcpy_to_host(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
     }
 }
 
@@ -337,6 +339,40 @@ pub unsafe fn gpu_alloc(nbytes: usize) -> Result<*mut u8, CudaKernelError> {
 #[cfg(has_cuda)]
 pub unsafe fn gpu_free(ptr: *mut u8) -> Result<(), CudaKernelError> {
     let rc = unsafe { ffi::rllm_gpu_free(ptr as *mut std::ffi::c_void) };
+    check(rc)
+}
+
+/// Copy host memory to device.
+///
+/// # Safety
+/// - `dst` must be a valid device pointer.
+/// - `src` must be a valid host pointer.
+#[cfg(has_cuda)]
+pub unsafe fn gpu_memcpy_to_device(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gpu_memcpy_to_device(
+            dst as *mut std::ffi::c_void,
+            src as *const std::ffi::c_void,
+            nbytes as i64,
+        )
+    };
+    check(rc)
+}
+
+/// Copy device memory to host.
+///
+/// # Safety
+/// - `dst` must be a valid host pointer.
+/// - `src` must be a valid device pointer.
+#[cfg(has_cuda)]
+pub unsafe fn gpu_memcpy_to_host(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gpu_memcpy_to_host(
+            dst as *mut std::ffi::c_void,
+            src as *const std::ffi::c_void,
+            nbytes as i64,
+        )
+    };
     check(rc)
 }
 
@@ -593,6 +629,14 @@ mod stubs {
     pub fn cache_zero_sync(_ptr: *mut u8, _nbytes: i64) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
+
+    pub fn gpu_memcpy_to_device(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    pub fn gpu_memcpy_to_host(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
 }
 
 #[cfg(test)]
@@ -647,11 +691,11 @@ mod tests {
             // Verify zeroed — copy to host
             let mut host_buf = vec![0u8; nbytes];
             unsafe {
-                libc::memcpy(
-                    host_buf.as_mut_ptr() as *mut libc::c_void,
-                    ptr as *const libc::c_void,
+                gpu_memcpy_to_host(
+                    host_buf.as_mut_ptr(),
+                    ptr,
                     nbytes,
-                );
+                ).expect("gpu_memcpy_to_host failed");
             }
             assert!(host_buf.iter().all(|&b| b == 0));
             unsafe { gpu_free(ptr).expect("gpu_free failed") };
@@ -679,16 +723,16 @@ mod tests {
             let mut src_host = vec![0u8; total];
             let mut dst_host = vec![0u8; total];
             unsafe {
-                libc::memcpy(
-                    src_host.as_mut_ptr() as *mut libc::c_void,
-                    src as *const libc::c_void,
+                gpu_memcpy_to_host(
+                    src_host.as_mut_ptr(),
+                    src,
                     total,
-                );
-                libc::memcpy(
-                    dst_host.as_mut_ptr() as *mut libc::c_void,
-                    dst as *const libc::c_void,
+                ).expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(
+                    dst_host.as_mut_ptr(),
+                    dst,
                     total,
-                );
+                ).expect("gpu_memcpy_to_host failed");
             }
             assert_eq!(src_host, dst_host);
 

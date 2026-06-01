@@ -6,8 +6,9 @@ pub mod cuda;
 
 pub use attention::{AttentionMetadata, AttentionParams};
 pub use attention::{
-    paged_attention_decode_f16, paged_attention_decode_f16_sync,
-    paged_attention_prefill_f16, paged_attention_prefill_f16_sync,
+    paged_attention_decode_f16, paged_attention_decode_f16_sync, paged_attention_decode_fp8,
+    paged_attention_decode_fp8_sync, paged_attention_prefill_f16, paged_attention_prefill_f16_sync,
+    paged_attention_prefill_fp8, paged_attention_prefill_fp8_sync,
 };
 pub use cache_ops::GpuKVCache;
 /// Re-export error type.

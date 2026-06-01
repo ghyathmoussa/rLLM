@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rllm_cache::spec::KVCacheConfig;
+use rllm_cache::spec::{KVCacheConfig, KVCacheSpec};
 use rllm_core::config::ModelConfig;
 #[cfg(feature = "candle-backend")]
 use rllm_model::ModelRunner as CandleModelRunner;
@@ -189,22 +189,126 @@ impl Worker {
         }
     }
 
-    /// Determine available GPU memory for KV cache allocation.
+    /// Determine free GPU memory (bytes) available right now.
     ///
-    /// Returns a 4 GiB default for CUDA devices. Real GPU memory querying
-    /// requires cudarc integration (future work). Returns 0 for CPU.
+    /// With the `cuda` feature this queries the driver (`cuMemGetInfo`) against
+    /// the current context — call it *after* `load_model_weights` so the model
+    /// weights are already resident and excluded from the free figure. Falls
+    /// back to a fixed estimate if the query fails or CUDA is unavailable.
+    /// Returns 0 for CPU.
     pub fn determine_available_memory(&self) -> Result<usize> {
         match &self.device {
             Device::Cuda { .. } => {
-                tracing::info!(
-                    worker_id = self.id,
-                    bytes = DEFAULT_GPU_MEMORY,
-                    "Returning default GPU memory estimate"
-                );
-                Ok(DEFAULT_GPU_MEMORY)
+                #[cfg(feature = "cuda")]
+                {
+                    match cudarc::driver::result::mem_get_info() {
+                        Ok((free, total)) => {
+                            tracing::info!(
+                                worker_id = self.id,
+                                free_bytes = free,
+                                total_bytes = total,
+                                "Queried GPU memory"
+                            );
+                            Ok(free)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                worker_id = self.id,
+                                error = %e,
+                                fallback_bytes = DEFAULT_GPU_MEMORY,
+                                "cuMemGetInfo failed; using default GPU memory estimate"
+                            );
+                            Ok(DEFAULT_GPU_MEMORY)
+                        }
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    tracing::info!(
+                        worker_id = self.id,
+                        bytes = DEFAULT_GPU_MEMORY,
+                        "Returning default GPU memory estimate (cuda feature disabled)"
+                    );
+                    Ok(DEFAULT_GPU_MEMORY)
+                }
             }
             Device::Cpu => Ok(0),
         }
+    }
+
+    /// Compute how many KV-cache blocks fit in available GPU memory.
+    ///
+    /// vLLM-style profiling: weights are already resident, so `free` excludes
+    /// them. We keep the process under `gpu_memory_utilization * total`, reserve
+    /// what is already used (weights + context), apply a safety margin for
+    /// activations/fragmentation, then divide by the per-block byte cost. The
+    /// result is capped at `max_blocks` (the worst-case need, so we never
+    /// allocate more than the model could ever address).
+    ///
+    /// Call **after** `load_model_weights`. Errors if not even a minimal cache
+    /// fits, with guidance on how to proceed.
+    pub fn fit_kv_blocks(
+        &self,
+        spec: &KVCacheSpec,
+        gpu_memory_utilization: f32,
+        max_blocks: usize,
+    ) -> Result<usize> {
+        // Per-block cost in bytes (K + V, all layers).
+        let bytes_per_block = spec.bytes_per_block();
+        if bytes_per_block == 0 {
+            anyhow::bail!("KV cache spec has zero bytes per block");
+        }
+
+        // Safety margin held back for activation peaks and allocator fragmentation.
+        const KV_SAFETY_FRACTION: f64 = 0.95;
+        // Always keep at least this many blocks or refuse to start.
+        const MIN_GPU_BLOCKS: usize = 256;
+
+        let free = self.determine_available_memory()?;
+
+        // When we can read the total too, bound the whole process to
+        // `utilization * total`; otherwise fall back to `utilization * free`.
+        #[cfg(feature = "cuda")]
+        let (free, total) = match &self.device {
+            Device::Cuda { .. } => {
+                cudarc::driver::result::mem_get_info().unwrap_or((free, free))
+            }
+            Device::Cpu => (free, free),
+        };
+        #[cfg(not(feature = "cuda"))]
+        let total = free;
+
+        let util = gpu_memory_utilization.clamp(0.01, 1.0) as f64;
+        let budget = (total as f64 * util) as usize; // total process cap
+        let already_used = total.saturating_sub(free); // weights + context
+        let kv_budget = budget.saturating_sub(already_used);
+        let kv_budget = (kv_budget as f64 * KV_SAFETY_FRACTION) as usize;
+
+        let mem_blocks = kv_budget / bytes_per_block;
+        let num_blocks = mem_blocks.min(max_blocks);
+
+        tracing::info!(
+            worker_id = self.id,
+            free_bytes = free,
+            total_bytes = total,
+            gpu_memory_utilization = util,
+            bytes_per_block,
+            mem_blocks,
+            max_blocks,
+            chosen_blocks = num_blocks,
+            "Profiled KV cache size"
+        );
+
+        if num_blocks < MIN_GPU_BLOCKS {
+            anyhow::bail!(
+                "insufficient GPU memory for KV cache: only {num_blocks} block(s) fit \
+                 (need >= {MIN_GPU_BLOCKS}). Free={free} bytes, total={total} bytes, \
+                 bytes/block={bytes_per_block}. Try a smaller model, a shorter \
+                 --max-model-len, or a higher --gpu-memory-utilization."
+            );
+        }
+
+        Ok(num_blocks)
     }
 
     /// Initialize the physical KV cache from a config.
@@ -254,17 +358,10 @@ impl Worker {
 
     /// Warm up kernels with dummy batches of common sizes and capture CUDA graphs.
     pub fn warm_up(&mut self) -> Result<()> {
-        #[cfg(has_cuda)]
-        {
-            if self.has_loaded_model() && self.gpu_kv_cache.is_some() {
-                tracing::info!(worker_id = self.id, "Capturing CUDA graphs during warmup...");
-                let self_ref = &*self;
-                self.cuda_graphs.capture_all(|batch_size| {
-                    self_ref.execute_dummy_decode(batch_size)
-                })?;
-            }
-        }
-        tracing::info!(worker_id = self.id, "Warmup completed");
+        // CUDA graph capture is not yet implemented (it depends on the paged
+        // forward kernel path, which is also pending), so warmup does not capture
+        // graphs. Decode runs on the eager forward path.
+        tracing::info!(worker_id = self.id, "Warmup completed (CUDA graph capture disabled)");
         Ok(())
     }
 

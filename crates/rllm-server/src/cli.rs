@@ -45,7 +45,7 @@ pub struct ServeArgs {
     pub gpu_memory_utilization: f32,
 
     /// Enable prefix caching
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub enable_prefix_caching: bool,
 
     /// API key for authenticated endpoints (reads RLLM_API_KEY env var)

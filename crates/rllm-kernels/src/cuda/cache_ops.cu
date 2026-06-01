@@ -438,4 +438,16 @@ int32_t rllm_gpu_free_host(void* ptr) {
     return 0;
 }
 
+int32_t rllm_gpu_memcpy_to_device(void* dst, const void* src, int64_t nbytes) {
+    cudaError_t err = cudaMemcpy(dst, src, static_cast<size_t>(nbytes), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+int32_t rllm_gpu_memcpy_to_host(void* dst, const void* src, int64_t nbytes) {
+    cudaError_t err = cudaMemcpy(dst, src, static_cast<size_t>(nbytes), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
 } // extern "C"

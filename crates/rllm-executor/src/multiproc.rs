@@ -77,7 +77,11 @@ impl MultiProcExecutor {
 }
 
 impl Executor for MultiProcExecutor {
-    fn initialize(&mut self, kv_cache_configs: &[KVCacheConfig]) -> Result<()> {
+    fn initialize(
+        &mut self,
+        kv_cache_configs: &[KVCacheConfig],
+        _gpu_memory_utilization: f32,
+    ) -> Result<usize> {
         if kv_cache_configs.len() < self.tensor_parallel_size {
             anyhow::bail!(
                 "Need {} KV cache configs for {} workers, got {}",
@@ -92,12 +96,14 @@ impl Executor for MultiProcExecutor {
             self.tensor_parallel_size
         );
         // In production: spawn worker processes, establish IPC channels,
-        // initialize NCCL communicators, shard and load model weights.
+        // initialize NCCL communicators, shard and load model weights, then
+        // profile each rank and reduce to the minimum block count. For now we
+        // honor the requested block count of rank 0.
         for (rank, config) in kv_cache_configs.iter().enumerate() {
             tracing::debug!(rank, num_blocks = config.num_blocks, "Worker KV cache configured");
         }
         self.initialized = true;
-        Ok(())
+        Ok(kv_cache_configs.first().map(|c| c.num_blocks).unwrap_or(0))
     }
 
     fn determine_available_memory(&self) -> Result<usize> {

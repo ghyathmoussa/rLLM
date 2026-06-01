@@ -18,29 +18,38 @@ jobs:
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install MUSL C/C++ Cross Compiler Toolchain
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: x86_64-unknown-linux-musl
 
       - name: Install System Dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
 
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
 
       - name: Build Release Binary
-        run: cargo build --release --bin rllm
+        run: cargo build --release --bin rllm --target x86_64-unknown-linux-musl
 
       - name: Package Binary
         run: |
           mkdir -p release
-          cp target/release/rllm release/
+          cp target/x86_64-unknown-linux-musl/release/rllm release/
           cp README.md release/
           cp LICENSE release/
           cd release
-          tar -czf ../rllm-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz rllm README.md LICENSE
+          tar -czf ../rllm-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz rllm README.md LICENSE
 
       - name: Create GitHub Release and Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: rllm-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+          files: rllm-${{ github.ref_name }}-x86_64-unknown-linux-musl.tar.gz
           draft: false
           prerelease: false
         env:
