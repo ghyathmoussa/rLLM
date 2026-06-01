@@ -79,7 +79,8 @@ impl ModelRunner {
     /// Register a new request with its prompt tokens.
     pub fn add_request(&mut self, request_id: RequestId, prompt_token_ids: Vec<u32>) {
         let num_layers = self.model_config.num_layers;
-        self.request_states.insert(request_id, RunnerRequestState::new(prompt_token_ids, num_layers));
+        self.request_states
+            .insert(request_id, RunnerRequestState::new(prompt_token_ids, num_layers));
     }
 
     /// Remove a finished or preempted request.
@@ -291,17 +292,25 @@ impl ModelRunner {
 
         // If only decode, use for_decode.
         if prefill_seq_lens.is_empty() {
-            return AttentionMetadata::for_decode(decode_seq_lens, decode_block_tables, max_blocks);
+            let mut meta =
+                AttentionMetadata::for_decode(decode_seq_lens, decode_block_tables, max_blocks);
+            // `for_decode` leaves slot_mapping empty; the cache-write kernel needs
+            // one slot per token, so populate it from the batch.
+            meta.slot_mapping = batch.slot_mappings.clone();
+            return meta;
         }
 
         // If only prefill, use for_prefill.
         if decode_seq_lens.is_empty() {
-            return AttentionMetadata::for_prefill(
+            let mut meta = AttentionMetadata::for_prefill(
                 prefill_seq_lens,
                 prefill_tokens_per_seq,
                 prefill_block_tables,
                 max_blocks,
             );
+            // `for_prefill` likewise leaves slot_mapping empty.
+            meta.slot_mapping = batch.slot_mappings.clone();
+            return meta;
         }
 
         // Mixed batch: build combined metadata manually.
@@ -499,12 +508,11 @@ impl std::fmt::Debug for CudaGraphInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut d = f.debug_struct("CudaGraphInstance");
         d.field("batch_size", &self.batch_size)
-         .field("is_captured", &self.is_captured)
-         .field("capture_duration_ns", &self.capture_duration_ns);
+            .field("is_captured", &self.is_captured)
+            .field("capture_duration_ns", &self.capture_duration_ns);
         #[cfg(feature = "candle-backend")]
         {
-            d.field("input_ids", &self.input_ids)
-             .field("logits", &self.logits);
+            d.field("input_ids", &self.input_ids).field("logits", &self.logits);
         }
         d.finish()
     }
@@ -550,10 +558,7 @@ impl CudaGraphInstance {
     /// CUDA graph replay is disabled until capture is implemented; `is_captured`
     /// is always false, so callers fall back to the eager forward path.
     pub fn replay(&self) -> Result<()> {
-        anyhow::bail!(
-            "CUDA graph replay is not implemented for batch size {}",
-            self.batch_size
-        )
+        anyhow::bail!("CUDA graph replay is not implemented for batch size {}", self.batch_size)
     }
 
     /// Check if this graph is ready for replay.
@@ -1078,6 +1083,49 @@ mod tests {
         assert_eq!(meta.num_decode_tokens, 1);
         assert_eq!(meta.seq_lens.len(), 3);
         assert_eq!(meta.query_start_loc, vec![0, 10, 30, 31]);
+        assert_eq!(meta.slot_mapping.len(), 31);
+    }
+
+    #[test]
+    fn test_build_attention_metadata_decode_only_has_slot_mapping() {
+        let config = test_model_config();
+        let runner = ModelRunner::new(config, 16);
+
+        let mut batch = InputBatch::empty();
+        batch.num_seqs = 2;
+        batch.seq_lens = vec![7, 9];
+        batch.tokens_per_seq = vec![1, 1];
+        batch.is_prefill = vec![false, false];
+        batch.block_tables = vec![vec![0u32], vec![1]];
+        batch.max_num_blocks_per_seq = 1;
+        batch.slot_mappings = vec![6, 24]; // one slot per decode token
+
+        let meta = runner.build_attention_metadata(&batch);
+
+        assert_eq!(meta.num_decode_tokens, 2);
+        // Regression: decode-only metadata must carry the slot mapping so the
+        // cache-write kernel knows where to scatter each new token's K/V.
+        assert_eq!(meta.slot_mapping, vec![6, 24]);
+    }
+
+    #[test]
+    fn test_build_attention_metadata_prefill_only_has_slot_mapping() {
+        let config = test_model_config();
+        let runner = ModelRunner::new(config, 16);
+
+        let mut batch = InputBatch::empty();
+        batch.num_seqs = 1;
+        batch.seq_lens = vec![4];
+        batch.tokens_per_seq = vec![4];
+        batch.is_prefill = vec![true];
+        batch.block_tables = vec![vec![0u32]];
+        batch.max_num_blocks_per_seq = 1;
+        batch.slot_mappings = vec![0, 1, 2, 3];
+
+        let meta = runner.build_attention_metadata(&batch);
+
+        assert_eq!(meta.num_prefill_tokens, 4);
+        assert_eq!(meta.slot_mapping, vec![0, 1, 2, 3]);
     }
 
     #[test]

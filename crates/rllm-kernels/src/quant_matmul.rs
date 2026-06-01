@@ -112,6 +112,9 @@ pub use stubs::*;
 mod stubs {
     use super::CudaKernelError;
 
+    /// # Safety
+    /// Stub for non-CUDA builds: returns `NotAvailable` and never dereferences
+    /// any pointer. Signature mirrors the CUDA build for source compatibility.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn int8_matmul_w8a8_f16(
         _x: *const u16,
@@ -126,6 +129,9 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    /// # Safety
+    /// Stub for non-CUDA builds: returns `NotAvailable` and never dereferences
+    /// any pointer. Signature mirrors the CUDA build for source compatibility.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn int8_matmul_w8a8_f16_sync(
         _x: *const u16,

@@ -19,6 +19,7 @@ hf-hub.workspace = true
 safetensors.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, optional = true }
+half.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

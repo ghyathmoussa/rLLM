@@ -334,7 +334,6 @@ mod ffi {
         ) -> c_int;
 
         pub fn rllm_paged_attention_prefill_f16(
-
             output: *mut u16,
             query: *const u16,
             key_cache: *const u16,
@@ -372,7 +371,6 @@ mod ffi {
             is_e5m2: c_int,
             stream: usize,
         ) -> c_int;
-
 
         pub fn rllm_paged_attention_prefill_f16_sync(
             output: *mut u16,
@@ -593,7 +591,6 @@ pub unsafe fn paged_attention_decode_fp8_sync(
 
 // ── Prefill PagedAttention ────────────────────────────────────────────────
 
-
 /// Launch async prefill PagedAttention (FP16).
 ///
 /// # Safety
@@ -780,7 +777,6 @@ pub unsafe fn paged_attention_prefill_fp8_sync(
 
 // ── Non-CUDA stubs ────────────────────────────────────────────────────────
 
-
 #[cfg(not(has_cuda))]
 pub use stubs::*;
 
@@ -955,7 +951,6 @@ mod stubs {
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
-
 }
 
 #[cfg(test)]

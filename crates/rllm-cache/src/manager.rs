@@ -218,7 +218,9 @@ impl KVCacheManager {
     ///
     /// Copies the block table list and increments the reference count of all shared blocks.
     pub fn fork_blocks(&mut self, parent_id: RequestId, child_id: RequestId) -> Result<(), String> {
-        let parent_blocks = self.request_blocks.get(&parent_id)
+        let parent_blocks = self
+            .request_blocks
+            .get(&parent_id)
             .ok_or_else(|| format!("Parent request {:?} not found in cache manager", parent_id))?
             .clone();
 

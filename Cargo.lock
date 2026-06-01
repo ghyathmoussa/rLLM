@@ -2803,6 +2803,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "half",
  "hf-hub",
  "rllm-core",
  "rllm-kernels",

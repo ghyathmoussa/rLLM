@@ -48,7 +48,6 @@ pub enum QuantizationKind {
     TorchAO,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuantizationConfig {
     pub kind: QuantizationKind,
@@ -311,7 +310,10 @@ mod tests {
         assert_eq!(QuantizationKind::Int8, roundtrip(&QuantizationKind::Int8));
         assert_eq!(QuantizationKind::Int4, roundtrip(&QuantizationKind::Int4));
         assert_eq!(QuantizationKind::Gguf, roundtrip(&QuantizationKind::Gguf));
-        assert_eq!(QuantizationKind::CompressedTensors, roundtrip(&QuantizationKind::CompressedTensors));
+        assert_eq!(
+            QuantizationKind::CompressedTensors,
+            roundtrip(&QuantizationKind::CompressedTensors)
+        );
         assert_eq!(QuantizationKind::ModelOpt, roundtrip(&QuantizationKind::ModelOpt));
         assert_eq!(QuantizationKind::TorchAO, roundtrip(&QuantizationKind::TorchAO));
 
