@@ -20,6 +20,10 @@ pub trait LinearMethod: Send + Sync {
     fn weight(&self) -> Option<&Tensor> {
         None
     }
+
+    fn is_quantized(&self) -> bool {
+        false
+    }
 }
 
 pub trait QuantMethodFactory: Send + Sync {

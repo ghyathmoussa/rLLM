@@ -163,6 +163,10 @@ impl Linear {
             .weight()
             .expect("Linear::weight() is only available for unquantized linear layers")
     }
+
+    pub fn is_quantized(&self) -> bool {
+        self.method.is_quantized()
+    }
 }
 
 // ── LlamaMLP (SwiGLU) ───────────────────────────────────────────────────

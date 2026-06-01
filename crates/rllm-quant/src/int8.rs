@@ -144,6 +144,10 @@ impl LinearMethod for Int8Linear {
     fn out_features(&self) -> usize {
         self.out_features
     }
+
+    fn is_quantized(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -199,7 +199,7 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     model_config.dtype = parse_dtype(&args.dtype).unwrap_or(model_config.dtype);
     if !args.quantization.eq_ignore_ascii_case("auto") {
         model_config.quantization =
-            parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size);
+            parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size)?;
     }
 
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
@@ -279,10 +279,10 @@ fn parse_quantization(
     quant_str: &str,
     bits: Option<usize>,
     group_size: Option<usize>,
-) -> Option<rllm_core::config::QuantizationConfig> {
+) -> Result<Option<rllm_core::config::QuantizationConfig>> {
     use rllm_core::config::{QuantizationConfig, QuantizationKind};
     let kind = match quant_str.to_lowercase().as_str() {
-        "none" => return None,
+        "none" => return Ok(None),
         "fp8" => QuantizationKind::FP8,
         "mxfp8" => QuantizationKind::MXFP8,
         "mxfp4" => QuantizationKind::MXFP4,
@@ -295,9 +295,12 @@ fn parse_quantization(
         "compressed-tensors" | "compressed_tensors" => QuantizationKind::CompressedTensors,
         "modelopt" => QuantizationKind::ModelOpt,
         "torchao" => QuantizationKind::TorchAO,
-        _ => return None,
+        _ => anyhow::bail!("unsupported quantization format: {quant_str}"),
     };
-    Some(QuantizationConfig { kind, group_size, bits })
+    if kind == QuantizationKind::Int8 && bits != Some(8) {
+        anyhow::bail!("INT8 quantization requires --quant-bits 8");
+    }
+    Ok(Some(QuantizationConfig { kind, group_size, bits }))
 }
 
 fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
@@ -328,6 +331,31 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
         enable_prefix_caching: args.enable_prefix_caching,
         prefix_hash_algorithm: PrefixHashAlgorithm::Sha256Cbor,
         sliding_window: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rllm_core::config::QuantizationKind;
+
+    #[test]
+    fn parse_int8_quantization_requires_eight_bits() {
+        let missing_bits = parse_quantization("int8", None, None).unwrap_err().to_string();
+        assert!(missing_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let wrong_bits = parse_quantization("int8", Some(4), None).unwrap_err().to_string();
+        assert!(wrong_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let config = parse_quantization("int8", Some(8), None).unwrap().unwrap();
+        assert_eq!(config.kind, QuantizationKind::Int8);
+        assert_eq!(config.bits, Some(8));
+    }
+
+    #[test]
+    fn parse_unknown_quantization_fails() {
+        let err = parse_quantization("made-up-format", None, None).unwrap_err().to_string();
+        assert!(err.contains("unsupported quantization format"));
     }
 }
 

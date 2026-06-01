@@ -44,11 +44,7 @@ impl QuantSchema {
             || self.format.as_deref().is_some_and(|format| format == "int-quantized");
         is_compressed_tensors
             && self.weight_num_bits.unwrap_or(8) == 8
-            && self
-                .weight_strategy
-                .as_deref()
-                .map(|strategy| strategy == "channel" || strategy == "tensor")
-                .unwrap_or(true)
+            && self.weight_strategy.as_deref().map(|strategy| strategy == "channel").unwrap_or(true)
             && self.weight_symmetric.unwrap_or(true)
     }
 
@@ -107,6 +103,21 @@ mod tests {
                 "num_bits": 8,
                 "strategy": "channel",
                 "symmetric": false
+            }
+        });
+        let schema = QuantSchema::from_hf_value(&value).unwrap();
+        assert!(!schema.is_int8_weight_only());
+    }
+
+    #[test]
+    fn rejects_tensor_strategy_int8_for_now() {
+        let value = serde_json::json!({
+            "quant_method": "compressed-tensors",
+            "format": "int-quantized",
+            "weights": {
+                "num_bits": 8,
+                "strategy": "tensor",
+                "symmetric": true
             }
         });
         let schema = QuantSchema::from_hf_value(&value).unwrap();
