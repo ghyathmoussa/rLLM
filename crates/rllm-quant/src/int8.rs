@@ -1,6 +1,5 @@
 use anyhow::Result;
-use candle_core::DType;
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
 use rllm_core::dtype::DType as RllmDType;
 
 use crate::{

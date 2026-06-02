@@ -336,8 +336,9 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rllm_core::config::QuantizationKind;
+
+    use super::*;
 
     #[test]
     fn parse_int8_quantization_requires_eight_bits() {

@@ -1,12 +1,12 @@
 #[cfg(feature = "candle-backend")]
 use candle_core::{D, DType, Device, Result, Tensor};
-
-#[cfg(feature = "candle-backend")]
-use crate::rope::RotaryEmbedding;
 #[cfg(feature = "candle-backend")]
 use rllm_core::optimizations::QuantizationPlan;
 #[cfg(feature = "candle-backend")]
 use rllm_quant::{LinearMethod, UnquantizedLinear};
+
+#[cfg(feature = "candle-backend")]
+use crate::rope::RotaryEmbedding;
 
 #[cfg(feature = "candle-backend")]
 pub fn simulate_weight_quantization(weight: &Tensor, plan: &QuantizationPlan) -> Result<Tensor> {
@@ -399,9 +399,12 @@ impl LlamaAttention {
                 .contiguous()?
                 .to_dtype(DType::F16)?;
 
-            let op = PagedAttentionF16Op {
+            let op = PagedAttentionOp {
                 key_cache: gpu_kv_cache.key_ptr(layer_idx) as usize,
                 value_cache: gpu_kv_cache.value_ptr(layer_idx) as usize,
+                cache_dtype: gpu_kv_cache.dtype(),
+                k_scale: gpu_kv_cache.k_scale(),
+                v_scale: gpu_kv_cache.v_scale(),
                 num_blocks: gpu_kv_cache.num_blocks() as i64,
                 block_size: gpu_kv_cache.block_size() as i64,
                 num_q_heads: self.num_heads as i64,
@@ -494,18 +497,24 @@ fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
     mask.reshape((1, 1, seq_len, seq_len))
 }
 
-// ── Paged-attention CUDA op (Layer 0) ────────────────────────────────────
+// ── Paged-attention CUDA op (Layers 0 + 3) ───────────────────────────────
 //
 // Wraps one decoder layer's paged-attention step as a candle `CustomOp3` over
-// (q, k, v): it scatter-writes the new K/V into the block-addressed `GpuKVCache`
-// with `cache_write_f16`, then runs `paged_attention_{prefill,decode}_f16`,
-// returning the attention output as a candle tensor. The device-pointer
-// extraction mirrors the validated pattern in
+// (q, k, v): it scatter-writes the new K/V into the block-addressed `GpuKVCache`,
+// then runs the paged-attention read, returning the attention output as a candle
+// tensor. The device-pointer extraction mirrors the validated pattern in
 // `rllm_quant::int8::Int8MatmulOp::cuda_fwd`.
+//
+// Layer 3 makes the write+read kernels dispatch on the cache dtype:
+//   - F16 / BF16 → `cache_write_f16` + `paged_attention_*_f16`
+//   - FP8E4M3 / FP8E5M2 → `cache_write_fp8` + `paged_attention_*_fp8` (+ `is_e5m2`)
+//   - INT8 → `cache_write_i8` + `paged_attention_*_i8` (+ `k_scale`/`v_scale`)
+// Q/K/V are always f16 (the projections are cast to f16 before the op); only the
+// cache element type and the selected kernels change.
 //
 // This code is only compiled with `--features cuda` (sets `has_cuda`); it has
 // not been compiled on this dev host (no nvcc) and must be built/validated on
-// the GPU box. See docs/quantization-int8-kvcache-plan.md (Layer 0).
+// the GPU box. See docs/quantization-int8-kvcache-plan.md (Layers 0–3).
 
 /// Whether the opt-in paged-attention path is enabled (`RLLM_PAGED_ATTENTION=1`).
 #[cfg(has_cuda)]
@@ -515,11 +524,17 @@ fn paged_attention_enabled() -> bool {
 
 /// Inputs: q `[num_tokens, num_q_heads, head_dim]`, k/v `[num_tokens, num_kv_heads, head_dim]`
 /// (token-major, contiguous, f16). Output: `[num_tokens, num_q_heads, head_dim]`.
+/// The write+read kernels are selected at runtime by `cache_dtype`.
 #[cfg(has_cuda)]
-struct PagedAttentionF16Op {
+struct PagedAttentionOp {
     /// Per-layer cache device pointers (raw addresses; cast back in `cuda_fwd`).
     key_cache: usize,
     value_cache: usize,
+    /// KV cache element dtype; selects the write+read kernel family.
+    cache_dtype: rllm_core::dtype::DType,
+    /// INT8 dequant scales (`x ~= q * scale`); ignored for non-INT8 dtypes.
+    k_scale: f32,
+    v_scale: f32,
     num_blocks: i64,
     block_size: i64,
     num_q_heads: i64,
@@ -537,9 +552,9 @@ struct PagedAttentionF16Op {
 }
 
 #[cfg(has_cuda)]
-impl candle_core::CustomOp3 for PagedAttentionF16Op {
+impl candle_core::CustomOp3 for PagedAttentionOp {
     fn name(&self) -> &'static str {
-        "rllm-paged-attention-f16"
+        "rllm-paged-attention"
     }
 
     fn cpu_fwd(
@@ -551,7 +566,7 @@ impl candle_core::CustomOp3 for PagedAttentionF16Op {
         _s3: &candle_core::CpuStorage,
         _l3: &candle_core::Layout,
     ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        Err(candle_core::Error::Msg("rllm-paged-attention-f16 runs only on CUDA".to_string()))
+        Err(candle_core::Error::Msg("rllm-paged-attention runs only on CUDA".to_string()))
     }
 
     fn cuda_fwd(
@@ -590,9 +605,6 @@ impl candle_core::CustomOp3 for PagedAttentionF16Op {
         let out_len = (self.num_tokens * self.num_q_heads * self.head_dim) as usize;
         let mut output = unsafe { device.alloc::<half::f16>(out_len)? };
 
-        let key_cache = self.key_cache as *mut u16;
-        let value_cache = self.value_cache as *mut u16;
-
         {
             let (q_ptr, _gq) = q_slice.device_ptr(&stream);
             let (k_ptr, _gk) = k_slice.device_ptr(&stream);
@@ -604,66 +616,199 @@ impl candle_core::CustomOp3 for PagedAttentionF16Op {
             let (out_ptr, _go) = output.device_ptr_mut(&stream);
             let cu = stream.cu_stream() as usize;
 
-            // 1. Scatter new K/V into the paged cache at slot-mapped positions.
-            unsafe {
-                rllm_kernels::cache_ops::cache_write_f16(
-                    key_cache,
-                    value_cache,
-                    k_ptr as *const u16,
-                    v_ptr as *const u16,
-                    slot_ptr as *const i64,
-                    self.num_tokens,
-                    self.num_kv_heads,
-                    self.head_dim,
-                    self.block_size,
-                    self.num_blocks,
-                    cu,
-                )
-                .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-            }
+            // Dispatch the write + read kernels on the cache element dtype.
+            // Q/K/V are f16; only the cache element type and kernels differ.
+            // `fp8_e5m2` distinguishes the two fp8 encodings.
+            use rllm_core::dtype::DType;
+            let (k_cache_u8, v_cache_u8) = (self.key_cache as *mut u8, self.value_cache as *mut u8);
+            let fp8_e5m2 = matches!(self.cache_dtype, DType::FP8E5M2);
 
-            // 2. PagedAttention read (prefill for multi-token, decode for 1 token).
-            if self.is_prefill {
-                unsafe {
-                    rllm_kernels::attention::paged_attention_prefill_f16(
-                        out_ptr as *mut u16,
-                        q_ptr as *const u16,
-                        key_cache as *const u16,
-                        value_cache as *const u16,
-                        bt_ptr as *const i32,
-                        seq_ptr as *const i32,
-                        qsl_ptr as *const i32,
-                        self.num_seqs,
+            match self.cache_dtype {
+                DType::F16 | DType::BF16 => unsafe {
+                    let key_cache = self.key_cache as *mut u16;
+                    let value_cache = self.value_cache as *mut u16;
+                    rllm_kernels::cache_ops::cache_write_f16(
+                        key_cache,
+                        value_cache,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
                         self.num_tokens,
-                        self.num_q_heads,
                         self.num_kv_heads,
                         self.head_dim,
                         self.block_size,
-                        self.max_num_blocks_per_seq,
-                        self.scale,
+                        self.num_blocks,
                         cu,
                     )
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-                }
-            } else {
-                unsafe {
-                    rllm_kernels::attention::paged_attention_decode_f16(
-                        out_ptr as *mut u16,
-                        q_ptr as *const u16,
-                        key_cache as *const u16,
-                        value_cache as *const u16,
-                        bt_ptr as *const i32,
-                        seq_ptr as *const i32,
-                        self.num_seqs,
-                        self.num_q_heads,
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_f16(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const u16,
+                            value_cache as *const u16,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_f16(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const u16,
+                            value_cache as *const u16,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                DType::FP8E4M3 | DType::FP8E5M2 => unsafe {
+                    rllm_kernels::cache_ops::cache_write_fp8(
+                        k_cache_u8,
+                        v_cache_u8,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
+                        self.num_tokens,
                         self.num_kv_heads,
                         self.head_dim,
                         self.block_size,
-                        self.max_num_blocks_per_seq,
-                        self.scale,
+                        self.num_blocks,
+                        fp8_e5m2,
                         cu,
                     )
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_fp8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            k_cache_u8 as *const u8,
+                            v_cache_u8 as *const u8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            fp8_e5m2,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_fp8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            k_cache_u8 as *const u8,
+                            v_cache_u8 as *const u8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            fp8_e5m2,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                DType::INT8 => unsafe {
+                    let key_cache = self.key_cache as *mut i8;
+                    let value_cache = self.value_cache as *mut i8;
+                    rllm_kernels::cache_ops::cache_write_i8(
+                        key_cache,
+                        value_cache,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
+                        self.num_tokens,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.block_size,
+                        self.num_blocks,
+                        self.k_scale,
+                        self.v_scale,
+                        cu,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_i8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const i8,
+                            value_cache as *const i8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            self.k_scale,
+                            self.v_scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_i8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const i8,
+                            value_cache as *const i8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            self.k_scale,
+                            self.v_scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                other => {
+                    return Err(candle_core::Error::Msg(format!(
+                        "paged attention: unsupported KV cache dtype {other:?}"
+                    )));
                 }
             }
         }

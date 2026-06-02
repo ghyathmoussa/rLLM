@@ -411,9 +411,14 @@ int32_t rllm_cache_write_fp8_sync(
     return 0;
 }
 
-__device__ inline int8_t float_to_i8_fixed(float val) {
-    float clipped = fminf(1.0f, fmaxf(-1.0f, val));
-    return static_cast<int8_t>(nearbyintf(clipped * 127.0f));
+// Symmetric INT8 quantization with a per-tensor scale.
+// Mirrors vLLM's scaled_int8_quant: q = round(x / scale), clamped to [-127, 127].
+// Dequantization is the inverse: x ~= q * scale. A scale of 1.0 means the raw
+// value is rounded into [-127, 127] (uncalibrated default; see GpuKVCache).
+__device__ inline int8_t float_to_i8_scaled(float val, float scale) {
+    float q = nearbyintf(val / scale);
+    q = fminf(127.0f, fmaxf(-127.0f, q));
+    return static_cast<int8_t>(q);
 }
 
 __global__ void cache_write_i8_kernel(
@@ -426,7 +431,9 @@ __global__ void cache_write_i8_kernel(
     int64_t num_kv_heads,
     int64_t head_dim,
     int64_t block_size,
-    int64_t num_blocks) {
+    int64_t num_blocks,
+    float k_scale,
+    float v_scale) {
 
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = num_tokens * num_kv_heads * head_dim;
@@ -449,10 +456,10 @@ __global__ void cache_write_i8_kernel(
     int64_t cache_idx = ((block_id * num_kv_heads + kv_head) * head_dim + d) * block_size + block_offset;
 
     int64_t key_src = (token_idx * num_kv_heads + kv_head) * head_dim + d;
-    key_cache[cache_idx] = float_to_i8_fixed(__half2float(new_key[key_src]));
+    key_cache[cache_idx] = float_to_i8_scaled(__half2float(new_key[key_src]), k_scale);
 
     int64_t val_src = (token_idx * num_kv_heads + kv_head) * head_dim + d;
-    value_cache[cache_idx] = float_to_i8_fixed(__half2float(new_value[val_src]));
+    value_cache[cache_idx] = float_to_i8_scaled(__half2float(new_value[val_src]), v_scale);
 }
 
 int32_t rllm_cache_write_i8(
@@ -466,6 +473,8 @@ int32_t rllm_cache_write_i8(
     int64_t head_dim,
     int64_t block_size,
     int64_t num_blocks,
+    float k_scale,
+    float v_scale,
     cudaStream_t stream) {
 
     if (num_tokens <= 0) return 0;
@@ -474,7 +483,7 @@ int32_t rllm_cache_write_i8(
     int64_t blocks = (total + threads - 1) / threads;
     cache_write_i8_kernel<<<blocks, threads, 0, stream>>>(
         key_cache, value_cache, new_key, new_value, slot_mapping,
-        num_tokens, num_kv_heads, head_dim, block_size, num_blocks);
+        num_tokens, num_kv_heads, head_dim, block_size, num_blocks, k_scale, v_scale);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return static_cast<int32_t>(err);
     return 0;
@@ -490,11 +499,13 @@ int32_t rllm_cache_write_i8_sync(
     int64_t num_kv_heads,
     int64_t head_dim,
     int64_t block_size,
-    int64_t num_blocks) {
+    int64_t num_blocks,
+    float k_scale,
+    float v_scale) {
 
     int32_t rc = rllm_cache_write_i8(
         key_cache, value_cache, new_key, new_value, slot_mapping,
-        num_tokens, num_kv_heads, head_dim, block_size, num_blocks, 0);
+        num_tokens, num_kv_heads, head_dim, block_size, num_blocks, k_scale, v_scale, 0);
     if (rc != 0) return rc;
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) return static_cast<int32_t>(err);
