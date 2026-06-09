@@ -548,12 +548,12 @@ pub struct GpuKVCache {
     element_size: usize,
     /// Cache element data type.
     dtype: rllm_core::dtype::DType,
-    /// Per-tensor key dequantization scale for INT8 caches (`x ~= q * k_scale`).
-    /// Defaults to `1.0` (uncalibrated). Ignored for non-INT8 dtypes.
-    k_scale: f32,
-    /// Per-tensor value dequantization scale for INT8 caches (`x ~= q * v_scale`).
-    /// Defaults to `1.0` (uncalibrated). Ignored for non-INT8 dtypes.
-    v_scale: f32,
+    /// Per-layer key dequantization scale for INT8 caches (`x ~= q * k_scale`).
+    /// Defaults to `1.0` per layer (uncalibrated). Ignored for non-INT8 dtypes.
+    k_scales: Vec<f32>,
+    /// Per-layer value dequantization scale for INT8 caches (`x ~= q * v_scale`).
+    /// Defaults to `1.0` per layer (uncalibrated). Ignored for non-INT8 dtypes.
+    v_scales: Vec<f32>,
 }
 
 /// Warn once (process-wide) that the INT8 KV cache is running uncalibrated.
@@ -562,10 +562,10 @@ fn warn_uncalibrated_int8_kv_once() {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
         tracing::warn!(
-            "INT8 KV cache is using uncalibrated scales (k_scale=v_scale=1.0); \
+            "INT8 KV cache is using uncalibrated scales (k_scale=v_scale=1.0 per layer); \
              K/V activations are quantized as round(x) clamped to [-127, 127], \
              which clips magnitudes > 127. Provide calibrated k_scale/v_scale via \
-             GpuKVCache::set_kv_scales for accurate results."
+             GpuKVCache::set_all_kv_scales for accurate results."
         );
     });
 }
@@ -617,8 +617,8 @@ impl GpuKVCache {
             block_size,
             element_size,
             dtype,
-            k_scale: 1.0,
-            v_scale: 1.0,
+            k_scales: vec![1.0; num_layers],
+            v_scales: vec![1.0; num_layers],
         })
     }
 
@@ -647,28 +647,46 @@ impl GpuKVCache {
         self.dtype
     }
 
-    /// Per-tensor key dequantization scale for INT8 caches (`x ~= q * k_scale`).
+    /// Per-layer key dequantization scale for INT8 caches (`x ~= q * k_scale`).
     /// `1.0` when uncalibrated. Meaningless for non-INT8 dtypes.
-    pub fn k_scale(&self) -> f32 {
-        self.k_scale
+    pub fn k_scale(&self, layer: usize) -> f32 {
+        self.k_scales[layer]
     }
 
-    /// Per-tensor value dequantization scale for INT8 caches (`x ~= q * v_scale`).
+    /// Per-layer value dequantization scale for INT8 caches (`x ~= q * v_scale`).
     /// `1.0` when uncalibrated. Meaningless for non-INT8 dtypes.
-    pub fn v_scale(&self) -> f32 {
-        self.v_scale
+    pub fn v_scale(&self, layer: usize) -> f32 {
+        self.v_scales[layer]
     }
 
-    /// Set the INT8 key/value dequantization scales (e.g. from static
-    /// checkpoint calibration). Both must be finite and `> 0`; invalid values
-    /// are ignored and the previous scale is kept. The matching INT8 write and
-    /// read kernels consume these scales — keep them in sync.
-    pub fn set_kv_scales(&mut self, k_scale: f32, v_scale: f32) {
+    /// Set the INT8 key/value dequantization scales for a single layer.
+    /// Both must be finite and `> 0`; invalid values are ignored and the
+    /// previous scale is kept. The matching INT8 write and read kernels
+    /// consume these scales — keep them in sync.
+    pub fn set_kv_scales(&mut self, layer: usize, k_scale: f32, v_scale: f32) {
         if k_scale.is_finite() && k_scale > 0.0 {
-            self.k_scale = k_scale;
+            self.k_scales[layer] = k_scale;
         }
         if v_scale.is_finite() && v_scale > 0.0 {
-            self.v_scale = v_scale;
+            self.v_scales[layer] = v_scale;
+        }
+    }
+
+    /// Set the INT8 key/value dequantization scales for all layers at once.
+    /// Values must be finite and `> 0`; invalid entries are skipped.
+    /// The vectors must have length equal to the number of layers.
+    pub fn set_all_kv_scales(&mut self, k_scales: Vec<f32>, v_scales: Vec<f32>) {
+        if k_scales.len() != self.k_scales.len() || v_scales.len() != self.v_scales.len() {
+            tracing::warn!(
+                expected = self.k_scales.len(),
+                got_k = k_scales.len(),
+                got_v = v_scales.len(),
+                "ignoring set_all_kv_scales: length mismatch"
+            );
+            return;
+        }
+        for (i, (&k, &v)) in k_scales.iter().zip(v_scales.iter()).enumerate() {
+            self.set_kv_scales(i, k, v);
         }
     }
 
@@ -1057,22 +1075,38 @@ mod tests {
 
         #[test]
         fn kv_scales_default_to_one_and_set() {
-            let mut cache = GpuKVCache::new(4, 1, 1, 8, 4, rllm_core::dtype::DType::INT8)
+            let mut cache = GpuKVCache::new(4, 2, 1, 8, 4, rllm_core::dtype::DType::INT8)
                 .expect("GpuKVCache::new failed");
-            assert_eq!(cache.k_scale(), 1.0);
-            assert_eq!(cache.v_scale(), 1.0);
+            // Per-layer defaults
+            assert_eq!(cache.k_scale(0), 1.0);
+            assert_eq!(cache.v_scale(0), 1.0);
+            assert_eq!(cache.k_scale(1), 1.0);
+            assert_eq!(cache.v_scale(1), 1.0);
 
-            cache.set_kv_scales(0.05, 0.1);
-            assert_eq!(cache.k_scale(), 0.05);
-            assert_eq!(cache.v_scale(), 0.1);
+            // Set per-layer scales
+            cache.set_kv_scales(0, 0.05, 0.1);
+            assert_eq!(cache.k_scale(0), 0.05);
+            assert_eq!(cache.v_scale(0), 0.1);
+            assert_eq!(cache.k_scale(1), 1.0); // layer 1 unchanged
+
+            // Set all layers at once
+            cache.set_all_kv_scales(vec![0.02, 0.03], vec![0.04, 0.05]);
+            assert_eq!(cache.k_scale(0), 0.02);
+            assert_eq!(cache.v_scale(0), 0.04);
+            assert_eq!(cache.k_scale(1), 0.03);
+            assert_eq!(cache.v_scale(1), 0.05);
 
             // Invalid scales are rejected; previous values are kept.
-            cache.set_kv_scales(0.0, -1.0);
-            assert_eq!(cache.k_scale(), 0.05);
-            assert_eq!(cache.v_scale(), 0.1);
-            cache.set_kv_scales(f32::NAN, f32::INFINITY);
-            assert_eq!(cache.k_scale(), 0.05);
-            assert_eq!(cache.v_scale(), 0.1);
+            cache.set_kv_scales(0, 0.0, -1.0);
+            assert_eq!(cache.k_scale(0), 0.02);
+            assert_eq!(cache.v_scale(0), 0.04);
+            cache.set_kv_scales(1, f32::NAN, f32::INFINITY);
+            assert_eq!(cache.k_scale(1), 0.03);
+            assert_eq!(cache.v_scale(1), 0.05);
+
+            // Length mismatch is rejected
+            cache.set_all_kv_scales(vec![1.0], vec![1.0]);
+            assert_eq!(cache.k_scale(0), 0.02); // unchanged
         }
 
         #[test]

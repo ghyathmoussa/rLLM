@@ -21,9 +21,40 @@ pub struct WeightMap {
     pub device: Device,
 }
 
-/// Load weights from a local directory containing SafeTensors files.
 #[cfg(feature = "candle-backend")]
-pub fn load_weights_from_dir(model_dir: &Path, device: &Device) -> Result<WeightMap> {
+impl WeightMap {
+    /// Returns true when all weights have been consumed.
+    pub fn is_empty(&self) -> bool {
+        self.weights.is_empty() && self.quantized.is_empty()
+    }
+
+    /// Shrink HashMap capacity to match length, releasing excess allocation.
+    pub fn shrink_to_fit(&mut self) {
+        self.weights.shrink_to_fit();
+        self.quantized.shrink_to_fit();
+    }
+
+    /// Drain and return any unconsumed tensor names (for diagnostic logging).
+    pub fn unconsumed_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.weights.keys().cloned().collect();
+        names.extend(self.quantized.keys().cloned());
+        names.sort();
+        names
+    }
+}
+
+/// Load weights from a local directory containing SafeTensors files.
+///
+/// When `load_device` is `Some`, tensors are loaded onto that device instead of
+/// `serve_device`.  Used by the INT8 path to load weights to CPU first, avoiding
+/// a full-size BF16 allocation on the GPU.
+#[cfg(feature = "candle-backend")]
+pub fn load_weights_from_dir(
+    model_dir: &Path,
+    serve_device: &Device,
+    load_device: Option<&Device>,
+) -> Result<WeightMap> {
+    let effective_device = load_device.unwrap_or(serve_device);
     let shard_paths = find_safetensor_shards(model_dir)?;
     let mut weights = HashMap::new();
     let mut quantized = HashMap::new();
@@ -36,7 +67,7 @@ pub fn load_weights_from_dir(model_dir: &Path, device: &Device) -> Result<Weight
     );
     for shard_path in &shard_paths {
         tracing::debug!(shard = %shard_path.display(), "loading SafeTensors shard");
-        let (shard_weights, shard_quantized) = load_safetensors_shard(shard_path, device)
+        let (shard_weights, shard_quantized) = load_safetensors_shard(shard_path, effective_device)
             .with_context(|| format!("loading shard {}", shard_path.display()))?;
         tracing::debug!(
             shard = %shard_path.display(),
@@ -55,7 +86,7 @@ pub fn load_weights_from_dir(model_dir: &Path, device: &Device) -> Result<Weight
         shard_paths.len()
     );
 
-    Ok(WeightMap { weights, quantized, quant_schema, device: device.clone() })
+    Ok(WeightMap { weights, quantized, quant_schema, device: serve_device.clone() })
 }
 
 #[cfg(feature = "candle-backend")]
@@ -142,7 +173,7 @@ pub async fn load_weights_from_hub(model_id: &str, device: &Device) -> Result<We
     let device = device.clone();
     tokio::task::spawn_blocking(move || {
         let model_dir = download_model_from_hub(&model_id_owned)?;
-        load_weights_from_dir(&model_dir, &device)
+        load_weights_from_dir(&model_dir, &device, None)
     })
     .await?
 }
@@ -368,12 +399,16 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
 }
 
 /// Load weights with auto-detection of tied lm_head.
+///
+/// When `load_device` is `Some`, tensors are loaded onto that device instead of
+/// `serve_device` (used for INT8 CPU-first loading).
 #[cfg(feature = "candle-backend")]
 pub fn load_weights_with_tied_detection(
     model_dir: &Path,
-    device: &Device,
+    serve_device: &Device,
+    load_device: Option<&Device>,
 ) -> Result<(WeightMap, bool)> {
-    let weight_map = load_weights_from_dir(model_dir, device)?;
+    let weight_map = load_weights_from_dir(model_dir, serve_device, load_device)?;
     let has_lm_head = weight_map.weights.contains_key("lm_head.weight");
     let has_embed = weight_map.weights.contains_key("model.embed_tokens.weight");
     let tied = !has_lm_head && has_embed;

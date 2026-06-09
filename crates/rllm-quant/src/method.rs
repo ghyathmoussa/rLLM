@@ -72,6 +72,11 @@ pub fn factory_from_config(
         if schema.is_int8_weight_only() {
             return Ok(Box::new(Int8WeightOnlyFactory::new(schema.ignore.clone(), true)));
         }
+        if let Some(strategy) = schema.unsupported_int8_strategy() {
+            bail!(
+                "unsupported INT8 checkpoint weight strategy {strategy:?}; only per-channel INT8 weights are supported"
+            );
+        }
     }
 
     let Some(config) = config else {
@@ -120,5 +125,26 @@ mod tests {
         assert_eq!(linear.in_features(), 2);
         assert_eq!(linear.out_features(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn schema_factory_rejects_tensor_strategy_int8() {
+        let schema = QuantSchema {
+            quant_method: Some("compressed-tensors".into()),
+            format: Some("int-quantized".into()),
+            weight_num_bits: Some(8),
+            weight_strategy: Some("tensor".into()),
+            weight_symmetric: Some(true),
+            ignore: Vec::new(),
+        };
+
+        let err = match factory_from_config(None, Some(&schema)) {
+            Ok(_) => panic!("expected tensor-strategy INT8 schema to be rejected"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("unsupported INT8 checkpoint weight strategy"));
+        assert!(err.contains("tensor"));
+        assert!(err.contains("per-channel"));
     }
 }

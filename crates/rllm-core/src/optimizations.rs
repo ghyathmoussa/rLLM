@@ -332,7 +332,7 @@ pub struct CpuKvOffloadPlan {
 
 impl CpuKvOffloadPlan {
     pub fn capacity_blocks(&self) -> usize {
-        if self.block_size_bytes == 0 { 0 } else { self.pinned_bytes / self.block_size_bytes }
+        self.pinned_bytes.checked_div(self.block_size_bytes).unwrap_or(0)
     }
 }
 

@@ -59,6 +59,13 @@ impl Executor for UniProcExecutor {
             )?;
             let fitted_config = KVCacheConfig { num_blocks: fitted, spec: config.spec.clone() };
             self.worker.initialize_kv_cache(&fitted_config)?;
+
+            // Calibrate INT8 KV cache scales from a forward pass with
+            // representative tokens.  No-op when the cache dtype is not INT8.
+            if let Err(e) = self.worker.calibrate_kv_cache() {
+                tracing::warn!(error = %e, "KV cache calibration failed; using default scales");
+            }
+
             fitted
         } else {
             0

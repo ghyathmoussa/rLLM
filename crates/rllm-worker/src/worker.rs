@@ -360,6 +360,17 @@ impl Worker {
         Ok(())
     }
 
+    /// Run INT8 KV cache scale calibration.
+    ///
+    /// Runs a forward pass with representative tokens, measures per-layer K/V
+    /// activation absmax, and sets `k_scale`/`v_scale` on the GPU KV cache.
+    /// Only effective when the KV cache dtype is INT8; no-op otherwise.
+    ///
+    /// Must be called after `initialize_kv_cache()`.
+    pub fn calibrate_kv_cache(&mut self) -> Result<()> {
+        crate::calibration::calibrate_kv_cache(self)
+    }
+
     /// Warm up kernels with dummy batches of common sizes and capture CUDA graphs.
     pub fn warm_up(&mut self) -> Result<()> {
         // CUDA graph capture is not yet implemented (it depends on the paged
@@ -473,6 +484,17 @@ impl Worker {
     /// Get a reference to the GPU KV cache, if allocated.
     pub fn gpu_kv_cache(&self) -> Option<&GpuKVCache> {
         self.gpu_kv_cache.as_ref()
+    }
+
+    /// Get a mutable reference to the GPU KV cache, if allocated.
+    pub fn gpu_kv_cache_mut(&mut self) -> Option<&mut GpuKVCache> {
+        self.gpu_kv_cache.as_mut()
+    }
+
+    /// Get a reference to the candle model, if loaded.
+    #[cfg(feature = "candle-backend")]
+    pub fn candle_model(&self) -> Option<&CandleModelRunner> {
+        self.candle_model.as_ref()
     }
 
     /// Get the Candle device from the loaded model.

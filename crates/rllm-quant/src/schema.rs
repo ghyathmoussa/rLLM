@@ -37,15 +37,24 @@ impl QuantSchema {
     }
 
     pub fn is_int8_weight_only(&self) -> bool {
-        let is_compressed_tensors = self
-            .quant_method
-            .as_deref()
-            .is_some_and(|method| method.eq_ignore_ascii_case("compressed-tensors"))
-            || self.format.as_deref().is_some_and(|format| format == "int-quantized");
-        is_compressed_tensors
+        self.is_compressed_tensors_int8()
             && self.weight_num_bits.unwrap_or(8) == 8
             && self.weight_strategy.as_deref().map(|strategy| strategy == "channel").unwrap_or(true)
             && self.weight_symmetric.unwrap_or(true)
+    }
+
+    pub fn is_compressed_tensors_int8(&self) -> bool {
+        self.quant_method
+            .as_deref()
+            .is_some_and(|method| method.eq_ignore_ascii_case("compressed-tensors"))
+            || self.format.as_deref().is_some_and(|format| format == "int-quantized")
+    }
+
+    pub fn unsupported_int8_strategy(&self) -> Option<&str> {
+        if !self.is_compressed_tensors_int8() || self.weight_num_bits.unwrap_or(8) != 8 {
+            return None;
+        }
+        self.weight_strategy.as_deref().filter(|strategy| *strategy != "channel")
     }
 
     pub fn to_core_config(&self) -> Option<QuantizationConfig> {

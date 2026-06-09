@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 #[cfg(feature = "candle-backend")]
 use candle_core::Device;
 #[cfg(feature = "candle-backend")]
-use rllm_core::config::ModelConfig;
+use rllm_core::config::{ModelConfig, QuantizationKind};
 
 #[cfg(feature = "candle-backend")]
 use crate::hf_config;
@@ -57,15 +57,34 @@ impl ModelRunner {
 
         let device =
             Device::cuda_if_available(0).map_err(|e| anyhow::anyhow!("device init: {e}"))?;
+
+        // When INT8 quantization is active, load weights to CPU first to avoid
+        // allocating full-size BF16 tensors on GPU.  The INT8 quantization
+        // factory will keep quantized weights on the host (Vec<i8>) and upload
+        // them to GPU lazily on the first forward pass via OnceLock.
+        let is_int8 =
+            config.quantization.as_ref().is_some_and(|q| q.kind == QuantizationKind::Int8);
+        let load_device = if is_int8 && matches!(device, Device::Cuda(_)) {
+            tracing::info!(
+                model_dir = %model_dir.display(),
+                "INT8 quantization active — loading weights to CPU first to save GPU memory"
+            );
+            Some(&Device::Cpu)
+        } else {
+            None
+        };
+
         tracing::info!(
             model_dir = %model_dir.display(),
             architecture = %config.architecture,
             device = ?device,
+            load_to_cpu = load_device.is_some(),
             "loading model"
         );
 
-        let (weight_map, _tied) = loader::load_weights_with_tied_detection(model_dir, &device)
-            .context("loading weights")?;
+        let (weight_map, _tied) =
+            loader::load_weights_with_tied_detection(model_dir, &device, load_device)
+                .context("loading weights")?;
         tracing::debug!(
             model_dir = %model_dir.display(),
             tensors = weight_map.weights.len(),

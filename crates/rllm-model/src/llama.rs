@@ -162,11 +162,19 @@ impl LlamaModel {
             factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())
                 .context("building quantization method factory")?;
 
+        // When INT8 quantization is active, weights may have been loaded to CPU
+        // to avoid allocating full BF16 tensors on GPU.  Non-quantized tensors
+        // (embeddings, layernorms) must be moved to the target device before use.
+        let to_device = |t: Tensor| -> candle_core::Result<Tensor> {
+            if t.device().is_cpu() && !device.is_cpu() { t.to_device(device) } else { Ok(t) }
+        };
+
         // Embedding
         let embed_weight = weights
             .weights
             .remove("model.embed_tokens.weight")
             .ok_or_else(|| anyhow::anyhow!("missing model.embed_tokens.weight"))?;
+        let embed_weight = to_device(embed_weight).map_err(|e| anyhow::anyhow!("{e}"))?;
         let embed_tokens = Linear::new(embed_weight);
 
         // LM head - may be tied with embedding. A standalone head can be
@@ -245,12 +253,14 @@ impl LlamaModel {
                 .weights
                 .remove(&format!("{prefix}.input_layernorm.weight"))
                 .ok_or_else(|| anyhow::anyhow!("missing {prefix}.input_layernorm.weight"))?;
+            let input_ln_w = to_device(input_ln_w).map_err(|e| anyhow::anyhow!("{e}"))?;
             let post_attn_ln_w = weights
                 .weights
                 .remove(&format!("{prefix}.post_attention_layernorm.weight"))
                 .ok_or_else(|| {
                     anyhow::anyhow!("missing {prefix}.post_attention_layernorm.weight")
                 })?;
+            let post_attn_ln_w = to_device(post_attn_ln_w).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             layers.push(LlamaDecoderLayer::new(
                 attn,
@@ -265,7 +275,31 @@ impl LlamaModel {
             .weights
             .remove("model.norm.weight")
             .ok_or_else(|| anyhow::anyhow!("missing model.norm.weight"))?;
+        let final_norm_w = to_device(final_norm_w).map_err(|e| anyhow::anyhow!("{e}"))?;
         let norm = RmsNorm::new(final_norm_w, rms_norm_eps);
+
+        // Release any remaining weight allocations before building the model.
+        // After this point, only the tensors inside layers/norm/embed/lm_head
+        // should be alive.  Log unconsumed names as a diagnostic.
+        weights.shrink_to_fit();
+        if !weights.is_empty() {
+            tracing::warn!(
+                unconsumed = ?weights.unconsumed_names(),
+                "some weights were not consumed during model construction"
+            );
+        }
+        // Log if we performed CPU→GPU transfer for non-quantized weights
+        // (happens when INT8 quantization is active with CUDA).
+        let is_int8 = config
+            .quantization
+            .as_ref()
+            .is_some_and(|q| q.kind == rllm_core::config::QuantizationKind::Int8);
+        if is_int8 && !device.is_cpu() {
+            tracing::info!(
+                "transferred non-quantized weights from CPU to GPU after INT8 quantization"
+            );
+        }
+        drop(weights);
 
         // Rotary embeddings
         let rope = RotaryEmbedding::new(head_dim, config.max_model_len, config.rope_theta, device)
