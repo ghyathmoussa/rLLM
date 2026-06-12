@@ -13,20 +13,15 @@ use rllm_core::{ids::RequestId, request::InferenceRequest};
 /// - `FixedSize`: Wait until `batch_size` requests are accumulated.
 /// - `Timeout`: Send whatever is available after `max_latency` elapses.
 /// - `Adaptive`: Dynamically adjust batch size based on throughput.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum BatchingStrategy {
     /// Wait for a fixed number of requests before scheduling.
     FixedSize { batch_size: usize },
     /// Send requests after a timeout, up to a max batch size.
     Timeout { max_batch_size: usize, max_latency: Duration },
     /// Send requests immediately (no batching).
+    #[default]
     Immediate,
-}
-
-impl Default for BatchingStrategy {
-    fn default() -> Self {
-        Self::Immediate
-    }
 }
 
 /// A queue that holds pending inference requests before scheduling.

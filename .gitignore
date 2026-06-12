@@ -22,4 +22,5 @@ target
 .env
 .env.*
 .venv
-
+graphify-out/
+.vscode/

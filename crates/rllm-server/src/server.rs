@@ -41,6 +41,10 @@ struct ModelRuntime {
     model_dir: String,
     architecture: String,
     device: String,
+    quantization: Option<String>,
+    quant_bits: Option<usize>,
+    kv_cache_dtype: String,
+    quantized_layer_count: usize,
 }
 
 /// Application state shared across handlers.
@@ -197,7 +201,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.max_model_len = max_len;
     }
     model_config.dtype = parse_dtype(&args.dtype).unwrap_or(model_config.dtype);
-    model_config.quantization = parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size);
+    if !args.quantization.eq_ignore_ascii_case("auto") {
+        model_config.quantization =
+            parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size)?;
+    }
 
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
     let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
@@ -220,7 +227,11 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         .context("initializing executor and loading model weights")?;
     tracing::info!(num_gpu_blocks, "KV cache allocated; sizing scheduler to match");
 
-    // Size the scheduler's block manager to the blocks actually allocated.
+    let quantized_layer_count = executor.worker().quantized_layer_count();
+    let quantization = model_config.quantization.as_ref().map(|q| format!("{:?}", q.kind));
+    let quant_bits = model_config.quantization.as_ref().and_then(|q| q.bits);
+    let kv_cache_dtype = format!("{:?}", cache_config.cache_dtype);
+
     let scheduler =
         Scheduler::new(scheduler_config, &cache_config, num_gpu_blocks, model_config.max_model_len);
 
@@ -244,6 +255,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_dir: model_dir.to_string_lossy().to_string(),
         architecture,
         device,
+        quantization,
+        quant_bits,
+        kv_cache_dtype,
+        quantized_layer_count,
     })
 }
 
@@ -272,10 +287,14 @@ fn parse_dtype(dtype: &str) -> Option<DType> {
     }
 }
 
-fn parse_quantization(quant_str: &str, bits: Option<usize>, group_size: Option<usize>) -> Option<rllm_core::config::QuantizationConfig> {
+fn parse_quantization(
+    quant_str: &str,
+    bits: Option<usize>,
+    group_size: Option<usize>,
+) -> Result<Option<rllm_core::config::QuantizationConfig>> {
     use rllm_core::config::{QuantizationConfig, QuantizationKind};
     let kind = match quant_str.to_lowercase().as_str() {
-        "none" => return None,
+        "none" => return Ok(None),
         "fp8" => QuantizationKind::FP8,
         "mxfp8" => QuantizationKind::MXFP8,
         "mxfp4" => QuantizationKind::MXFP4,
@@ -288,13 +307,12 @@ fn parse_quantization(quant_str: &str, bits: Option<usize>, group_size: Option<u
         "compressed-tensors" | "compressed_tensors" => QuantizationKind::CompressedTensors,
         "modelopt" => QuantizationKind::ModelOpt,
         "torchao" => QuantizationKind::TorchAO,
-        _ => return None,
+        _ => anyhow::bail!("unsupported quantization format: {quant_str}"),
     };
-    Some(QuantizationConfig {
-        kind,
-        group_size,
-        bits,
-    })
+    if kind == QuantizationKind::Int8 && bits != Some(8) {
+        anyhow::bail!("INT8 quantization requires --quant-bits 8");
+    }
+    Ok(Some(QuantizationConfig { kind, group_size, bits }))
 }
 
 fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
@@ -303,9 +321,11 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
         "bf16" => rllm_core::dtype::DType::BF16,
         "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
         _ => {
             if let Some(ref q) = model_config.quantization {
-                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
                 plan.kv_cache_dtype
             } else {
                 model_config.dtype
@@ -323,6 +343,32 @@ fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
         enable_prefix_caching: args.enable_prefix_caching,
         prefix_hash_algorithm: PrefixHashAlgorithm::Sha256Cbor,
         sliding_window: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rllm_core::config::QuantizationKind;
+
+    use super::*;
+
+    #[test]
+    fn parse_int8_quantization_requires_eight_bits() {
+        let missing_bits = parse_quantization("int8", None, None).unwrap_err().to_string();
+        assert!(missing_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let wrong_bits = parse_quantization("int8", Some(4), None).unwrap_err().to_string();
+        assert!(wrong_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let config = parse_quantization("int8", Some(8), None).unwrap().unwrap();
+        assert_eq!(config.kind, QuantizationKind::Int8);
+        assert_eq!(config.bits, Some(8));
+    }
+
+    #[test]
+    fn parse_unknown_quantization_fails() {
+        let err = parse_quantization("made-up-format", None, None).unwrap_err().to_string();
+        assert!(err.contains("unsupported quantization format"));
     }
 }
 
@@ -345,9 +391,11 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
         "bf16" => rllm_core::dtype::DType::BF16,
         "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
         "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
         _ => {
             if let Some(ref q) = model_config.quantization {
-                let plan = rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
                 plan.kv_cache_dtype
             } else {
                 model_config.dtype
@@ -428,6 +476,10 @@ struct DebugModelResponse {
     model_dir: Option<String>,
     architecture: Option<String>,
     device: Option<String>,
+    quantization: Option<String>,
+    bits: Option<usize>,
+    kv_cache_dtype: Option<String>,
+    quantized_layer_count: Option<usize>,
 }
 
 async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelResponse> {
@@ -435,9 +487,13 @@ async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelRe
     Json(DebugModelResponse {
         model: state.model_name.clone(),
         loaded: runtime.is_some(),
-        model_dir: Some(state.model_name),
+        model_dir: runtime.map(|rt| rt.model_dir.clone()),
         architecture: runtime.map(|rt| rt.architecture.clone()),
         device: runtime.map(|rt| rt.device.clone()),
+        quantization: runtime.and_then(|rt| rt.quantization.clone()),
+        bits: runtime.and_then(|rt| rt.quant_bits),
+        kv_cache_dtype: runtime.map(|rt| rt.kv_cache_dtype.clone()),
+        quantized_layer_count: runtime.map(|rt| rt.quantized_layer_count),
     })
 }
 
@@ -718,7 +774,6 @@ struct EngineCompletion {
     finish_reason: String,
     generation_time: f64,
 }
-
 
 async fn run_text_completion(
     runtime: ModelRuntime,

@@ -9,6 +9,10 @@ use rllm_core::config::ModelConfig;
 pub trait Model: Send + Sync {
     fn config(&self) -> &ModelConfig;
 
+    fn quantized_layer_count(&self) -> usize {
+        0
+    }
+
     /// Legacy forward pass using per-request Candle KV cache tensors.
     fn forward(
         &self,
@@ -40,6 +44,10 @@ pub trait Model: Send + Sync {
 #[cfg(not(feature = "candle-backend"))]
 pub trait Model: Send + Sync {
     fn config(&self) -> &ModelConfig;
+
+    fn quantized_layer_count(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(feature = "candle-backend")]

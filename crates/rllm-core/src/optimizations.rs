@@ -20,7 +20,6 @@ pub enum QuantizedWeightFormat {
     Unquantized,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuantizationPlan {
     pub format: QuantizedWeightFormat,
@@ -80,17 +79,13 @@ impl QuantizationPlan {
                 p
             }
             QuantizationKind::Gguf => {
-                let mut p = Self::default();
-                p.format = QuantizedWeightFormat::Gguf;
-                p
+                Self { format: QuantizedWeightFormat::Gguf, ..Self::default() }
             }
             QuantizationKind::CompressedTensors => Self::compressed_tensors(),
             QuantizationKind::ModelOpt => Self::model_opt(),
             QuantizationKind::TorchAO => Self::torch_ao(),
             QuantizationKind::BitsAndBytes => {
-                let mut p = Self::default();
-                p.format = QuantizedWeightFormat::BitsAndBytes;
-                p
+                Self { format: QuantizedWeightFormat::BitsAndBytes, ..Self::default() }
             }
         };
         plan.validate()?;
@@ -143,7 +138,7 @@ impl QuantizationPlan {
             bits: Some(8),
             group_size: None,
             activation_dtype: DType::F16,
-            kv_cache_dtype: DType::F16,
+            kv_cache_dtype: DType::INT8,
         }
     }
 
@@ -236,11 +231,15 @@ impl QuantizationPlan {
                     return Err("INT4 requires 4 bits".into());
                 }
             }
-            QuantizedWeightFormat::Gguf | QuantizedWeightFormat::BitsAndBytes | QuantizedWeightFormat::CompressedTensors | QuantizedWeightFormat::ModelOpt | QuantizedWeightFormat::TorchAo | QuantizedWeightFormat::Unquantized => {}
+            QuantizedWeightFormat::Gguf
+            | QuantizedWeightFormat::BitsAndBytes
+            | QuantizedWeightFormat::CompressedTensors
+            | QuantizedWeightFormat::ModelOpt
+            | QuantizedWeightFormat::TorchAo
+            | QuantizedWeightFormat::Unquantized => {}
         }
         Ok(())
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,7 +332,7 @@ pub struct CpuKvOffloadPlan {
 
 impl CpuKvOffloadPlan {
     pub fn capacity_blocks(&self) -> usize {
-        if self.block_size_bytes == 0 { 0 } else { self.pinned_bytes / self.block_size_bytes }
+        self.pinned_bytes.checked_div(self.block_size_bytes).unwrap_or(0)
     }
 }
 
@@ -363,12 +362,12 @@ mod tests {
         assert!(QuantizationPlan::mxfp4().validate().is_ok());
         assert!(QuantizationPlan::nvfp4().validate().is_ok());
         assert!(QuantizationPlan::int8().validate().is_ok());
+        assert_eq!(QuantizationPlan::int8().kv_cache_dtype, DType::INT8);
         assert!(QuantizationPlan::int4().validate().is_ok());
         assert!(QuantizationPlan::compressed_tensors().validate().is_ok());
         assert!(QuantizationPlan::model_opt().validate().is_ok());
         assert!(QuantizationPlan::torch_ao().validate().is_ok());
     }
-
 
     #[test]
     fn cpu_offload_capacity_uses_whole_blocks() {

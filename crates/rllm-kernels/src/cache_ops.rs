@@ -75,6 +75,36 @@ mod ffi {
             is_e5m2: c_int,
         ) -> c_int;
 
+        pub fn rllm_cache_write_i8(
+            key_cache: *mut i8,
+            value_cache: *mut i8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+            k_scale: f32,
+            v_scale: f32,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_cache_write_i8_sync(
+            key_cache: *mut i8,
+            value_cache: *mut i8,
+            new_key: *const u16,
+            new_value: *const u16,
+            slot_mapping: *const i64,
+            num_tokens: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            num_blocks: i64,
+            k_scale: f32,
+            v_scale: f32,
+        ) -> c_int;
 
         // Cache block copy
         pub fn rllm_cache_block_copy(
@@ -101,14 +131,33 @@ mod ffi {
         pub fn rllm_gpu_free(ptr: *mut std::ffi::c_void) -> c_int;
         pub fn rllm_gpu_alloc_host(ptr: *mut *mut std::ffi::c_void, nbytes: i64) -> c_int;
         pub fn rllm_gpu_free_host(ptr: *mut std::ffi::c_void) -> c_int;
-        pub fn rllm_gpu_memcpy_to_device(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
-        pub fn rllm_gpu_memcpy_to_host(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
+        pub fn rllm_gpu_memcpy_to_device(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
+        pub fn rllm_gpu_memcpy_to_host(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
     }
 }
 
 #[cfg(has_cuda)]
 fn check(rc: i32) -> Result<(), CudaKernelError> {
     if rc == 0 { Ok(()) } else { Err(CudaKernelError::KernelError { code: rc }) }
+}
+
+/// CPU reference for the INT8 KV cache quantization, mirroring the CUDA
+/// `float_to_i8_scaled` device function used by `cache_write_i8`.
+///
+/// Symmetric per-tensor quantization: `q = round(x / scale)` clamped to
+/// `[-127, 127]`. Dequantization is `q * scale`. Used as a numeric oracle in
+/// tests so the algorithm is verifiable without a GPU.
+pub fn quantize_kv_i8_reference(val: f32, scale: f32) -> i8 {
+    let q = (val / scale).round();
+    q.clamp(-127.0, 127.0) as i8
 }
 
 // ── Cache Write ───────────────────────────────────────────────────────────
@@ -268,6 +317,96 @@ pub unsafe fn cache_write_fp8_sync(
     check(rc)
 }
 
+/// Launch async cache write (INT8): writes new K/V into physical cache, converting from FP16.
+///
+/// Uses symmetric per-tensor quantization `round(x / scale)` clamped to
+/// `[-127, 127]` (mirrors vLLM's `scaled_int8_quant`), storing one byte per
+/// scalar. `k_scale`/`v_scale` are the key/value dequantization scales; pass the
+/// values carried by [`GpuKVCache`] (default `1.0` until calibration lands — see
+/// [`GpuKVCache::k_scale`]). The matching paged-attention INT8 read kernel
+/// (Layer 2) must dequantize with the same scales.
+///
+/// # Safety
+/// - All pointers must be valid device pointers.
+/// - `slot_mapping` must have `num_tokens` entries.
+/// - `new_key` and `new_value` must have `num_tokens * num_kv_heads * head_dim` elements.
+/// - `key_cache` and `value_cache` must be large enough for the layout.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_i8(
+    key_cache: *mut i8,
+    value_cache: *mut i8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+    k_scale: f32,
+    v_scale: f32,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_i8(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+            k_scale,
+            v_scale,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous cache write for testing (INT8). See [`cache_write_i8`] for the
+/// quantization scheme and scale semantics.
+///
+/// # Safety
+/// Same invariants as [`cache_write_i8`].
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn cache_write_i8_sync(
+    key_cache: *mut i8,
+    value_cache: *mut i8,
+    new_key: *const u16,
+    new_value: *const u16,
+    slot_mapping: *const i64,
+    num_tokens: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    num_blocks: i64,
+    k_scale: f32,
+    v_scale: f32,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_cache_write_i8_sync(
+            key_cache,
+            value_cache,
+            new_key,
+            new_value,
+            slot_mapping,
+            num_tokens,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            num_blocks,
+            k_scale,
+            v_scale,
+        )
+    };
+    check(rc)
+}
 
 // ── Cache Block Copy ──────────────────────────────────────────────────────
 
@@ -348,7 +487,11 @@ pub unsafe fn gpu_free(ptr: *mut u8) -> Result<(), CudaKernelError> {
 /// - `dst` must be a valid device pointer.
 /// - `src` must be a valid host pointer.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_to_device(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_to_device(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_to_device(
             dst as *mut std::ffi::c_void,
@@ -365,7 +508,11 @@ pub unsafe fn gpu_memcpy_to_device(dst: *mut u8, src: *const u8, nbytes: usize) 
 /// - `dst` must be a valid host pointer.
 /// - `src` must be a valid device pointer.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_to_host(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_to_host(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_to_host(
             dst as *mut std::ffi::c_void,
@@ -401,6 +548,26 @@ pub struct GpuKVCache {
     element_size: usize,
     /// Cache element data type.
     dtype: rllm_core::dtype::DType,
+    /// Per-layer key dequantization scale for INT8 caches (`x ~= q * k_scale`).
+    /// Defaults to `1.0` per layer (uncalibrated). Ignored for non-INT8 dtypes.
+    k_scales: Vec<f32>,
+    /// Per-layer value dequantization scale for INT8 caches (`x ~= q * v_scale`).
+    /// Defaults to `1.0` per layer (uncalibrated). Ignored for non-INT8 dtypes.
+    v_scales: Vec<f32>,
+}
+
+/// Warn once (process-wide) that the INT8 KV cache is running uncalibrated.
+#[cfg(has_cuda)]
+fn warn_uncalibrated_int8_kv_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "INT8 KV cache is using uncalibrated scales (k_scale=v_scale=1.0 per layer); \
+             K/V activations are quantized as round(x) clamped to [-127, 127], \
+             which clips magnitudes > 127. Provide calibrated k_scale/v_scale via \
+             GpuKVCache::set_all_kv_scales for accurate results."
+        );
+    });
 }
 
 unsafe impl Send for GpuKVCache {}
@@ -435,6 +602,12 @@ impl GpuKVCache {
             }
         }
 
+        // INT8 caches start with uncalibrated unit scales (vLLM's default). Warn
+        // once so the operator knows the cache is lossy until scales are set.
+        if dtype == rllm_core::dtype::DType::INT8 {
+            warn_uncalibrated_int8_kv_once();
+        }
+
         Ok(Self {
             layer_ptrs,
             layer_sizes,
@@ -444,9 +617,10 @@ impl GpuKVCache {
             block_size,
             element_size,
             dtype,
+            k_scales: vec![1.0; num_layers],
+            v_scales: vec![1.0; num_layers],
         })
     }
-
 
     /// Get the key tensor device pointer for a layer.
     pub fn key_ptr(&self, layer: usize) -> *const u8 {
@@ -473,6 +647,48 @@ impl GpuKVCache {
         self.dtype
     }
 
+    /// Per-layer key dequantization scale for INT8 caches (`x ~= q * k_scale`).
+    /// `1.0` when uncalibrated. Meaningless for non-INT8 dtypes.
+    pub fn k_scale(&self, layer: usize) -> f32 {
+        self.k_scales[layer]
+    }
+
+    /// Per-layer value dequantization scale for INT8 caches (`x ~= q * v_scale`).
+    /// `1.0` when uncalibrated. Meaningless for non-INT8 dtypes.
+    pub fn v_scale(&self, layer: usize) -> f32 {
+        self.v_scales[layer]
+    }
+
+    /// Set the INT8 key/value dequantization scales for a single layer.
+    /// Both must be finite and `> 0`; invalid values are ignored and the
+    /// previous scale is kept. The matching INT8 write and read kernels
+    /// consume these scales — keep them in sync.
+    pub fn set_kv_scales(&mut self, layer: usize, k_scale: f32, v_scale: f32) {
+        if k_scale.is_finite() && k_scale > 0.0 {
+            self.k_scales[layer] = k_scale;
+        }
+        if v_scale.is_finite() && v_scale > 0.0 {
+            self.v_scales[layer] = v_scale;
+        }
+    }
+
+    /// Set the INT8 key/value dequantization scales for all layers at once.
+    /// Values must be finite and `> 0`; invalid entries are skipped.
+    /// The vectors must have length equal to the number of layers.
+    pub fn set_all_kv_scales(&mut self, k_scales: Vec<f32>, v_scales: Vec<f32>) {
+        if k_scales.len() != self.k_scales.len() || v_scales.len() != self.v_scales.len() {
+            tracing::warn!(
+                expected = self.k_scales.len(),
+                got_k = k_scales.len(),
+                got_v = v_scales.len(),
+                "ignoring set_all_kv_scales: length mismatch"
+            );
+            return;
+        }
+        for (i, (&k, &v)) in k_scales.iter().zip(v_scales.iter()).enumerate() {
+            self.set_kv_scales(i, k, v);
+        }
+    }
 
     /// Number of layers.
     pub fn num_layers(&self) -> usize {
@@ -498,7 +714,6 @@ impl GpuKVCache {
     pub fn element_size(&self) -> usize {
         self.element_size
     }
-
 
     /// Compute slot mapping for a list of (block_id, block_offset) pairs.
     ///
@@ -602,6 +817,42 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_i8(
+        _key_cache: *mut i8,
+        _value_cache: *mut i8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+        _k_scale: f32,
+        _v_scale: f32,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn cache_write_i8_sync(
+        _key_cache: *mut i8,
+        _value_cache: *mut i8,
+        _new_key: *const u16,
+        _new_value: *const u16,
+        _slot_mapping: *const i64,
+        _num_tokens: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _num_blocks: i64,
+        _k_scale: f32,
+        _v_scale: f32,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
 
     pub fn cache_block_copy(
         _src: *const u8,
@@ -630,11 +881,19 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
-    pub fn gpu_memcpy_to_device(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+    pub fn gpu_memcpy_to_device(
+        _dst: *mut u8,
+        _src: *const u8,
+        _nbytes: usize,
+    ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
 
-    pub fn gpu_memcpy_to_host(_dst: *mut u8, _src: *const u8, _nbytes: usize) -> Result<(), CudaKernelError> {
+    pub fn gpu_memcpy_to_host(
+        _dst: *mut u8,
+        _src: *const u8,
+        _nbytes: usize,
+    ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
 }
@@ -666,6 +925,26 @@ mod tests {
         }
 
         #[test]
+        fn cache_write_i8_returns_not_available() {
+            let result = cache_write_i8(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                1.0,
+                0,
+            );
+            assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
+        }
+
+        #[test]
         fn cache_block_copy_returns_not_available() {
             let result = cache_block_copy(std::ptr::null(), std::ptr::null_mut(), 0, 0, 0);
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
@@ -676,6 +955,33 @@ mod tests {
             let result = cache_zero(std::ptr::null_mut(), 0, 0);
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
         }
+    }
+
+    // Pure-CPU coverage of the INT8 KV quantization math (the oracle the GPU
+    // kernel mirrors). Runs on every platform regardless of CUDA.
+    #[test]
+    fn quantize_kv_i8_unit_scale_rounds_and_clamps() {
+        // Unit scale (uncalibrated default): round-to-nearest, clamp to ±127.
+        assert_eq!(quantize_kv_i8_reference(0.0, 1.0), 0);
+        assert_eq!(quantize_kv_i8_reference(0.4, 1.0), 0);
+        assert_eq!(quantize_kv_i8_reference(0.6, 1.0), 1);
+        assert_eq!(quantize_kv_i8_reference(-0.6, 1.0), -1);
+        assert_eq!(quantize_kv_i8_reference(200.0, 1.0), 127);
+        assert_eq!(quantize_kv_i8_reference(-200.0, 1.0), -127);
+    }
+
+    #[test]
+    fn quantize_kv_i8_with_scale_round_trips() {
+        // A calibrated scale maps the tensor range into [-127, 127] with low
+        // error: dequant(quant(x)) is within half a step (scale/2).
+        let scale = 0.05_f32; // max magnitude ~6.35
+        for &x in &[-6.0_f32, -1.3, -0.02, 0.0, 0.02, 1.3, 6.0] {
+            let q = quantize_kv_i8_reference(x, scale);
+            let dq = q as f32 * scale;
+            assert!((dq - x).abs() <= scale / 2.0 + 1e-6, "x={x} q={q} dq={dq}");
+        }
+        // Out-of-range still clamps at the int8 limit.
+        assert_eq!(quantize_kv_i8_reference(100.0, scale), 127);
     }
 
     #[cfg(has_cuda)]
@@ -691,11 +997,8 @@ mod tests {
             // Verify zeroed — copy to host
             let mut host_buf = vec![0u8; nbytes];
             unsafe {
-                gpu_memcpy_to_host(
-                    host_buf.as_mut_ptr(),
-                    ptr,
-                    nbytes,
-                ).expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(host_buf.as_mut_ptr(), ptr, nbytes)
+                    .expect("gpu_memcpy_to_host failed");
             }
             assert!(host_buf.iter().all(|&b| b == 0));
             unsafe { gpu_free(ptr).expect("gpu_free failed") };
@@ -723,16 +1026,10 @@ mod tests {
             let mut src_host = vec![0u8; total];
             let mut dst_host = vec![0u8; total];
             unsafe {
-                gpu_memcpy_to_host(
-                    src_host.as_mut_ptr(),
-                    src,
-                    total,
-                ).expect("gpu_memcpy_to_host failed");
-                gpu_memcpy_to_host(
-                    dst_host.as_mut_ptr(),
-                    dst,
-                    total,
-                ).expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(src_host.as_mut_ptr(), src, total)
+                    .expect("gpu_memcpy_to_host failed");
+                gpu_memcpy_to_host(dst_host.as_mut_ptr(), dst, total)
+                    .expect("gpu_memcpy_to_host failed");
             }
             assert_eq!(src_host, dst_host);
 
@@ -764,8 +1061,8 @@ mod tests {
 
         #[test]
         fn slot_mapping_computation() {
-            let cache = GpuKVCache::new(10, 1, 4, 64, 16, rllm_core::dtype::DType::F16).expect("GpuKVCache::new failed");
-
+            let cache = GpuKVCache::new(10, 1, 4, 64, 16, rllm_core::dtype::DType::F16)
+                .expect("GpuKVCache::new failed");
 
             let slots = cache.compute_slots(&[
                 (BlockId(0), 0),
@@ -774,6 +1071,157 @@ mod tests {
                 (BlockId(5), 15),
             ]);
             assert_eq!(slots, vec![0, 1, 16, 95]);
+        }
+
+        #[test]
+        fn kv_scales_default_to_one_and_set() {
+            let mut cache = GpuKVCache::new(4, 2, 1, 8, 4, rllm_core::dtype::DType::INT8)
+                .expect("GpuKVCache::new failed");
+            // Per-layer defaults
+            assert_eq!(cache.k_scale(0), 1.0);
+            assert_eq!(cache.v_scale(0), 1.0);
+            assert_eq!(cache.k_scale(1), 1.0);
+            assert_eq!(cache.v_scale(1), 1.0);
+
+            // Set per-layer scales
+            cache.set_kv_scales(0, 0.05, 0.1);
+            assert_eq!(cache.k_scale(0), 0.05);
+            assert_eq!(cache.v_scale(0), 0.1);
+            assert_eq!(cache.k_scale(1), 1.0); // layer 1 unchanged
+
+            // Set all layers at once
+            cache.set_all_kv_scales(vec![0.02, 0.03], vec![0.04, 0.05]);
+            assert_eq!(cache.k_scale(0), 0.02);
+            assert_eq!(cache.v_scale(0), 0.04);
+            assert_eq!(cache.k_scale(1), 0.03);
+            assert_eq!(cache.v_scale(1), 0.05);
+
+            // Invalid scales are rejected; previous values are kept.
+            cache.set_kv_scales(0, 0.0, -1.0);
+            assert_eq!(cache.k_scale(0), 0.02);
+            assert_eq!(cache.v_scale(0), 0.04);
+            cache.set_kv_scales(1, f32::NAN, f32::INFINITY);
+            assert_eq!(cache.k_scale(1), 0.03);
+            assert_eq!(cache.v_scale(1), 0.05);
+
+            // Length mismatch is rejected
+            cache.set_all_kv_scales(vec![1.0], vec![1.0]);
+            assert_eq!(cache.k_scale(0), 0.02); // unchanged
+        }
+
+        #[test]
+        fn cache_write_i8_matches_reference_oracle() {
+            // 2 tokens, 1 kv head, head_dim 4, block_size 4, 2 blocks.
+            let num_tokens = 2i64;
+            let num_kv_heads = 1i64;
+            let head_dim = 4i64;
+            let block_size = 4i64;
+            let num_blocks = 2i64;
+            let elems = (num_tokens * num_kv_heads * head_dim) as usize;
+            let cache_elems = (num_blocks * num_kv_heads * head_dim * block_size) as usize;
+
+            let k_scale = 0.05_f32;
+            let v_scale = 0.1_f32;
+
+            // Host f16 K/V values (as raw u16 bit patterns) and slot mapping.
+            let k_vals = [0.10_f32, -0.30, 6.0, 0.02, -0.07, 0.20, -100.0, 0.0];
+            let v_vals = [0.50_f32, -0.05, 0.0, 12.0, -0.20, 0.30, 0.40, -0.50];
+            let k_u16: Vec<u16> =
+                k_vals.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+            let v_u16: Vec<u16> =
+                v_vals.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+            // token 0 -> slot 0 (block 0, off 0); token 1 -> slot 5 (block 1, off 1)
+            let slots: Vec<i64> = vec![0, 5];
+
+            // Device buffers.
+            let key_cache = unsafe { gpu_alloc(cache_elems).expect("alloc key") } as *mut i8;
+            let value_cache = unsafe { gpu_alloc(cache_elems).expect("alloc value") } as *mut i8;
+            let new_key = unsafe { gpu_alloc(elems * 2).expect("alloc new_key") } as *mut u16;
+            let new_value = unsafe { gpu_alloc(elems * 2).expect("alloc new_value") } as *mut u16;
+            let slot_dev = unsafe { gpu_alloc(slots.len() * 8).expect("alloc slots") } as *mut i64;
+
+            unsafe {
+                cache_zero_sync(key_cache as *mut u8, cache_elems as i64).unwrap();
+                cache_zero_sync(value_cache as *mut u8, cache_elems as i64).unwrap();
+                gpu_memcpy_to_device(new_key as *mut u8, k_u16.as_ptr() as *const u8, elems * 2)
+                    .unwrap();
+                gpu_memcpy_to_device(new_value as *mut u8, v_u16.as_ptr() as *const u8, elems * 2)
+                    .unwrap();
+                gpu_memcpy_to_device(
+                    slot_dev as *mut u8,
+                    slots.as_ptr() as *const u8,
+                    slots.len() * 8,
+                )
+                .unwrap();
+
+                cache_write_i8_sync(
+                    key_cache,
+                    value_cache,
+                    new_key as *const u16,
+                    new_value as *const u16,
+                    slot_dev as *const i64,
+                    num_tokens,
+                    num_kv_heads,
+                    head_dim,
+                    block_size,
+                    num_blocks,
+                    k_scale,
+                    v_scale,
+                )
+                .expect("cache_write_i8_sync failed");
+            }
+
+            // Read back the int8 caches.
+            let mut key_host = vec![0i8; cache_elems];
+            let mut val_host = vec![0i8; cache_elems];
+            unsafe {
+                gpu_memcpy_to_host(
+                    key_host.as_mut_ptr() as *mut u8,
+                    key_cache as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_host(
+                    val_host.as_mut_ptr() as *mut u8,
+                    value_cache as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+            }
+
+            // Verify each written element against the CPU oracle. NHD cache layout:
+            // idx = ((block_id*num_kv_heads + kv_head)*head_dim + d)*block_size + off
+            for token in 0..num_tokens as usize {
+                let slot = slots[token];
+                let block_id = slot / block_size;
+                let off = slot % block_size;
+                for d in 0..head_dim as usize {
+                    let cache_idx = (((block_id * num_kv_heads) * head_dim + d as i64) * block_size
+                        + off) as usize;
+                    let src = token * head_dim as usize + d;
+                    // f16 rounding happens before quantization, so quantize the f16 value.
+                    let kf = half::f16::from_f32(k_vals[src]).to_f32();
+                    let vf = half::f16::from_f32(v_vals[src]).to_f32();
+                    assert_eq!(
+                        key_host[cache_idx],
+                        quantize_kv_i8_reference(kf, k_scale),
+                        "key token={token} d={d}"
+                    );
+                    assert_eq!(
+                        val_host[cache_idx],
+                        quantize_kv_i8_reference(vf, v_scale),
+                        "val token={token} d={d}"
+                    );
+                }
+            }
+
+            unsafe {
+                gpu_free(key_cache as *mut u8).unwrap();
+                gpu_free(value_cache as *mut u8).unwrap();
+                gpu_free(new_key as *mut u8).unwrap();
+                gpu_free(new_value as *mut u8).unwrap();
+                gpu_free(slot_dev as *mut u8).unwrap();
+            }
         }
     }
 }

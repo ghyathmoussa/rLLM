@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rllm_core::{config::ModelConfig, dtype::DType};
+use rllm_quant::QuantSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,7 @@ struct HfConfigJson {
     head_dim: Option<usize>,
     hidden_act: Option<String>,
     rms_norm_eps: Option<f64>,
+    quantization_config: Option<serde_json::Value>,
 }
 
 pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
@@ -53,6 +55,12 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         _ => DType::F16,
     };
 
+    let quantization = hf
+        .quantization_config
+        .as_ref()
+        .and_then(QuantSchema::from_hf_value)
+        .and_then(|schema| schema.to_core_config());
+
     Ok(ModelConfig {
         model_id: path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string(),
         architecture,
@@ -67,7 +75,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         rope_theta: hf.rope_theta.unwrap_or(10000.0) as f32,
         rope_scaling: None,
         dtype,
-        quantization: None,
+        quantization,
         tokenizer_mode: rllm_core::config::TokenizerMode::Auto,
     })
 }
@@ -236,5 +244,34 @@ mod tests {
         );
         let config = parse_hf_config(f.path()).unwrap();
         assert_eq!(config.architecture, "LlamaForCausalLM");
+    }
+
+    #[test]
+    fn parses_int8_quantization_config() {
+        let f = write_config_json(
+            r#"{
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "quantization_config": {
+                    "quant_method": "compressed-tensors",
+                    "format": "int-quantized",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "num_bits": 8,
+                                "strategy": "channel",
+                                "symmetric": true
+                            }
+                        }
+                    }
+                }
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        let quant = config.quantization.unwrap();
+        assert_eq!(quant.kind, rllm_core::config::QuantizationKind::Int8);
+        assert_eq!(quant.bits, Some(8));
     }
 }

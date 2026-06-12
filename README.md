@@ -59,6 +59,16 @@ cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
 # Option B: Serve on GPU (CUDA accelerated)
 cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
 
+# Option C: Serve on GPU with INT8 weight quantization
+CUDA_HOME=/usr CUDA_ARCH=8.9 CUDA_COMPUTE_CAP=89 \
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
+cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
+  --quantization int8 \
+  --quant-bits 8 \
+  --gpu-memory-utilization 0.55 \
+  --max-model-len 4096 \
+  --max-num-seqs 1
+
 # In another terminal, send a request
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -165,6 +175,16 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
   # Public models
   cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
 
+  # Public models with INT8 weight quantization
+  CUDA_HOME=/usr CUDA_ARCH=8.9 CUDA_COMPUTE_CAP=89 \
+  LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
+    --quantization int8 \
+    --quant-bits 8 \
+    --gpu-memory-utilization 0.55 \
+    --max-model-len 4096 \
+    --max-num-seqs 1
+
   # Gated/private models (set HF_TOKEN)
   export HF_TOKEN=hf_xxxxxxxxxxxx
   cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
@@ -180,6 +200,9 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 | `--host` | `0.0.0.0` | Host to bind to |
 | `--port` | `8000` | Port to bind to |
 | `--dtype` | `auto` | Data type (`auto`, `fp16`, `bf16`, `fp32`) |
+| `--quantization` | `auto` | Quantization format (`auto`, `none`, `int8`, `int4`, `compressed-tensors`, etc.) |
+| `--quant-bits` | (none) | Quantization bit width, such as `8` for INT8 |
+| `--quant-group-size` | (none) | Quantization group size for formats that use grouped weights |
 | `--max-model-len` | (auto) | Maximum model context length |
 | `--max-num-seqs` | `256` | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | `4096` | Maximum batched tokens per step |

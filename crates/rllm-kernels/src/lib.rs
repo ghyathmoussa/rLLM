@@ -1,14 +1,16 @@
 pub mod attention;
 pub mod cache_ops;
 pub mod fused;
+pub mod quant_matmul;
 
 pub mod cuda;
 
-pub use attention::{AttentionMetadata, AttentionParams};
 pub use attention::{
-    paged_attention_decode_f16, paged_attention_decode_f16_sync, paged_attention_decode_fp8,
-    paged_attention_decode_fp8_sync, paged_attention_prefill_f16, paged_attention_prefill_f16_sync,
-    paged_attention_prefill_fp8, paged_attention_prefill_fp8_sync,
+    AttentionMetadata, AttentionParams, paged_attention_decode_f16,
+    paged_attention_decode_f16_sync, paged_attention_decode_fp8, paged_attention_decode_fp8_sync,
+    paged_attention_decode_i8, paged_attention_decode_i8_sync, paged_attention_i8_reference,
+    paged_attention_prefill_f16, paged_attention_prefill_f16_sync, paged_attention_prefill_fp8,
+    paged_attention_prefill_fp8_sync, paged_attention_prefill_i8, paged_attention_prefill_i8_sync,
 };
 pub use cache_ops::GpuKVCache;
 /// Re-export error type.

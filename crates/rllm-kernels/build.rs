@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     // Declare the has_cuda cfg key so cargo check doesn't warn about it.
@@ -19,7 +22,7 @@ fn main() {
     let nvcc = nvcc.unwrap();
 
     // Locate CUDA toolkit root.
-    let cuda_home = find_cuda_home();
+    let cuda_home = find_cuda_home(nvcc.as_path());
     if cuda_home.is_none() {
         println!("cargo:warning=CUDA toolkit not found; CUDA kernels will not be compiled");
         return;
@@ -89,7 +92,9 @@ fn main() {
     println!("cargo:rustc-link-lib=static=rllm_cuda_kernels");
 
     // Link against CUDA runtime.
-    println!("cargo:rustc-link-search=native={}/lib64", cuda_home.display());
+    for lib_dir in cuda_lib_dirs(&cuda_home) {
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    }
     println!("cargo:rustc-link-lib=dylib=cudart");
 }
 
@@ -114,22 +119,39 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_cuda_home() -> Option<PathBuf> {
+fn find_cuda_home(nvcc: &Path) -> Option<PathBuf> {
     for var in &["CUDA_HOME", "CUDA_PATH"] {
         if let Ok(home) = env::var(var) {
             let p = PathBuf::from(&home);
-            if p.exists() {
+            if has_cuda_headers(&p) {
                 return Some(p);
             }
         }
     }
     for path in &["/usr/local/cuda", "/opt/cuda"] {
         let p = PathBuf::from(path);
-        if p.exists() {
+        if has_cuda_headers(&p) {
             return Some(p);
         }
     }
+    if let Some(root) = nvcc.parent().and_then(Path::parent) {
+        if has_cuda_headers(root) {
+            return Some(root.to_path_buf());
+        }
+    }
     None
+}
+
+fn has_cuda_headers(path: &Path) -> bool {
+    path.join("include").join("cuda_runtime.h").exists()
+}
+
+fn cuda_lib_dirs(cuda_home: &Path) -> Vec<PathBuf> {
+    ["lib64", "lib", "lib/x86_64-linux-gnu"]
+        .iter()
+        .map(|dir| cuda_home.join(dir))
+        .filter(|dir| dir.exists())
+        .collect()
 }
 
 fn cuda_arch_flags() -> Vec<String> {

@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use candle_core::{D, Device, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::config::ModelConfig;
+#[cfg(feature = "candle-backend")]
+use rllm_quant::{WeightSource, factory_from_config};
 
 #[cfg(feature = "candle-backend")]
 use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm};
@@ -46,6 +48,10 @@ impl LlamaForCausalLM {
 impl Model for LlamaForCausalLM {
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    fn quantized_layer_count(&self) -> usize {
+        self.model.quantized_layer_count
     }
 
     fn forward(
@@ -146,6 +152,7 @@ pub struct LlamaModel {
     #[allow(dead_code)]
     config: ModelConfig,
     device: Device,
+    pub quantized_layer_count: usize,
 }
 
 #[cfg(feature = "candle-backend")]
@@ -156,11 +163,15 @@ impl LlamaModel {
         let head_dim = config.head_dim;
         let hidden_size = config.hidden_size;
 
-        let quant_plan = if let Some(q_config) = &config.quantization {
-            rllm_core::optimizations::QuantizationPlan::from_config(q_config)
-                .map_err(|e| anyhow::anyhow!("Invalid quantization config: {e}"))?
-        } else {
-            rllm_core::optimizations::QuantizationPlan::default()
+        let quant_factory =
+            factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())
+                .context("building quantization method factory")?;
+
+        // When INT8 quantization is active, weights may have been loaded to CPU
+        // to avoid allocating full BF16 tensors on GPU.  Non-quantized tensors
+        // (embeddings, layernorms) must be moved to the target device before use.
+        let to_device = |t: Tensor| -> candle_core::Result<Tensor> {
+            if t.device().is_cpu() && !device.is_cpu() { t.to_device(device) } else { Ok(t) }
         };
 
         // Embedding
@@ -168,77 +179,93 @@ impl LlamaModel {
             .weights
             .remove("model.embed_tokens.weight")
             .ok_or_else(|| anyhow::anyhow!("missing model.embed_tokens.weight"))?;
+        let embed_weight = to_device(embed_weight).map_err(|e| anyhow::anyhow!("{e}"))?;
         let embed_tokens = Linear::new(embed_weight);
 
-        // LM head - may be tied with embedding
-        let has_lm_head = weights.weights.contains_key("lm_head.weight");
-        let lm_head_weight = if has_lm_head {
-            weights.weights.remove("lm_head.weight").unwrap()
+        // LM head - may be tied with embedding. A standalone head can be
+        // quantized independently; tied heads reuse the unquantized embedding
+        // weight because embedding lookup still requires direct tensor access.
+        let has_lm_head = weights.weights.contains_key("lm_head.weight")
+            || weights.quantized.contains_key("lm_head.weight");
+        let lm_head = if has_lm_head {
+            let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized);
+            Linear::from_method(quant_factory.build_linear("lm_head", &mut source)?)
         } else {
             tracing::info!("lm_head is tied with embed_tokens, reusing embedding weight");
-            embed_tokens.weight().clone()
+            Linear::new(embed_tokens.weight().clone())
         };
-        let lm_head = Linear::new(lm_head_weight);
 
         let rms_norm_eps = 1e-6;
 
         // Build decoder layers
         let mut layers = Vec::with_capacity(config.num_layers);
+        let mut quantized_linears = usize::from(lm_head.is_quantized());
+        let mut unquantized_linears = usize::from(!lm_head.is_quantized());
         for i in 0..config.num_layers {
             let prefix = format!("model.layers.{i}");
 
-            let q_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.q_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.q_proj.weight"))?;
-            let k_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.k_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.k_proj.weight"))?;
-            let v_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.v_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.v_proj.weight"))?;
-            let o_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.o_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.o_proj.weight"))?;
+            let (attn, mlp) = {
+                let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized);
 
-            let attn = LlamaAttention::new_quantized(
-                q_proj,
-                k_proj,
-                v_proj,
-                o_proj,
-                num_heads,
-                num_kv_heads,
-                head_dim,
-                &quant_plan,
-            )?;
+                let q_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.q_proj"), &mut source)?,
+                );
+                let k_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.k_proj"), &mut source)?,
+                );
+                let v_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.v_proj"), &mut source)?,
+                );
+                let o_proj = Linear::from_method(
+                    quant_factory
+                        .build_linear(&format!("{prefix}.self_attn.o_proj"), &mut source)?,
+                );
 
-            let gate_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.gate_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.gate_proj.weight"))?;
-            let up_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.up_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.up_proj.weight"))?;
-            let down_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.down_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.down_proj.weight"))?;
-            let mlp = LlamaMLP::new_quantized(gate_proj, up_proj, down_proj, &quant_plan)?;
+                let gate_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.gate_proj"), &mut source)?,
+                );
+                let up_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.up_proj"), &mut source)?,
+                );
+                let down_proj = Linear::from_method(
+                    quant_factory.build_linear(&format!("{prefix}.mlp.down_proj"), &mut source)?,
+                );
+
+                let linears =
+                    [&q_proj, &k_proj, &v_proj, &o_proj, &gate_proj, &up_proj, &down_proj];
+                quantized_linears += linears.iter().filter(|linear| linear.is_quantized()).count();
+                unquantized_linears +=
+                    linears.iter().filter(|linear| !linear.is_quantized()).count();
+
+                (
+                    LlamaAttention::from_linears(
+                        q_proj,
+                        k_proj,
+                        v_proj,
+                        o_proj,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                    ),
+                    LlamaMLP::from_linears(gate_proj, up_proj, down_proj),
+                )
+            };
 
             let input_ln_w = weights
                 .weights
                 .remove(&format!("{prefix}.input_layernorm.weight"))
                 .ok_or_else(|| anyhow::anyhow!("missing {prefix}.input_layernorm.weight"))?;
+            let input_ln_w = to_device(input_ln_w).map_err(|e| anyhow::anyhow!("{e}"))?;
             let post_attn_ln_w = weights
                 .weights
                 .remove(&format!("{prefix}.post_attention_layernorm.weight"))
                 .ok_or_else(|| {
                     anyhow::anyhow!("missing {prefix}.post_attention_layernorm.weight")
                 })?;
+            let post_attn_ln_w = to_device(post_attn_ln_w).map_err(|e| anyhow::anyhow!("{e}"))?;
 
             layers.push(LlamaDecoderLayer::new(
                 attn,
@@ -253,7 +280,47 @@ impl LlamaModel {
             .weights
             .remove("model.norm.weight")
             .ok_or_else(|| anyhow::anyhow!("missing model.norm.weight"))?;
+        let final_norm_w = to_device(final_norm_w).map_err(|e| anyhow::anyhow!("{e}"))?;
         let norm = RmsNorm::new(final_norm_w, rms_norm_eps);
+
+        // Release any remaining weight allocations before building the model.
+        // After this point, only the tensors inside layers/norm/embed/lm_head
+        // should be alive.  Log unconsumed names as a diagnostic.
+        weights.shrink_to_fit();
+        if !weights.is_empty() {
+            tracing::warn!(
+                unconsumed = ?weights.unconsumed_names(),
+                "some weights were not consumed during model construction"
+            );
+        }
+        // Log if we performed CPU→GPU transfer for non-quantized weights
+        // (happens when INT8 quantization is active with CUDA).
+        let is_int8 = config
+            .quantization
+            .as_ref()
+            .is_some_and(|q| q.kind == rllm_core::config::QuantizationKind::Int8);
+        if is_int8 && !device.is_cpu() {
+            tracing::info!(
+                "transferred non-quantized weights from CPU to GPU after INT8 quantization"
+            );
+        }
+
+        // Log quantization mode, bits, and strategy at startup.
+        if let Some(ref q) = config.quantization {
+            let strategy = weights.quant_schema.as_ref()
+                .and_then(|s| s.weight_strategy.clone())
+                .unwrap_or_else(|| "channel".to_string());
+            tracing::info!(
+                kind = ?q.kind,
+                bits = ?q.bits,
+                strategy = %strategy,
+                "Quantization configured at startup"
+            );
+        } else {
+            tracing::info!("Quantization not configured at startup (running in full precision)");
+        }
+
+        drop(weights);
 
         // Rotary embeddings
         let rope = RotaryEmbedding::new(head_dim, config.max_model_len, config.rope_theta, device)
@@ -268,6 +335,13 @@ impl LlamaModel {
             hidden_size,
             config.vocab_size,
         );
+        tracing::info!(
+            quantized_linears,
+            unquantized_linears,
+            embed_tokens_quantized = false,
+            lm_head_quantized = lm_head.is_quantized(),
+            "Llama quantization summary"
+        );
 
         Ok(Self {
             embed_tokens,
@@ -277,6 +351,7 @@ impl LlamaModel {
             rope,
             config: config.clone(),
             device: device.clone(),
+            quantized_layer_count: quantized_linears,
         })
     }
 
@@ -364,7 +439,7 @@ mod tests {
         }
     }
 
-    fn build_toy_model(config: &ModelConfig) -> LlamaForCausalLM {
+    fn build_toy_weight_map(config: &ModelConfig, include_lm_head: bool) -> WeightMap {
         let device = Device::Cpu;
         let mut weights = HashMap::new();
 
@@ -377,6 +452,13 @@ mod tests {
             "model.norm.weight".into(),
             Tensor::ones(config.hidden_size, DType::F32, &device).unwrap(),
         );
+        if include_lm_head {
+            weights.insert(
+                "lm_head.weight".into(),
+                Tensor::randn(0.0f32, 0.02f32, (config.vocab_size, config.hidden_size), &device)
+                    .unwrap(),
+            );
+        }
 
         for i in 0..config.num_layers {
             let p = format!("model.layers.{i}");
@@ -423,7 +505,11 @@ mod tests {
             );
         }
 
-        let weight_map = WeightMap { weights, device: device.clone() };
+        WeightMap { weights, quantized: HashMap::new(), quant_schema: None, device: device.clone() }
+    }
+
+    fn build_toy_model(config: &ModelConfig) -> LlamaForCausalLM {
+        let weight_map = build_toy_weight_map(config, false);
         LlamaForCausalLM::from_weights(config.clone(), weight_map).unwrap()
     }
 
@@ -490,6 +576,22 @@ mod tests {
         let ids = Tensor::new(vec![1u32, 5, 10], &device)?.reshape((1, 3))?;
         let out = embedding_lookup(&weight, &ids)?;
         assert_eq!(out.dims(), &[1, 3, 32]);
+        Ok(())
+    }
+
+    #[test]
+    fn standalone_lm_head_is_quantized_when_int8_requested() -> Result<()> {
+        let mut config = toy_config();
+        config.quantization = Some(rllm_core::config::QuantizationConfig {
+            kind: rllm_core::config::QuantizationKind::Int8,
+            group_size: None,
+            bits: Some(8),
+        });
+        let weight_map = build_toy_weight_map(&config, true);
+        let model = LlamaForCausalLM::from_weights(config, weight_map)?;
+
+        assert!(model.model.lm_head.is_quantized());
+        assert!(!model.model.embed_tokens.is_quantized());
         Ok(())
     }
 }

@@ -8,18 +8,57 @@ use std::{
 use anyhow::{Context, Result};
 #[cfg(feature = "candle-backend")]
 use candle_core::Device;
+#[cfg(feature = "candle-backend")]
+use rllm_quant::{QuantSchema, QuantTensor};
+#[cfg(feature = "candle-backend")]
+use safetensors::tensor::{Dtype as SafeTensorDtype, SafeTensors, TensorView};
 
 #[cfg(feature = "candle-backend")]
 pub struct WeightMap {
     pub weights: HashMap<String, candle_core::Tensor>,
+    pub quantized: HashMap<String, QuantTensor>,
+    pub quant_schema: Option<QuantSchema>,
     pub device: Device,
 }
 
-/// Load weights from a local directory containing SafeTensors files.
 #[cfg(feature = "candle-backend")]
-pub fn load_weights_from_dir(model_dir: &Path, device: &Device) -> Result<WeightMap> {
+impl WeightMap {
+    /// Returns true when all weights have been consumed.
+    pub fn is_empty(&self) -> bool {
+        self.weights.is_empty() && self.quantized.is_empty()
+    }
+
+    /// Shrink HashMap capacity to match length, releasing excess allocation.
+    pub fn shrink_to_fit(&mut self) {
+        self.weights.shrink_to_fit();
+        self.quantized.shrink_to_fit();
+    }
+
+    /// Drain and return any unconsumed tensor names (for diagnostic logging).
+    pub fn unconsumed_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.weights.keys().cloned().collect();
+        names.extend(self.quantized.keys().cloned());
+        names.sort();
+        names
+    }
+}
+
+/// Load weights from a local directory containing SafeTensors files.
+///
+/// When `load_device` is `Some`, tensors are loaded onto that device instead of
+/// `serve_device`.  Used by the INT8 path to load weights to CPU first, avoiding
+/// a full-size BF16 allocation on the GPU.
+#[cfg(feature = "candle-backend")]
+pub fn load_weights_from_dir(
+    model_dir: &Path,
+    serve_device: &Device,
+    load_device: Option<&Device>,
+) -> Result<WeightMap> {
+    let effective_device = load_device.unwrap_or(serve_device);
     let shard_paths = find_safetensor_shards(model_dir)?;
     let mut weights = HashMap::new();
+    let mut quantized = HashMap::new();
+    let quant_schema = load_checkpoint_quant_schema(model_dir)?;
 
     tracing::debug!(
         model_dir = %model_dir.display(),
@@ -28,19 +67,103 @@ pub fn load_weights_from_dir(model_dir: &Path, device: &Device) -> Result<Weight
     );
     for shard_path in &shard_paths {
         tracing::debug!(shard = %shard_path.display(), "loading SafeTensors shard");
-        let shard_weights = candle_core::safetensors::load(shard_path, device)
+        let (shard_weights, shard_quantized) = load_safetensors_shard(shard_path, effective_device)
             .with_context(|| format!("loading shard {}", shard_path.display()))?;
         tracing::debug!(
             shard = %shard_path.display(),
             tensors = shard_weights.len(),
+            quantized_tensors = shard_quantized.len(),
             "SafeTensors shard loaded"
         );
         weights.extend(shard_weights);
+        quantized.extend(shard_quantized);
     }
 
-    tracing::info!("loaded {} weight tensors from {} shard(s)", weights.len(), shard_paths.len());
+    tracing::info!(
+        "loaded {} candle tensors and {} raw INT8 tensors from {} shard(s)",
+        weights.len(),
+        quantized.len(),
+        shard_paths.len()
+    );
 
-    Ok(WeightMap { weights, device: device.clone() })
+    Ok(WeightMap { weights, quantized, quant_schema, device: serve_device.clone() })
+}
+
+#[cfg(feature = "candle-backend")]
+fn load_safetensors_shard(
+    shard_path: &Path,
+    device: &Device,
+) -> Result<(HashMap<String, candle_core::Tensor>, HashMap<String, QuantTensor>)> {
+    let data =
+        std::fs::read(shard_path).with_context(|| format!("reading {}", shard_path.display()))?;
+    let safetensors = SafeTensors::deserialize(&data)
+        .with_context(|| format!("parsing SafeTensors header {}", shard_path.display()))?;
+    let mut weights = HashMap::new();
+    let mut quantized = HashMap::new();
+
+    for (name, view) in safetensors.tensors() {
+        if view.dtype() == SafeTensorDtype::I8 {
+            let q = QuantTensor::from_i8_bytes(view.data(), view.shape().to_vec(), device)
+                .with_context(|| format!("loading raw INT8 tensor {name}"))?;
+            quantized.insert(name, q);
+        } else {
+            let tensor = load_non_i8_view(&view, device)
+                .with_context(|| format!("loading tensor {name}"))?;
+            weights.insert(name, tensor);
+        }
+    }
+
+    Ok((weights, quantized))
+}
+
+#[cfg(feature = "candle-backend")]
+fn load_non_i8_view(
+    view: &TensorView<'_>,
+    device: &Device,
+) -> candle_core::Result<candle_core::Tensor> {
+    let dtype = match view.dtype() {
+        SafeTensorDtype::U8 => candle_core::DType::U8,
+        SafeTensorDtype::U32 => candle_core::DType::U32,
+        SafeTensorDtype::I16 => candle_core::DType::I16,
+        SafeTensorDtype::I32 => candle_core::DType::I32,
+        SafeTensorDtype::I64 => candle_core::DType::I64,
+        SafeTensorDtype::BF16 => candle_core::DType::BF16,
+        SafeTensorDtype::F16 => candle_core::DType::F16,
+        SafeTensorDtype::F32 => candle_core::DType::F32,
+        SafeTensorDtype::F64 => candle_core::DType::F64,
+        SafeTensorDtype::F8_E4M3 => candle_core::DType::F8E4M3,
+        SafeTensorDtype::F6_E2M3 => candle_core::DType::F6E2M3,
+        SafeTensorDtype::F6_E3M2 => candle_core::DType::F6E3M2,
+        SafeTensorDtype::F4 => candle_core::DType::F4,
+        SafeTensorDtype::F8_E8M0 => candle_core::DType::F8E8M0,
+        SafeTensorDtype::U16 => {
+            let values = view
+                .data()
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) as u32)
+                .collect::<Vec<_>>();
+            return candle_core::Tensor::from_vec(values, view.shape(), device);
+        }
+        dtype => {
+            return Err(candle_core::Error::Msg(format!(
+                "unsupported SafeTensors dtype {dtype:?}"
+            )));
+        }
+    };
+    candle_core::Tensor::from_raw_buffer(view.data(), dtype, view.shape(), device)
+}
+
+#[cfg(feature = "candle-backend")]
+fn load_checkpoint_quant_schema(model_dir: &Path) -> Result<Option<QuantSchema>> {
+    let config_path = model_dir.join("config.json");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading config from {}", config_path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing config from {}", config_path.display()))?;
+    Ok(value.get("quantization_config").and_then(QuantSchema::from_hf_value))
 }
 
 /// Load weights from a Hugging Face model ID (downloads via hf-hub).
@@ -50,7 +173,7 @@ pub async fn load_weights_from_hub(model_id: &str, device: &Device) -> Result<We
     let device = device.clone();
     tokio::task::spawn_blocking(move || {
         let model_dir = download_model_from_hub(&model_id_owned)?;
-        load_weights_from_dir(&model_dir, &device)
+        load_weights_from_dir(&model_dir, &device, None)
     })
     .await?
 }
@@ -91,7 +214,9 @@ pub fn download_model_from_hub(model_id: &str) -> Result<PathBuf> {
                     "Hugging Face model '{model_id}' requires authentication. Set HF_TOKEN or run on an interactive terminal to enter a token."
                 );
             };
-            unsafe { std::env::set_var("HF_TOKEN", &token); }
+            unsafe {
+                std::env::set_var("HF_TOKEN", &token);
+            }
             download_model_from_hub_with_token(model_id, Some(token))
         }
         Err(err) => Err(err),
@@ -274,12 +399,16 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
 }
 
 /// Load weights with auto-detection of tied lm_head.
+///
+/// When `load_device` is `Some`, tensors are loaded onto that device instead of
+/// `serve_device` (used for INT8 CPU-first loading).
 #[cfg(feature = "candle-backend")]
 pub fn load_weights_with_tied_detection(
     model_dir: &Path,
-    device: &Device,
+    serve_device: &Device,
+    load_device: Option<&Device>,
 ) -> Result<(WeightMap, bool)> {
-    let weight_map = load_weights_from_dir(model_dir, device)?;
+    let weight_map = load_weights_from_dir(model_dir, serve_device, load_device)?;
     let has_lm_head = weight_map.weights.contains_key("lm_head.weight");
     let has_embed = weight_map.weights.contains_key("model.embed_tokens.weight");
     let tied = !has_lm_head && has_embed;

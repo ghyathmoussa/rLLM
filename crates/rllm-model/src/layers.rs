@@ -1,16 +1,15 @@
 #[cfg(feature = "candle-backend")]
 use candle_core::{D, DType, Device, Result, Tensor};
+#[cfg(feature = "candle-backend")]
+use rllm_core::optimizations::QuantizationPlan;
+#[cfg(feature = "candle-backend")]
+use rllm_quant::{LinearMethod, UnquantizedLinear};
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
-#[cfg(feature = "candle-backend")]
-use rllm_core::optimizations::QuantizationPlan;
 
 #[cfg(feature = "candle-backend")]
-pub fn simulate_weight_quantization(
-    weight: &Tensor,
-    plan: &QuantizationPlan,
-) -> Result<Tensor> {
+pub fn simulate_weight_quantization(weight: &Tensor, plan: &QuantizationPlan) -> Result<Tensor> {
     use rllm_core::optimizations::QuantizedWeightFormat;
     let format = plan.format;
     if format == QuantizedWeightFormat::Unquantized {
@@ -28,9 +27,7 @@ pub fn simulate_weight_quantization(
             let group_size = plan.group_size.unwrap_or(32);
             simulate_group_quant(&w_f32, group_size, 8)?
         }
-        QuantizedWeightFormat::Nvfp4 => {
-            simulate_uniform_quant(&w_f32, 4, true)?
-        }
+        QuantizedWeightFormat::Nvfp4 => simulate_uniform_quant(&w_f32, 4, true)?,
         QuantizedWeightFormat::Int8
         | QuantizedWeightFormat::Gptq
         | QuantizedWeightFormat::Awq
@@ -69,7 +66,8 @@ fn simulate_uniform_quant(weight: &Tensor, bits: u32, symmetric: bool) -> Result
         (scale, min_val)
     };
 
-    let q = weight.broadcast_sub(&Tensor::new(zero_point as f32, weight.device())?)?
+    let q = weight
+        .broadcast_sub(&Tensor::new(zero_point as f32, weight.device())?)?
         .broadcast_div(&Tensor::new(scale as f32, weight.device())?)?
         .round()?
         .clamp(-(levels as f32 / 2.0), levels as f32 / 2.0)?
@@ -117,7 +115,6 @@ fn simulate_group_quant(weight: &Tensor, group_size: usize, bits: usize) -> Resu
 
 // ── RMSNorm ──────────────────────────────────────────────────────────────
 
-
 #[cfg(feature = "candle-backend")]
 pub struct RmsNorm {
     weight: Tensor,
@@ -144,38 +141,31 @@ impl RmsNorm {
 
 #[cfg(feature = "candle-backend")]
 pub struct Linear {
-    weight: Tensor,
+    method: Box<dyn LinearMethod>,
 }
 
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self { weight }
+        Self { method: Box::new(UnquantizedLinear::new(weight)) }
     }
 
-    pub fn new_quantized(weight: Tensor, plan: &QuantizationPlan) -> Result<Self> {
-        let weight = simulate_weight_quantization(&weight, plan)?;
-        Ok(Self { weight })
+    pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
+        Self { method }
     }
-
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // weight shape: [out_features, in_features]
-        // x shape: [..., in_features]
-        let in_features = self.weight.dim(D::Minus1)?;
-        let out_features = self.weight.dim(D::Minus2)?;
-        let x_shape = x.dims();
-        let trailing = x_shape.len().saturating_sub(1);
-        let batch: usize = x_shape[..trailing].iter().product();
-        let x_2d = x.reshape((batch, in_features))?;
-        let out = x_2d.matmul(&self.weight.t()?)?;
-        let mut out_shape = x_shape[..trailing].to_vec();
-        out_shape.push(out_features);
-        out.reshape(out_shape)
+        self.method.apply(x)
     }
 
     pub fn weight(&self) -> &Tensor {
-        &self.weight
+        self.method
+            .weight()
+            .expect("Linear::weight() is only available for unquantized linear layers")
+    }
+
+    pub fn is_quantized(&self) -> bool {
+        self.method.is_quantized()
     }
 }
 
@@ -190,25 +180,16 @@ pub struct LlamaMLP {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaMLP {
+    pub fn from_linears(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
+        Self { gate_proj, up_proj, down_proj }
+    }
+
     pub fn new(gate_proj: Tensor, up_proj: Tensor, down_proj: Tensor) -> Self {
         Self {
             gate_proj: Linear::new(gate_proj),
             up_proj: Linear::new(up_proj),
             down_proj: Linear::new(down_proj),
         }
-    }
-
-    pub fn new_quantized(
-        gate_proj: Tensor,
-        up_proj: Tensor,
-        down_proj: Tensor,
-        plan: &QuantizationPlan,
-    ) -> Result<Self> {
-        Ok(Self {
-            gate_proj: Linear::new_quantized(gate_proj, plan)?,
-            up_proj: Linear::new_quantized(up_proj, plan)?,
-            down_proj: Linear::new_quantized(down_proj, plan)?,
-        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -235,6 +216,18 @@ pub struct LlamaAttention {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaAttention {
+    pub fn from_linears(
+        q_proj: Linear,
+        k_proj: Linear,
+        v_proj: Linear,
+        o_proj: Linear,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Self {
+        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
+    }
+
     pub fn new(
         q_proj: Tensor,
         k_proj: Tensor,
@@ -254,28 +247,6 @@ impl LlamaAttention {
             head_dim,
         }
     }
-
-    pub fn new_quantized(
-        q_proj: Tensor,
-        k_proj: Tensor,
-        v_proj: Tensor,
-        o_proj: Tensor,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        plan: &QuantizationPlan,
-    ) -> Result<Self> {
-        Ok(Self {
-            q_proj: Linear::new_quantized(q_proj, plan)?,
-            k_proj: Linear::new_quantized(k_proj, plan)?,
-            v_proj: Linear::new_quantized(v_proj, plan)?,
-            o_proj: Linear::new_quantized(o_proj, plan)?,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        })
-    }
-
 
     pub fn forward(
         &self,
@@ -391,25 +362,74 @@ impl LlamaAttention {
         // should not be reached in production paged mode).
         #[cfg(has_cuda)]
         {
-            // The custom paged-attention CUDA kernels (cache_write_{f16,fp8} and
-            // paged_attention_{prefill,decode}_{f16,fp8}) live in rllm-kernels, but
-            // wiring them here requires (a) extracting raw CUDA device pointers from
-            // the candle Q/K/V tensors and (b) copying the kernel output back into a
-            // candle tensor. candle 0.9 + cudarc 0.17 only expose a device pointer
-            // through a stream-synchronized guard
-            // (`CudaSlice::device_ptr(&stream) -> (CUdeviceptr, SyncOnDrop)`), not a
-            // plain pointer, so this FFI integration is not yet finished or validated.
-            //
-            // Until it is, signal the caller to use the proven legacy per-request
-            // forward path (`execute_model_step` in rllm-executor), which is
-            // GPU-accelerated through candle and numerically correct. The error is
-            // expected and handled as a fallback, not a failure.
-            // See docs/cuda-paged-attention-todo.md for what remains.
-            let _ = (gpu_kv_cache, attn_meta, layer_idx, &q, &k, &v, rope, positions);
-            return Err(candle_core::Error::Msg(
-                "paged-attention CUDA kernel path not yet wired to candle tensors; \
-                 caller should fall back to the legacy forward".to_string(),
-            ));
+            let _ = (rope, positions);
+
+            // Opt-in gate. The paged path must be validated against the eager
+            // forward on the GPU box before it becomes the default; until then,
+            // without the env flag we signal the caller to use the proven legacy
+            // per-request forward (`execute_model_step` in rllm-executor), which is
+            // numerically correct. Set `RLLM_PAGED_ATTENTION=1` to exercise this
+            // path. See docs/quantization-int8-kvcache-plan.md (Layer 0).
+            if !paged_attention_enabled() {
+                let _ = (gpu_kv_cache, attn_meta, layer_idx, &q, &k, &v);
+                return Err(candle_core::Error::Msg(
+                    "paged-attention disabled (set RLLM_PAGED_ATTENTION=1 to enable); \
+                     using legacy forward"
+                        .to_string(),
+                ));
+            }
+
+            let num_tokens = bsz * seq_len;
+
+            // The kernels expect token-major, contiguous f16 tensors:
+            // q [num_tokens, num_heads, head_dim], k/v [num_tokens, num_kv_heads, head_dim].
+            let q_tok = q
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+            let k_tok = k
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_kv_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+            let v_tok = v
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_kv_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+
+            let op = PagedAttentionOp {
+                key_cache: gpu_kv_cache.key_ptr(layer_idx) as usize,
+                value_cache: gpu_kv_cache.value_ptr(layer_idx) as usize,
+                cache_dtype: gpu_kv_cache.dtype(),
+                k_scale: gpu_kv_cache.k_scale(layer_idx),
+                v_scale: gpu_kv_cache.v_scale(layer_idx),
+                num_blocks: gpu_kv_cache.num_blocks() as i64,
+                block_size: gpu_kv_cache.block_size() as i64,
+                num_q_heads: self.num_heads as i64,
+                num_kv_heads: self.num_kv_heads as i64,
+                head_dim: self.head_dim as i64,
+                num_tokens: num_tokens as i64,
+                num_seqs: attn_meta.num_seqs() as i64,
+                max_num_blocks_per_seq: attn_meta.max_num_blocks_per_seq as i64,
+                scale: 1.0f32 / (self.head_dim as f32).sqrt(),
+                is_prefill: seq_len > 1,
+                slot_mapping: attn_meta.slot_mapping.clone(),
+                block_tables_flat: attn_meta.flatten_block_tables(),
+                seq_lens: attn_meta.seq_lens.iter().map(|&s| s as i32).collect(),
+                query_start_loc: attn_meta.query_start_loc.iter().map(|&s| s as i32).collect(),
+            };
+
+            // Custom op writes K/V into the paged cache then runs PagedAttention,
+            // returning [num_tokens, num_heads, head_dim].
+            let attn_output = q_tok.apply_op3_no_bwd(&k_tok, &v_tok, &op)?;
+            let attn_output = attn_output.to_dtype(hidden_states.dtype())?.reshape((
+                bsz,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?;
+            return self.o_proj.forward(&attn_output);
         }
 
         // Non-CUDA fallback: use native attention
@@ -439,8 +459,11 @@ impl LlamaAttention {
 
             let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
             let attn_output = attn_weights.matmul(&v)?;
-            let attn_output =
-                attn_output.transpose(1, 2)?.reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
+            let attn_output = attn_output.transpose(1, 2)?.reshape((
+                bsz,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?;
 
             self.o_proj.forward(&attn_output)
         }
@@ -472,6 +495,328 @@ fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
     let mask = Tensor::from_vec(mask, (seq_len, seq_len), device)?;
     // Broadcast to [1, 1, seq_len, seq_len]
     mask.reshape((1, 1, seq_len, seq_len))
+}
+
+// ── Paged-attention CUDA op (Layers 0 + 3) ───────────────────────────────
+//
+// Wraps one decoder layer's paged-attention step as a candle `CustomOp3` over
+// (q, k, v): it scatter-writes the new K/V into the block-addressed `GpuKVCache`,
+// then runs the paged-attention read, returning the attention output as a candle
+// tensor. The device-pointer extraction mirrors the validated pattern in
+// `rllm_quant::int8::Int8MatmulOp::cuda_fwd`.
+//
+// Layer 3 makes the write+read kernels dispatch on the cache dtype:
+//   - F16 / BF16 → `cache_write_f16` + `paged_attention_*_f16`
+//   - FP8E4M3 / FP8E5M2 → `cache_write_fp8` + `paged_attention_*_fp8` (+ `is_e5m2`)
+//   - INT8 → `cache_write_i8` + `paged_attention_*_i8` (+ `k_scale`/`v_scale`)
+// Q/K/V are always f16 (the projections are cast to f16 before the op); only the
+// cache element type and the selected kernels change.
+//
+// This code is only compiled with `--features cuda` (sets `has_cuda`); it has
+// not been compiled on this dev host (no nvcc) and must be built/validated on
+// the GPU box. See docs/quantization-int8-kvcache-plan.md (Layers 0–3).
+
+/// Whether the opt-in paged-attention path is enabled (`RLLM_PAGED_ATTENTION=1`).
+#[cfg(has_cuda)]
+fn paged_attention_enabled() -> bool {
+    std::env::var("RLLM_PAGED_ATTENTION").map(|v| v == "1" || v == "true").unwrap_or(false)
+}
+
+/// Inputs: q `[num_tokens, num_q_heads, head_dim]`, k/v `[num_tokens, num_kv_heads, head_dim]`
+/// (token-major, contiguous, f16). Output: `[num_tokens, num_q_heads, head_dim]`.
+/// The write+read kernels are selected at runtime by `cache_dtype`.
+#[cfg(has_cuda)]
+struct PagedAttentionOp {
+    /// Per-layer cache device pointers (raw addresses; cast back in `cuda_fwd`).
+    key_cache: usize,
+    value_cache: usize,
+    /// KV cache element dtype; selects the write+read kernel family.
+    cache_dtype: rllm_core::dtype::DType,
+    /// INT8 dequant scales (`x ~= q * scale`); ignored for non-INT8 dtypes.
+    k_scale: f32,
+    v_scale: f32,
+    num_blocks: i64,
+    block_size: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    num_tokens: i64,
+    num_seqs: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    is_prefill: bool,
+    slot_mapping: Vec<i64>,
+    block_tables_flat: Vec<i32>,
+    seq_lens: Vec<i32>,
+    query_start_loc: Vec<i32>,
+}
+
+#[cfg(has_cuda)]
+impl candle_core::CustomOp3 for PagedAttentionOp {
+    fn name(&self) -> &'static str {
+        "rllm-paged-attention"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s1: &candle_core::CpuStorage,
+        _l1: &candle_core::Layout,
+        _s2: &candle_core::CpuStorage,
+        _l2: &candle_core::Layout,
+        _s3: &candle_core::CpuStorage,
+        _l3: &candle_core::Layout,
+    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
+        Err(candle_core::Error::Msg("rllm-paged-attention runs only on CUDA".to_string()))
+    }
+
+    fn cuda_fwd(
+        &self,
+        q: &candle_core::CudaStorage,
+        ql: &candle_core::Layout,
+        k: &candle_core::CudaStorage,
+        kl: &candle_core::Layout,
+        v: &candle_core::CudaStorage,
+        vl: &candle_core::Layout,
+    ) -> candle_core::Result<(candle_core::CudaStorage, candle_core::Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+
+        if !ql.is_contiguous() || !kl.is_contiguous() || !vl.is_contiguous() {
+            return Err(candle_core::Error::Msg(
+                "paged-attention inputs must be contiguous".to_string(),
+            ));
+        }
+
+        let device = q.device.clone();
+        let stream = device.cuda_stream();
+
+        let q_slice = q.as_cuda_slice::<half::f16>()?;
+        let q_slice = q_slice.slice(ql.start_offset()..ql.start_offset() + ql.shape().elem_count());
+        let k_slice = k.as_cuda_slice::<half::f16>()?;
+        let k_slice = k_slice.slice(kl.start_offset()..kl.start_offset() + kl.shape().elem_count());
+        let v_slice = v.as_cuda_slice::<half::f16>()?;
+        let v_slice = v_slice.slice(vl.start_offset()..vl.start_offset() + vl.shape().elem_count());
+
+        // Per-step metadata uploads (these change every step, unlike weights).
+        let slot_dev = device.clone_htod(self.slot_mapping.as_slice())?;
+        let bt_dev = device.clone_htod(self.block_tables_flat.as_slice())?;
+        let seq_dev = device.clone_htod(self.seq_lens.as_slice())?;
+        let qsl_dev = device.clone_htod(self.query_start_loc.as_slice())?;
+
+        let out_len = (self.num_tokens * self.num_q_heads * self.head_dim) as usize;
+        let mut output = unsafe { device.alloc::<half::f16>(out_len)? };
+
+        {
+            let (q_ptr, _gq) = q_slice.device_ptr(&stream);
+            let (k_ptr, _gk) = k_slice.device_ptr(&stream);
+            let (v_ptr, _gv) = v_slice.device_ptr(&stream);
+            let (slot_ptr, _gs) = slot_dev.device_ptr(&stream);
+            let (bt_ptr, _gb) = bt_dev.device_ptr(&stream);
+            let (seq_ptr, _gl) = seq_dev.device_ptr(&stream);
+            let (qsl_ptr, _gqsl) = qsl_dev.device_ptr(&stream);
+            let (out_ptr, _go) = output.device_ptr_mut(&stream);
+            let cu = stream.cu_stream() as usize;
+
+            // Dispatch the write + read kernels on the cache element dtype.
+            // Q/K/V are f16; only the cache element type and kernels differ.
+            // `fp8_e5m2` distinguishes the two fp8 encodings.
+            use rllm_core::dtype::DType;
+            let (k_cache_u8, v_cache_u8) = (self.key_cache as *mut u8, self.value_cache as *mut u8);
+            let fp8_e5m2 = matches!(self.cache_dtype, DType::FP8E5M2);
+
+            match self.cache_dtype {
+                DType::F16 | DType::BF16 => unsafe {
+                    let key_cache = self.key_cache as *mut u16;
+                    let value_cache = self.value_cache as *mut u16;
+                    rllm_kernels::cache_ops::cache_write_f16(
+                        key_cache,
+                        value_cache,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
+                        self.num_tokens,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.block_size,
+                        self.num_blocks,
+                        cu,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_f16(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const u16,
+                            value_cache as *const u16,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_f16(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const u16,
+                            value_cache as *const u16,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                DType::FP8E4M3 | DType::FP8E5M2 => unsafe {
+                    rllm_kernels::cache_ops::cache_write_fp8(
+                        k_cache_u8,
+                        v_cache_u8,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
+                        self.num_tokens,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.block_size,
+                        self.num_blocks,
+                        fp8_e5m2,
+                        cu,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_fp8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            k_cache_u8 as *const u8,
+                            v_cache_u8 as *const u8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            fp8_e5m2,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_fp8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            k_cache_u8 as *const u8,
+                            v_cache_u8 as *const u8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            fp8_e5m2,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                DType::INT8 => unsafe {
+                    let key_cache = self.key_cache as *mut i8;
+                    let value_cache = self.value_cache as *mut i8;
+                    rllm_kernels::cache_ops::cache_write_i8(
+                        key_cache,
+                        value_cache,
+                        k_ptr as *const u16,
+                        v_ptr as *const u16,
+                        slot_ptr as *const i64,
+                        self.num_tokens,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.block_size,
+                        self.num_blocks,
+                        self.k_scale,
+                        self.v_scale,
+                        cu,
+                    )
+                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+
+                    if self.is_prefill {
+                        rllm_kernels::attention::paged_attention_prefill_i8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const i8,
+                            value_cache as *const i8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            qsl_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_tokens,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            self.k_scale,
+                            self.v_scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    } else {
+                        rllm_kernels::attention::paged_attention_decode_i8(
+                            out_ptr as *mut u16,
+                            q_ptr as *const u16,
+                            key_cache as *const i8,
+                            value_cache as *const i8,
+                            bt_ptr as *const i32,
+                            seq_ptr as *const i32,
+                            self.num_seqs,
+                            self.num_q_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.block_size,
+                            self.max_num_blocks_per_seq,
+                            self.scale,
+                            self.k_scale,
+                            self.v_scale,
+                            cu,
+                        )
+                        .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                    }
+                },
+                other => {
+                    return Err(candle_core::Error::Msg(format!(
+                        "paged attention: unsupported KV cache dtype {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let storage = candle_core::CudaStorage::wrap_cuda_slice(output, device);
+        let shape = (self.num_tokens as usize, self.num_q_heads as usize, self.head_dim as usize);
+        Ok((storage, shape.into()))
+    }
 }
 
 // ── LlamaDecoderLayer ────────────────────────────────────────────────────
@@ -529,7 +874,12 @@ impl LlamaDecoderLayer {
         let residual = hidden_states.clone();
         let hidden_states = self.input_layernorm.forward(hidden_states)?;
         let hidden_states = self.self_attn.forward_paged(
-            &hidden_states, positions, gpu_kv_cache, attn_meta, layer_idx, rope,
+            &hidden_states,
+            positions,
+            gpu_kv_cache,
+            attn_meta,
+            layer_idx,
+            rope,
         )?;
         let hidden_states = (residual + hidden_states)?;
 

@@ -458,13 +458,15 @@ mod tests {
         unsafe fn upload(data: &[u16]) -> *mut u16 {
             let nbytes = data.len() * 2;
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
-            gpu_memcpy_to_device(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).expect("gpu_memcpy_to_device failed");
+            gpu_memcpy_to_device(ptr as *mut u8, data.as_ptr() as *const u8, nbytes)
+                .expect("gpu_memcpy_to_device failed");
             ptr
         }
 
         unsafe fn download(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
-            gpu_memcpy_to_host(host.as_mut_ptr() as *mut u8, ptr as *const u8, len * 2).expect("gpu_memcpy_to_host failed");
+            gpu_memcpy_to_host(host.as_mut_ptr() as *mut u8, ptr as *const u8, len * 2)
+                .expect("gpu_memcpy_to_host failed");
             host
         }
 
@@ -578,7 +580,8 @@ mod tests {
                     d_positions as *mut u8,
                     positions.as_ptr() as *const u8,
                     num_tokens as usize * 4,
-                ).expect("gpu_memcpy_to_device failed");
+                )
+                .expect("gpu_memcpy_to_device failed");
             }
 
             unsafe {

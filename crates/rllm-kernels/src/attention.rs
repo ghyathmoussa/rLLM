@@ -258,6 +258,74 @@ impl Default for AttentionMetadata {
     }
 }
 
+// ── INT8 dequant-attention CPU reference ──────────────────────────────────
+
+/// CPU reference for single-(sequence, head) paged attention over an INT8 KV
+/// cache, mirroring the math of `paged_attention_{decode,prefill}_i8`.
+///
+/// Inputs are dense (not block-addressed) so the oracle validates the
+/// dequant + softmax math, independent of the cache's block layout:
+/// - `query`: `head_dim` f32 elements (the Q vector, already in f32).
+/// - `key_i8` / `value_i8`: `kv_len * head_dim` int8 elements, row-major
+///   `[position, dim]`, as written by `cache_write_i8`.
+/// - `k_scale` / `v_scale`: per-tensor dequant scales (`x ~= q * scale`).
+/// - `scale`: softmax scale (typically `1/sqrt(head_dim)`).
+///
+/// Computes `logit[t] = scale * Σ_d q[d] * (key_i8[t,d] * k_scale)`, a numerically
+/// stable softmax over `t in 0..kv_len`, then
+/// `out[d] = Σ_t softmax[t] * (value_i8[t,d] * v_scale)`. Returns `head_dim`
+/// f32 outputs. Used as a numeric oracle so the kernel algorithm is verifiable
+/// without a GPU.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_attention_i8_reference(
+    query: &[f32],
+    key_i8: &[i8],
+    value_i8: &[i8],
+    kv_len: usize,
+    head_dim: usize,
+    k_scale: f32,
+    v_scale: f32,
+    scale: f32,
+) -> Vec<f32> {
+    assert_eq!(query.len(), head_dim);
+    assert_eq!(key_i8.len(), kv_len * head_dim);
+    assert_eq!(value_i8.len(), kv_len * head_dim);
+
+    if kv_len == 0 {
+        return vec![0.0; head_dim];
+    }
+
+    // Logits with dequantized keys.
+    let mut logits = vec![0.0f32; kv_len];
+    for (t, logit) in logits.iter_mut().enumerate() {
+        let mut dot = 0.0f32;
+        for d in 0..head_dim {
+            let k = key_i8[t * head_dim + d] as f32 * k_scale;
+            dot += query[d] * k;
+        }
+        *logit = dot * scale;
+    }
+
+    // Numerically stable softmax.
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut exp_sum = 0.0f32;
+    for logit in logits.iter_mut() {
+        *logit = (*logit - max_logit).exp();
+        exp_sum += *logit;
+    }
+
+    // Weighted sum of dequantized values.
+    let mut out = vec![0.0f32; head_dim];
+    for (t, &w) in logits.iter().enumerate() {
+        let weight = if exp_sum > 0.0 { w / exp_sum } else { 0.0 };
+        for (d, o) in out.iter_mut().enumerate() {
+            let v = value_i8[t * head_dim + d] as f32 * v_scale;
+            *o += weight * v;
+        }
+    }
+    out
+}
+
 // ── FFI declarations ──────────────────────────────────────────────────────
 
 #[cfg(has_cuda)]
@@ -334,7 +402,6 @@ mod ffi {
         ) -> c_int;
 
         pub fn rllm_paged_attention_prefill_f16(
-
             output: *mut u16,
             query: *const u16,
             key_cache: *const u16,
@@ -373,7 +440,6 @@ mod ffi {
             stream: usize,
         ) -> c_int;
 
-
         pub fn rllm_paged_attention_prefill_f16_sync(
             output: *mut u16,
             query: *const u16,
@@ -411,6 +477,83 @@ mod ffi {
             is_e5m2: c_int,
         ) -> c_int;
 
+        pub fn rllm_paged_attention_decode_i8(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const i8,
+            value_cache: *const i8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            num_seqs: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            k_scale: f32,
+            v_scale: f32,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_paged_attention_decode_i8_sync(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const i8,
+            value_cache: *const i8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            num_seqs: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            k_scale: f32,
+            v_scale: f32,
+        ) -> c_int;
+
+        pub fn rllm_paged_attention_prefill_i8(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const i8,
+            value_cache: *const i8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            query_start_loc: *const i32,
+            num_seqs: i64,
+            num_tokens: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            k_scale: f32,
+            v_scale: f32,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_paged_attention_prefill_i8_sync(
+            output: *mut u16,
+            query: *const u16,
+            key_cache: *const i8,
+            value_cache: *const i8,
+            block_tables: *const i32,
+            seq_lens: *const i32,
+            query_start_loc: *const i32,
+            num_seqs: i64,
+            num_tokens: i64,
+            num_q_heads: i64,
+            num_kv_heads: i64,
+            head_dim: i64,
+            block_size: i64,
+            max_num_blocks_per_seq: i64,
+            scale: f32,
+            k_scale: f32,
+            v_scale: f32,
+        ) -> c_int;
     }
 }
 
@@ -592,7 +735,6 @@ pub unsafe fn paged_attention_decode_fp8_sync(
 }
 
 // ── Prefill PagedAttention ────────────────────────────────────────────────
-
 
 /// Launch async prefill PagedAttention (FP16).
 ///
@@ -778,8 +920,209 @@ pub unsafe fn paged_attention_prefill_fp8_sync(
     check(rc)
 }
 
-// ── Non-CUDA stubs ────────────────────────────────────────────────────────
+// ── INT8 PagedAttention ───────────────────────────────────────────────────
 
+/// Launch async decode PagedAttention (INT8 KV cache).
+///
+/// The K/V cache holds symmetric int8 written by `cache_write_i8`; each element
+/// is dequantized on read as `q * k_scale` / `q * v_scale`. Pass the scales
+/// carried by [`crate::cache_ops::GpuKVCache`] (default `1.0` until calibrated).
+///
+/// # Safety
+/// - All pointers must be valid device pointers with correct sizes.
+/// - `block_tables` must have `num_seqs * max_num_blocks_per_seq` elements.
+/// - `seq_lens` must have `num_seqs` elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_decode_i8(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const i8,
+    value_cache: *const i8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    num_seqs: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_decode_i8(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            num_seqs,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            k_scale,
+            v_scale,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous decode PagedAttention for testing (INT8).
+///
+/// # Safety
+/// Same invariants as [`paged_attention_decode_i8`].
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_decode_i8_sync(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const i8,
+    value_cache: *const i8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    num_seqs: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_decode_i8_sync(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            num_seqs,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            k_scale,
+            v_scale,
+        )
+    };
+    check(rc)
+}
+
+/// Launch async prefill PagedAttention (INT8 KV cache). See
+/// [`paged_attention_decode_i8`] for the dequant scheme and scale semantics.
+///
+/// # Safety
+/// - All pointers must be valid device pointers with correct sizes.
+/// - `query_start_loc` must have `num_seqs + 1` elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_prefill_i8(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const i8,
+    value_cache: *const i8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    query_start_loc: *const i32,
+    num_seqs: i64,
+    num_tokens: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_prefill_i8(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            query_start_loc,
+            num_seqs,
+            num_tokens,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            k_scale,
+            v_scale,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous prefill PagedAttention for testing (INT8).
+///
+/// # Safety
+/// Same invariants as [`paged_attention_prefill_i8`].
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn paged_attention_prefill_i8_sync(
+    output: *mut u16,
+    query: *const u16,
+    key_cache: *const i8,
+    value_cache: *const i8,
+    block_tables: *const i32,
+    seq_lens: *const i32,
+    query_start_loc: *const i32,
+    num_seqs: i64,
+    num_tokens: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    block_size: i64,
+    max_num_blocks_per_seq: i64,
+    scale: f32,
+    k_scale: f32,
+    v_scale: f32,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_paged_attention_prefill_i8_sync(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            seq_lens,
+            query_start_loc,
+            num_seqs,
+            num_tokens,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            max_num_blocks_per_seq,
+            scale,
+            k_scale,
+            v_scale,
+        )
+    };
+    check(rc)
+}
+
+// ── Non-CUDA stubs ────────────────────────────────────────────────────────
 
 #[cfg(not(has_cuda))]
 pub use stubs::*;
@@ -956,6 +1299,95 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_decode_i8(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const i8,
+        _value_cache: *const i8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _num_seqs: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _k_scale: f32,
+        _v_scale: f32,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_decode_i8_sync(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const i8,
+        _value_cache: *const i8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _num_seqs: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _k_scale: f32,
+        _v_scale: f32,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_prefill_i8(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const i8,
+        _value_cache: *const i8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _query_start_loc: *const i32,
+        _num_seqs: i64,
+        _num_tokens: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _k_scale: f32,
+        _v_scale: f32,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn paged_attention_prefill_i8_sync(
+        _output: *mut u16,
+        _query: *const u16,
+        _key_cache: *const i8,
+        _value_cache: *const i8,
+        _block_tables: *const i32,
+        _seq_lens: *const i32,
+        _query_start_loc: *const i32,
+        _num_seqs: i64,
+        _num_tokens: i64,
+        _num_q_heads: i64,
+        _num_kv_heads: i64,
+        _head_dim: i64,
+        _block_size: i64,
+        _max_num_blocks_per_seq: i64,
+        _scale: f32,
+        _k_scale: f32,
+        _v_scale: f32,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
 }
 
 #[cfg(test)]
@@ -1130,6 +1562,67 @@ mod tests {
         assert_eq!(meta.sliding_window, Some(32));
     }
 
+    #[test]
+    fn i8_reference_single_position_returns_dequant_value() {
+        // With one KV position, softmax is 1.0 regardless of the logit, so the
+        // output is exactly the dequantized value vector.
+        let head_dim = 4;
+        let query = vec![0.5, -0.5, 1.0, 0.0];
+        let key_i8 = vec![10i8, -20, 30, 5];
+        let value_i8 = vec![4i8, 8, -16, 32];
+        let v_scale = 0.1;
+        let out = paged_attention_i8_reference(
+            &query, &key_i8, &value_i8, 1, head_dim, 0.05, v_scale, 0.5,
+        );
+        for d in 0..head_dim {
+            assert!((out[d] - value_i8[d] as f32 * v_scale).abs() < 1e-6, "d={d}");
+        }
+    }
+
+    #[test]
+    fn i8_reference_equal_logits_average_values() {
+        // Two positions with an all-zero query → both logits 0 → softmax 0.5/0.5,
+        // output is the mean of the two dequantized value vectors.
+        let head_dim = 2;
+        let query = vec![0.0, 0.0];
+        let key_i8 = vec![1i8, 2, 3, 4]; // irrelevant when query is zero
+        let value_i8 = vec![10i8, 20, 30, 40];
+        let v_scale = 0.5;
+        let out = paged_attention_i8_reference(
+            &query, &key_i8, &value_i8, 2, head_dim, 0.1, v_scale, 1.0,
+        );
+        // mean of (10,20) and (30,40) scaled by 0.5 → (20*0.5, 30*0.5) = (10, 15)
+        assert!((out[0] - 10.0).abs() < 1e-5);
+        assert!((out[1] - 15.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn i8_reference_matches_hand_computed_softmax() {
+        // Two positions, head_dim 1, easy to compute by hand.
+        let head_dim = 1;
+        let query = vec![2.0];
+        let k_scale = 0.5;
+        let v_scale = 1.0;
+        let soft_scale = 1.0;
+        let key_i8 = vec![1i8, 3]; // dequant keys: 0.5, 1.5
+        let value_i8 = vec![10i8, 20];
+        // logits = scale * q * (k*k_scale): l0 = 2*0.5 = 1.0, l1 = 2*1.5 = 3.0
+        let out = paged_attention_i8_reference(
+            &query, &key_i8, &value_i8, 2, head_dim, k_scale, v_scale, soft_scale,
+        );
+        let (l0, l1) = (1.0f32, 3.0f32);
+        let (e0, e1) = ((l0 - l1).exp(), 1.0f32); // stable: subtract max=l1
+        let sum = e0 + e1;
+        let expected = (e0 / sum) * 10.0 + (e1 / sum) * 20.0;
+        assert!((out[0] - expected).abs() < 1e-5, "out={} expected={}", out[0], expected);
+    }
+
+    #[test]
+    fn i8_reference_empty_is_zero() {
+        let out = paged_attention_i8_reference(&[1.0, 2.0], &[], &[], 0, 2, 1.0, 1.0, 1.0);
+        assert_eq!(out, vec![0.0, 0.0]);
+    }
+
     #[cfg(not(has_cuda))]
     mod no_cuda {
         use super::*;
@@ -1176,6 +1669,303 @@ mod tests {
                 0,
             );
             assert!(matches!(result, Err(CudaKernelError::NotAvailable)));
+        }
+    }
+
+    #[cfg(has_cuda)]
+    mod with_cuda {
+        use super::*;
+        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_to_device, gpu_memcpy_to_host};
+
+        #[test]
+        fn decode_i8_matches_cpu_reference() {
+            // 1 seq, 1 q head, 1 kv head, head_dim 4, block_size 4, seq_len 2,
+            // 1 physical block. Validates the int8 decode kernel against the CPU
+            // dequant-attention oracle.
+            let head_dim = 4usize;
+            let block_size = 4usize;
+            let kv_len = 2usize;
+            let num_blocks = 1i64;
+            let k_scale = 0.05f32;
+            let v_scale = 0.1f32;
+            let soft_scale = 1.0 / (head_dim as f32).sqrt();
+
+            // f16 query (kernel reads f16); use the f16-rounded value for the oracle.
+            let q_f32 = [0.5f32, -0.3, 1.2, 0.1];
+            let q_u16: Vec<u16> = q_f32.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+            let q_oracle: Vec<f32> =
+                q_f32.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect();
+
+            // Dense int8 K/V, row-major [pos, d].
+            let key_i8: Vec<i8> = vec![10, -20, 30, 5, -7, 40, -3, 12];
+            let value_i8: Vec<i8> = vec![4, 8, -16, 32, -10, 22, 6, -2];
+
+            // Scatter dense [pos,d] into NHD cache buffer: idx = d*block_size + pos
+            // (block 0, kv_head 0). Unused slots stay 0.
+            let cache_elems = (num_blocks as usize) * head_dim * block_size;
+            let mut key_cache_host = vec![0i8; cache_elems];
+            let mut val_cache_host = vec![0i8; cache_elems];
+            for pos in 0..kv_len {
+                for d in 0..head_dim {
+                    let idx = d * block_size + pos;
+                    key_cache_host[idx] = key_i8[pos * head_dim + d];
+                    val_cache_host[idx] = value_i8[pos * head_dim + d];
+                }
+            }
+
+            let block_tables: Vec<i32> = vec![0];
+            let seq_lens: Vec<i32> = vec![kv_len as i32];
+
+            // Device buffers.
+            let key_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let value_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let query = unsafe { gpu_alloc(head_dim * 2).unwrap() } as *mut u16;
+            let bt_dev = unsafe { gpu_alloc(block_tables.len() * 4).unwrap() } as *mut i32;
+            let sl_dev = unsafe { gpu_alloc(seq_lens.len() * 4).unwrap() } as *mut i32;
+            let out_dev = unsafe { gpu_alloc(head_dim * 2).unwrap() } as *mut u16;
+
+            unsafe {
+                gpu_memcpy_to_device(
+                    key_cache as *mut u8,
+                    key_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    value_cache as *mut u8,
+                    val_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(query as *mut u8, q_u16.as_ptr() as *const u8, head_dim * 2)
+                    .unwrap();
+                gpu_memcpy_to_device(
+                    bt_dev as *mut u8,
+                    block_tables.as_ptr() as *const u8,
+                    block_tables.len() * 4,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    sl_dev as *mut u8,
+                    seq_lens.as_ptr() as *const u8,
+                    seq_lens.len() * 4,
+                )
+                .unwrap();
+
+                paged_attention_decode_i8_sync(
+                    out_dev,
+                    query as *const u16,
+                    key_cache as *const i8,
+                    value_cache as *const i8,
+                    bt_dev as *const i32,
+                    sl_dev as *const i32,
+                    1, // num_seqs
+                    1, // num_q_heads
+                    1, // num_kv_heads
+                    head_dim as i64,
+                    block_size as i64,
+                    1, // max_num_blocks_per_seq
+                    soft_scale,
+                    k_scale,
+                    v_scale,
+                )
+                .expect("decode_i8_sync failed");
+            }
+
+            let mut out_u16 = vec![0u16; head_dim];
+            unsafe {
+                gpu_memcpy_to_host(
+                    out_u16.as_mut_ptr() as *mut u8,
+                    out_dev as *const u8,
+                    head_dim * 2,
+                )
+                .unwrap();
+            }
+            let out_gpu: Vec<f32> =
+                out_u16.iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();
+
+            let out_ref = paged_attention_i8_reference(
+                &q_oracle, &key_i8, &value_i8, kv_len, head_dim, k_scale, v_scale, soft_scale,
+            );
+
+            // f16 output + fp32 accumulation: allow a small tolerance.
+            for d in 0..head_dim {
+                assert!(
+                    (out_gpu[d] - out_ref[d]).abs() < 5e-3,
+                    "d={d} gpu={} ref={}",
+                    out_gpu[d],
+                    out_ref[d]
+                );
+            }
+
+            unsafe {
+                gpu_free(key_cache as *mut u8).unwrap();
+                gpu_free(value_cache as *mut u8).unwrap();
+                gpu_free(query as *mut u8).unwrap();
+                gpu_free(bt_dev as *mut u8).unwrap();
+                gpu_free(sl_dev as *mut u8).unwrap();
+                gpu_free(out_dev as *mut u8).unwrap();
+            }
+        }
+
+        #[test]
+        fn prefill_i8_matches_cpu_reference() {
+            // 1 seq, 2 tokens (prefill), 1 q head, 1 kv head, head_dim 4, block_size 4, seq_len 2,
+            // 1 physical block. Validates the int8 prefill kernel against the CPU
+            // dequant-attention oracle.
+            let head_dim = 4usize;
+            let block_size = 4usize;
+            let kv_len = 2usize;
+            let num_tokens = 2usize;
+            let num_blocks = 1i64;
+            let k_scale = 0.05f32;
+            let v_scale = 0.1f32;
+            let soft_scale = 1.0 / (head_dim as f32).sqrt();
+
+            // f16 query (kernel reads f16); use the f16-rounded value for the oracle.
+            // 2 tokens, head_dim 4.
+            let q_f32 = [0.5f32, -0.3, 1.2, 0.1, 0.2, 0.8, -0.5, 0.4];
+            let q_u16: Vec<u16> = q_f32.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+            let q_oracle: Vec<f32> =
+                q_f32.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect();
+
+            // Dense int8 K/V, row-major [pos, d].
+            let key_i8: Vec<i8> = vec![10, -20, 30, 5, -7, 40, -3, 12];
+            let value_i8: Vec<i8> = vec![4, 8, -16, 32, -10, 22, 6, -2];
+
+            // Scatter dense [pos,d] into NHD cache buffer: idx = d*block_size + pos
+            // (block 0, kv_head 0). Unused slots stay 0.
+            let cache_elems = (num_blocks as usize) * head_dim * block_size;
+            let mut key_cache_host = vec![0i8; cache_elems];
+            let mut val_cache_host = vec![0i8; cache_elems];
+            for pos in 0..kv_len {
+                for d in 0..head_dim {
+                    let idx = d * block_size + pos;
+                    key_cache_host[idx] = key_i8[pos * head_dim + d];
+                    val_cache_host[idx] = value_i8[pos * head_dim + d];
+                }
+            }
+
+            let block_tables: Vec<i32> = vec![0];
+            let seq_lens: Vec<i32> = vec![kv_len as i32];
+            let query_start_loc: Vec<i32> = vec![0, num_tokens as i32];
+
+            // Device buffers.
+            let key_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let value_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let query = unsafe { gpu_alloc(num_tokens * head_dim * 2).unwrap() } as *mut u16;
+            let bt_dev = unsafe { gpu_alloc(block_tables.len() * 4).unwrap() } as *mut i32;
+            let sl_dev = unsafe { gpu_alloc(seq_lens.len() * 4).unwrap() } as *mut i32;
+            let qsl_dev = unsafe { gpu_alloc(query_start_loc.len() * 4).unwrap() } as *mut i32;
+            let out_dev = unsafe { gpu_alloc(num_tokens * head_dim * 2).unwrap() } as *mut u16;
+
+            unsafe {
+                gpu_memcpy_to_device(
+                    key_cache as *mut u8,
+                    key_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    value_cache as *mut u8,
+                    val_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(query as *mut u8, q_u16.as_ptr() as *const u8, num_tokens * head_dim * 2)
+                    .unwrap();
+                gpu_memcpy_to_device(
+                    bt_dev as *mut u8,
+                    block_tables.as_ptr() as *const u8,
+                    block_tables.len() * 4,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    sl_dev as *mut u8,
+                    seq_lens.as_ptr() as *const u8,
+                    seq_lens.len() * 4,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    qsl_dev as *mut u8,
+                    query_start_loc.as_ptr() as *const u8,
+                    query_start_loc.len() * 4,
+                )
+                .unwrap();
+
+                paged_attention_prefill_i8_sync(
+                    out_dev,
+                    query as *const u16,
+                    key_cache as *const i8,
+                    value_cache as *const i8,
+                    bt_dev as *const i32,
+                    sl_dev as *const i32,
+                    qsl_dev as *const i32,
+                    1, // num_seqs
+                    num_tokens as i64,
+                    1, // num_q_heads
+                    1, // num_kv_heads
+                    head_dim as i64,
+                    block_size as i64,
+                    1, // max_num_blocks_per_seq
+                    soft_scale,
+                    k_scale,
+                    v_scale,
+                )
+                .expect("prefill_i8_sync failed");
+            }
+
+            let mut out_u16 = vec![0u16; num_tokens * head_dim];
+            unsafe {
+                gpu_memcpy_to_host(
+                    out_u16.as_mut_ptr() as *mut u8,
+                    out_dev as *const u8,
+                    num_tokens * head_dim * 2,
+                )
+                .unwrap();
+            }
+            let out_gpu: Vec<f32> =
+                out_u16.iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();
+
+            // Oracle output for token 0 (kv_len = 1)
+            let out_ref_0 = paged_attention_i8_reference(
+                &q_oracle[0..4], &key_i8[0..4], &value_i8[0..4], 1, head_dim, k_scale, v_scale, soft_scale,
+            );
+
+            // Oracle output for token 1 (kv_len = 2)
+            let out_ref_1 = paged_attention_i8_reference(
+                &q_oracle[4..8], &key_i8[0..8], &value_i8[0..8], 2, head_dim, k_scale, v_scale, soft_scale,
+            );
+
+            // Verify token 0
+            for d in 0..head_dim {
+                assert!(
+                    (out_gpu[d] - out_ref_0[d]).abs() < 5e-3,
+                    "token 0, d={d} gpu={} ref={}",
+                    out_gpu[d],
+                    out_ref_0[d]
+                );
+            }
+
+            // Verify token 1
+            for d in 0..head_dim {
+                assert!(
+                    (out_gpu[head_dim + d] - out_ref_1[d]).abs() < 5e-3,
+                    "token 1, d={d} gpu={} ref={}",
+                    out_gpu[head_dim + d],
+                    out_ref_1[d]
+                );
+            }
+
+            unsafe {
+                gpu_free(key_cache as *mut u8).unwrap();
+                gpu_free(value_cache as *mut u8).unwrap();
+                gpu_free(query as *mut u8).unwrap();
+                gpu_free(bt_dev as *mut u8).unwrap();
+                gpu_free(sl_dev as *mut u8).unwrap();
+                gpu_free(qsl_dev as *mut u8).unwrap();
+                gpu_free(out_dev as *mut u8).unwrap();
+            }
         }
     }
 }
