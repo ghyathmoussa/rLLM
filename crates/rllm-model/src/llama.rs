@@ -50,6 +50,10 @@ impl Model for LlamaForCausalLM {
         &self.config
     }
 
+    fn quantized_layer_count(&self) -> usize {
+        self.model.quantized_layer_count
+    }
+
     fn forward(
         &self,
         input_ids: &Tensor,
@@ -148,6 +152,7 @@ pub struct LlamaModel {
     #[allow(dead_code)]
     config: ModelConfig,
     device: Device,
+    pub quantized_layer_count: usize,
 }
 
 #[cfg(feature = "candle-backend")]
@@ -299,6 +304,22 @@ impl LlamaModel {
                 "transferred non-quantized weights from CPU to GPU after INT8 quantization"
             );
         }
+
+        // Log quantization mode, bits, and strategy at startup.
+        if let Some(ref q) = config.quantization {
+            let strategy = weights.quant_schema.as_ref()
+                .and_then(|s| s.weight_strategy.clone())
+                .unwrap_or_else(|| "channel".to_string());
+            tracing::info!(
+                kind = ?q.kind,
+                bits = ?q.bits,
+                strategy = %strategy,
+                "Quantization configured at startup"
+            );
+        } else {
+            tracing::info!("Quantization not configured at startup (running in full precision)");
+        }
+
         drop(weights);
 
         // Rotary embeddings
@@ -330,6 +351,7 @@ impl LlamaModel {
             rope,
             config: config.clone(),
             device: device.clone(),
+            quantized_layer_count: quantized_linears,
         })
     }
 

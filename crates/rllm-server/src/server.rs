@@ -41,6 +41,10 @@ struct ModelRuntime {
     model_dir: String,
     architecture: String,
     device: String,
+    quantization: Option<String>,
+    quant_bits: Option<usize>,
+    kv_cache_dtype: String,
+    quantized_layer_count: usize,
 }
 
 /// Application state shared across handlers.
@@ -223,7 +227,11 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         .context("initializing executor and loading model weights")?;
     tracing::info!(num_gpu_blocks, "KV cache allocated; sizing scheduler to match");
 
-    // Size the scheduler's block manager to the blocks actually allocated.
+    let quantized_layer_count = executor.worker().quantized_layer_count();
+    let quantization = model_config.quantization.as_ref().map(|q| format!("{:?}", q.kind));
+    let quant_bits = model_config.quantization.as_ref().and_then(|q| q.bits);
+    let kv_cache_dtype = format!("{:?}", cache_config.cache_dtype);
+
     let scheduler =
         Scheduler::new(scheduler_config, &cache_config, num_gpu_blocks, model_config.max_model_len);
 
@@ -247,6 +255,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_dir: model_dir.to_string_lossy().to_string(),
         architecture,
         device,
+        quantization,
+        quant_bits,
+        kv_cache_dtype,
+        quantized_layer_count,
     })
 }
 
@@ -464,6 +476,10 @@ struct DebugModelResponse {
     model_dir: Option<String>,
     architecture: Option<String>,
     device: Option<String>,
+    quantization: Option<String>,
+    bits: Option<usize>,
+    kv_cache_dtype: Option<String>,
+    quantized_layer_count: Option<usize>,
 }
 
 async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelResponse> {
@@ -471,9 +487,13 @@ async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelRe
     Json(DebugModelResponse {
         model: state.model_name.clone(),
         loaded: runtime.is_some(),
-        model_dir: Some(state.model_name),
+        model_dir: runtime.map(|rt| rt.model_dir.clone()),
         architecture: runtime.map(|rt| rt.architecture.clone()),
         device: runtime.map(|rt| rt.device.clone()),
+        quantization: runtime.and_then(|rt| rt.quantization.clone()),
+        bits: runtime.and_then(|rt| rt.quant_bits),
+        kv_cache_dtype: runtime.map(|rt| rt.kv_cache_dtype.clone()),
+        quantized_layer_count: runtime.map(|rt| rt.quantized_layer_count),
     })
 }
 

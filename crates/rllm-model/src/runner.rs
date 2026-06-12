@@ -106,6 +106,10 @@ impl ModelRunner {
         self.model.config()
     }
 
+    pub fn quantized_layer_count(&self) -> usize {
+        self.model.quantized_layer_count()
+    }
+
     pub fn device_description(&self) -> String {
         format!("{:?}", self.device)
     }

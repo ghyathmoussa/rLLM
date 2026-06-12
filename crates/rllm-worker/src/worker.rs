@@ -508,6 +508,17 @@ impl Worker {
         None
     }
 
+    pub fn quantized_layer_count(&self) -> usize {
+        #[cfg(feature = "candle-backend")]
+        {
+            self.candle_model.as_ref().map(|m| m.quantized_layer_count()).unwrap_or(0)
+        }
+        #[cfg(not(feature = "candle-backend"))]
+        {
+            0
+        }
+    }
+
     /// Execute a batched paged forward pass using the global GPU KV cache.
     ///
     /// This is the high-performance path: all requests in the batch share a
