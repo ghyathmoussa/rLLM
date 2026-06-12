@@ -1807,5 +1807,165 @@ mod tests {
                 gpu_free(out_dev as *mut u8).unwrap();
             }
         }
+
+        #[test]
+        fn prefill_i8_matches_cpu_reference() {
+            // 1 seq, 2 tokens (prefill), 1 q head, 1 kv head, head_dim 4, block_size 4, seq_len 2,
+            // 1 physical block. Validates the int8 prefill kernel against the CPU
+            // dequant-attention oracle.
+            let head_dim = 4usize;
+            let block_size = 4usize;
+            let kv_len = 2usize;
+            let num_tokens = 2usize;
+            let num_blocks = 1i64;
+            let k_scale = 0.05f32;
+            let v_scale = 0.1f32;
+            let soft_scale = 1.0 / (head_dim as f32).sqrt();
+
+            // f16 query (kernel reads f16); use the f16-rounded value for the oracle.
+            // 2 tokens, head_dim 4.
+            let q_f32 = [0.5f32, -0.3, 1.2, 0.1, 0.2, 0.8, -0.5, 0.4];
+            let q_u16: Vec<u16> = q_f32.iter().map(|&x| half::f16::from_f32(x).to_bits()).collect();
+            let q_oracle: Vec<f32> =
+                q_f32.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect();
+
+            // Dense int8 K/V, row-major [pos, d].
+            let key_i8: Vec<i8> = vec![10, -20, 30, 5, -7, 40, -3, 12];
+            let value_i8: Vec<i8> = vec![4, 8, -16, 32, -10, 22, 6, -2];
+
+            // Scatter dense [pos,d] into NHD cache buffer: idx = d*block_size + pos
+            // (block 0, kv_head 0). Unused slots stay 0.
+            let cache_elems = (num_blocks as usize) * head_dim * block_size;
+            let mut key_cache_host = vec![0i8; cache_elems];
+            let mut val_cache_host = vec![0i8; cache_elems];
+            for pos in 0..kv_len {
+                for d in 0..head_dim {
+                    let idx = d * block_size + pos;
+                    key_cache_host[idx] = key_i8[pos * head_dim + d];
+                    val_cache_host[idx] = value_i8[pos * head_dim + d];
+                }
+            }
+
+            let block_tables: Vec<i32> = vec![0];
+            let seq_lens: Vec<i32> = vec![kv_len as i32];
+            let query_start_loc: Vec<i32> = vec![0, num_tokens as i32];
+
+            // Device buffers.
+            let key_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let value_cache = unsafe { gpu_alloc(cache_elems).unwrap() } as *mut i8;
+            let query = unsafe { gpu_alloc(num_tokens * head_dim * 2).unwrap() } as *mut u16;
+            let bt_dev = unsafe { gpu_alloc(block_tables.len() * 4).unwrap() } as *mut i32;
+            let sl_dev = unsafe { gpu_alloc(seq_lens.len() * 4).unwrap() } as *mut i32;
+            let qsl_dev = unsafe { gpu_alloc(query_start_loc.len() * 4).unwrap() } as *mut i32;
+            let out_dev = unsafe { gpu_alloc(num_tokens * head_dim * 2).unwrap() } as *mut u16;
+
+            unsafe {
+                gpu_memcpy_to_device(
+                    key_cache as *mut u8,
+                    key_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    value_cache as *mut u8,
+                    val_cache_host.as_ptr() as *const u8,
+                    cache_elems,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(query as *mut u8, q_u16.as_ptr() as *const u8, num_tokens * head_dim * 2)
+                    .unwrap();
+                gpu_memcpy_to_device(
+                    bt_dev as *mut u8,
+                    block_tables.as_ptr() as *const u8,
+                    block_tables.len() * 4,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    sl_dev as *mut u8,
+                    seq_lens.as_ptr() as *const u8,
+                    seq_lens.len() * 4,
+                )
+                .unwrap();
+                gpu_memcpy_to_device(
+                    qsl_dev as *mut u8,
+                    query_start_loc.as_ptr() as *const u8,
+                    query_start_loc.len() * 4,
+                )
+                .unwrap();
+
+                paged_attention_prefill_i8_sync(
+                    out_dev,
+                    query as *const u16,
+                    key_cache as *const i8,
+                    value_cache as *const i8,
+                    bt_dev as *const i32,
+                    sl_dev as *const i32,
+                    qsl_dev as *const i32,
+                    1, // num_seqs
+                    num_tokens as i64,
+                    1, // num_q_heads
+                    1, // num_kv_heads
+                    head_dim as i64,
+                    block_size as i64,
+                    1, // max_num_blocks_per_seq
+                    soft_scale,
+                    k_scale,
+                    v_scale,
+                )
+                .expect("prefill_i8_sync failed");
+            }
+
+            let mut out_u16 = vec![0u16; num_tokens * head_dim];
+            unsafe {
+                gpu_memcpy_to_host(
+                    out_u16.as_mut_ptr() as *mut u8,
+                    out_dev as *const u8,
+                    num_tokens * head_dim * 2,
+                )
+                .unwrap();
+            }
+            let out_gpu: Vec<f32> =
+                out_u16.iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();
+
+            // Oracle output for token 0 (kv_len = 1)
+            let out_ref_0 = paged_attention_i8_reference(
+                &q_oracle[0..4], &key_i8[0..4], &value_i8[0..4], 1, head_dim, k_scale, v_scale, soft_scale,
+            );
+
+            // Oracle output for token 1 (kv_len = 2)
+            let out_ref_1 = paged_attention_i8_reference(
+                &q_oracle[4..8], &key_i8[0..8], &value_i8[0..8], 2, head_dim, k_scale, v_scale, soft_scale,
+            );
+
+            // Verify token 0
+            for d in 0..head_dim {
+                assert!(
+                    (out_gpu[d] - out_ref_0[d]).abs() < 5e-3,
+                    "token 0, d={d} gpu={} ref={}",
+                    out_gpu[d],
+                    out_ref_0[d]
+                );
+            }
+
+            // Verify token 1
+            for d in 0..head_dim {
+                assert!(
+                    (out_gpu[head_dim + d] - out_ref_1[d]).abs() < 5e-3,
+                    "token 1, d={d} gpu={} ref={}",
+                    out_gpu[head_dim + d],
+                    out_ref_1[d]
+                );
+            }
+
+            unsafe {
+                gpu_free(key_cache as *mut u8).unwrap();
+                gpu_free(value_cache as *mut u8).unwrap();
+                gpu_free(query as *mut u8).unwrap();
+                gpu_free(bt_dev as *mut u8).unwrap();
+                gpu_free(sl_dev as *mut u8).unwrap();
+                gpu_free(qsl_dev as *mut u8).unwrap();
+                gpu_free(out_dev as *mut u8).unwrap();
+            }
+        }
     }
 }
