@@ -5,6 +5,13 @@ use rllm_core::{config::ModelConfig, dtype::DType};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+struct HfQuantizationConfigJson {
+    quant_method: Option<String>,
+    bits: Option<usize>,
+    group_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct HfConfigJson {
     model_type: Option<String>,
@@ -21,6 +28,7 @@ struct HfConfigJson {
     head_dim: Option<usize>,
     hidden_act: Option<String>,
     rms_norm_eps: Option<f64>,
+    quantization_config: Option<HfQuantizationConfigJson>,
 }
 
 pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
@@ -53,6 +61,20 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         _ => DType::F16,
     };
 
+    let quantization = hf.quantization_config.and_then(|q| {
+        let quant_method = q.quant_method?;
+        let kind = match quant_method.to_lowercase().as_str() {
+            "gptq" => rllm_core::config::QuantizationKind::GPTQ,
+            "awq" => rllm_core::config::QuantizationKind::AWQ,
+            _ => return None,
+        };
+        Some(rllm_core::config::QuantizationConfig {
+            kind,
+            group_size: q.group_size,
+            bits: q.bits,
+        })
+    });
+
     Ok(ModelConfig {
         model_id: path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string(),
         architecture,
@@ -67,7 +89,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         rope_theta: hf.rope_theta.unwrap_or(10000.0) as f32,
         rope_scaling: None,
         dtype,
-        quantization: None,
+        quantization,
         tokenizer_mode: rllm_core::config::TokenizerMode::Auto,
     })
 }

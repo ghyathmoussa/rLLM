@@ -31,33 +31,196 @@ impl RmsNorm {
 // ── Linear (no bias, as in Llama) ────────────────────────────────────────
 
 #[cfg(feature = "candle-backend")]
+pub enum LinearWeight {
+    Fp(Tensor),
+    Gptq {
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        g_idx: Tensor,
+        bits: usize,
+        group_size: usize,
+        dequantized: std::sync::OnceLock<Tensor>,
+    },
+}
+
+#[cfg(feature = "candle-backend")]
+pub fn dequantize_gptq(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    g_idx: &Tensor,
+    bits: usize,
+    _group_size: usize,
+) -> Result<Tensor> {
+    if bits != 4 {
+        return Err(candle_core::Error::Msg(format!(
+            "Only 4-bit GPTQ is supported, got {bits}"
+        )));
+    }
+
+    let device = qweight.device();
+    
+    // We expect qweight to be (in_features / 8, out_features)
+    let (packed_in_features, out_features) = qweight.dims2()?;
+    let in_features = packed_in_features * 8;
+
+    // Convert qweight from signed I32 to unsigned I64 to avoid sign-extension bugs.
+    // If it's negative, add 2^32.
+    let qweight_i64 = qweight.to_dtype(DType::I64)?;
+    let zero_w = Tensor::new(0i64, device)?.broadcast_as(qweight_i64.shape())?;
+    let is_neg = qweight_i64.lt(&zero_w)?;
+    let offset_w = Tensor::new(4294967296i64, device)?.broadcast_as(qweight_i64.shape())?;
+    let qweight_u64 = qweight_i64.add(&is_neg.to_dtype(DType::I64)?.mul(&offset_w)?)?;
+
+    // Unpack qweight (bits = 4, so 8 values per i32/i64)
+    let mut w_unpacked = Vec::with_capacity(8);
+    let c16_w = Tensor::new(16i64, device)?.broadcast_as(qweight_u64.shape())?;
+    for i in 0..8 {
+        let divisor = 1i64 << (4 * i);
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qweight_u64.shape())?;
+        let shifted = qweight_u64.div(&divisor_t)?;
+        let temp = shifted.div(&c16_w)?.mul(&c16_w)?;
+        let masked = shifted.sub(&temp)?;
+        w_unpacked.push(masked);
+    }
+    // Stack along dimension 1 (shape: [packed_in_features, 8, out_features])
+    let w_stacked = Tensor::stack(&w_unpacked, 1)?;
+    // Reshape to [in_features, out_features]
+    let w_raw = w_stacked.reshape((in_features, out_features))?.to_dtype(DType::F32)?;
+
+    // Convert qzeros from signed I32 to unsigned I64.
+    let qzeros_i64 = qzeros.to_dtype(DType::I64)?;
+    let zero_z = Tensor::new(0i64, device)?.broadcast_as(qzeros_i64.shape())?;
+    let is_neg_z = qzeros_i64.lt(&zero_z)?;
+    let offset_z = Tensor::new(4294967296i64, device)?.broadcast_as(qzeros_i64.shape())?;
+    let qzeros_u64 = qzeros_i64.add(&is_neg_z.to_dtype(DType::I64)?.mul(&offset_z)?)?;
+
+    // Unpack qzeros
+    let mut z_unpacked = Vec::with_capacity(8);
+    let c16_z = Tensor::new(16i64, device)?.broadcast_as(qzeros_u64.shape())?;
+    let one_z = Tensor::new(1.0f32, device)?.broadcast_as(qzeros_u64.shape())?;
+    for i in 0..8 {
+        let divisor = 1i64 << (4 * i);
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qzeros_u64.shape())?;
+        let shifted = qzeros_u64.div(&divisor_t)?;
+        let temp = shifted.div(&c16_z)?.mul(&c16_z)?;
+        let masked = shifted.sub(&temp)?;
+        let adjusted = masked.to_dtype(DType::F32)?.add(&one_z)?;
+        z_unpacked.push(adjusted);
+    }
+    // Stack along dimension 2 (shape: [num_groups, out_features / 8, 8])
+    let z_stacked = Tensor::stack(&z_unpacked, 2)?;
+    // Reshape to [num_groups, out_features]
+    let z_raw = z_stacked.reshape((qzeros.dim(0)?, out_features))?;
+
+    // Prepare g_idx (cast to U32 for index_select)
+    let g_idx_u32 = g_idx.to_dtype(DType::U32)?;
+
+    // Select scales and zero-points for each input feature
+    let select_scales = scales.index_select(&g_idx_u32, 0)?; // [in_features, out_features]
+    let select_zeros = z_raw.index_select(&g_idx_u32, 0)?;   // [in_features, out_features]
+
+    // Apply dequantization formula: (W_q - ZP) * Scale
+    let target_dtype = scales.dtype();
+    let w_dequant = w_raw.sub(&select_zeros)?.mul(&select_scales.to_dtype(DType::F32)?)?;
+    let w_dequant = w_dequant.to_dtype(target_dtype)?;
+
+    // Transpose back to match [out_features, in_features] shape
+    w_dequant.t()
+}
+
+#[cfg(feature = "candle-backend")]
 pub struct Linear {
-    weight: Tensor,
+    weight: LinearWeight,
 }
 
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self { weight }
+        Self {
+            weight: LinearWeight::Fp(weight),
+        }
+    }
+
+    pub fn new_gptq(
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        g_idx: Tensor,
+        bits: usize,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            weight: LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized: std::sync::OnceLock::new(),
+            },
+        }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let weight = match &self.weight {
+            LinearWeight::Fp(w) => w,
+            LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                if let Some(w) = dequantized.get() {
+                    w
+                } else {
+                    let w = dequantize_gptq(qweight, qzeros, scales, g_idx, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    dequantized.get().unwrap()
+                }
+            }
+        };
+
         // weight shape: [out_features, in_features]
         // x shape: [..., in_features]
-        let in_features = self.weight.dim(D::Minus1)?;
-        let out_features = self.weight.dim(D::Minus2)?;
+        let in_features = weight.dim(D::Minus1)?;
+        let out_features = weight.dim(D::Minus2)?;
         let x_shape = x.dims();
         let trailing = x_shape.len().saturating_sub(1);
         let batch: usize = x_shape[..trailing].iter().product();
         let x_2d = x.reshape((batch, in_features))?;
-        let out = x_2d.matmul(&self.weight.t()?)?;
+        let out = x_2d.matmul(&weight.t()?)?;
         let mut out_shape = x_shape[..trailing].to_vec();
         out_shape.push(out_features);
         out.reshape(out_shape)
     }
 
-    pub fn weight(&self) -> &Tensor {
-        &self.weight
+    pub fn weight(&self) -> Result<&Tensor> {
+        match &self.weight {
+            LinearWeight::Fp(w) => Ok(w),
+            LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                if let Some(w) = dequantized.get() {
+                    Ok(w)
+                } else {
+                    let w = dequantize_gptq(qweight, qzeros, scales, g_idx, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    Ok(dequantized.get().unwrap())
+                }
+            }
+        }
     }
 }
 
@@ -72,11 +235,11 @@ pub struct LlamaMLP {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaMLP {
-    pub fn new(gate_proj: Tensor, up_proj: Tensor, down_proj: Tensor) -> Self {
+    pub fn new(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
         Self {
-            gate_proj: Linear::new(gate_proj),
-            up_proj: Linear::new(up_proj),
-            down_proj: Linear::new(down_proj),
+            gate_proj,
+            up_proj,
+            down_proj,
         }
     }
 
@@ -105,19 +268,19 @@ pub struct LlamaAttention {
 #[cfg(feature = "candle-backend")]
 impl LlamaAttention {
     pub fn new(
-        q_proj: Tensor,
-        k_proj: Tensor,
-        v_proj: Tensor,
-        o_proj: Tensor,
+        q_proj: Linear,
+        k_proj: Linear,
+        v_proj: Linear,
+        o_proj: Linear,
         num_heads: usize,
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
         Self {
-            q_proj: Linear::new(q_proj),
-            k_proj: Linear::new(k_proj),
-            v_proj: Linear::new(v_proj),
-            o_proj: Linear::new(o_proj),
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
             num_heads,
             num_kv_heads,
             head_dim,
@@ -298,9 +461,9 @@ mod tests {
         let intermediate = 128;
 
         let mlp = LlamaMLP::new(
-            Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (hidden, intermediate), &device)?,
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (hidden, intermediate), &device)?),
         );
 
         let x = Tensor::randn(0.0f32, 1.0f32, (1, 5, hidden), &device)?;
@@ -318,10 +481,10 @@ mod tests {
         let head_dim = hidden / num_heads;
 
         let attn = LlamaAttention::new(
-            Tensor::randn(0.0f32, 1.0f32, (num_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (hidden, num_heads * head_dim), &device)?,
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (hidden, num_heads * head_dim), &device)?),
             num_heads,
             num_kv_heads,
             head_dim,
@@ -356,6 +519,59 @@ mod tests {
         assert!(vals[2][1].is_finite());
         assert!(vals[2][2].is_finite());
         assert!(vals[2][3].is_infinite());
+        Ok(())
+    }
+
+    #[test]
+    fn gptq_dequantization_correctness() -> Result<()> {
+        let device = Device::Cpu;
+
+        // Shape: (1, 8)
+        let qweight_data = vec![
+            1985229328i32,  // Col 0: 0x76543210
+            -19088744i32,   // Col 1: 0xFEDCBA98
+            -324508640i32,  // Col 2: 0xECA86420
+            -1985229329i32, // Col 3: 0x89ABCDEF
+            0i32, 0i32, 0i32, 0i32, // Col 4-7
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
+
+        // Shape: (1, 1)
+        // Zero points packed: 7 for all 8 cols -> 0x77777777
+        let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
+
+        // Shape: (1, 8)
+        let scales = Tensor::from_vec(vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32], (1, 8), &device)?;
+
+        // Shape: (8,)
+        let g_idx = Tensor::from_vec(vec![0u32; 8], (8,), &device)?;
+
+        let w_dequant = dequantize_gptq(&qweight, &qzeros, &scales, &g_idx, 4, 8)?;
+        // Expected shape: (8, 8)
+        assert_eq!(w_dequant.dims(), &[8, 8]);
+
+        let w_vals = w_dequant.to_vec2::<f32>()?;
+
+        // Verify Col 0: expected [r - 8]
+        for r in 0..8 {
+            assert_eq!(w_vals[0][r], (r as f32) - 8.0);
+        }
+
+        // Verify Col 1: expected [2.0 * r]
+        for r in 0..8 {
+            assert_eq!(w_vals[1][r], 2.0 * (r as f32));
+        }
+
+        // Verify Col 2: expected [(2 * r - 8) * 3.0]
+        for r in 0..8 {
+            assert_eq!(w_vals[2][r], ((2 * r) as f32 - 8.0) * 3.0);
+        }
+
+        // Verify Col 3: expected [(7 - r) * 4.0]
+        for r in 0..8 {
+            assert_eq!(w_vals[3][r], (7.0 - (r as f32)) * 4.0);
+        }
+
         Ok(())
     }
 }

@@ -137,6 +137,64 @@ pub struct LlamaModel {
 }
 
 #[cfg(feature = "candle-backend")]
+#[cfg(feature = "candle-backend")]
+fn load_linear(
+    prefix: &str,
+    weights: &mut WeightMap,
+    config: &ModelConfig,
+    device: &Device,
+) -> Result<Linear> {
+    let qweight_name = format!("{prefix}.qweight");
+    if weights.weights.contains_key(&qweight_name) {
+        let qweight = weights
+            .weights
+            .remove(&qweight_name)
+            .ok_or_else(|| anyhow::anyhow!("missing {qweight_name}"))?;
+        let qzeros = weights
+            .weights
+            .remove(&format!("{prefix}.qzeros"))
+            .ok_or_else(|| anyhow::anyhow!("missing {prefix}.qzeros"))?;
+        let scales = weights
+            .weights
+            .remove(&format!("{prefix}.scales"))
+            .ok_or_else(|| anyhow::anyhow!("missing {prefix}.scales"))?;
+            
+        let bits = config
+            .quantization
+            .as_ref()
+            .and_then(|q| q.bits)
+            .unwrap_or(4);
+        let group_size = config
+            .quantization
+            .as_ref()
+            .and_then(|q| q.group_size)
+            .unwrap_or(128);
+
+        let in_features = qweight.dim(0)? * 8;
+
+        let g_idx = if let Some(g) = weights.weights.remove(&format!("{prefix}.g_idx")) {
+            g
+        } else {
+            let g_idx_vec: Vec<u32> = (0..in_features)
+                .map(|r| (r / group_size) as u32)
+                .collect();
+            Tensor::from_vec(g_idx_vec, (in_features,), device)?
+        };
+
+        Ok(Linear::new_gptq(
+            qweight, qzeros, scales, g_idx, bits, group_size,
+        ))
+    } else {
+        let weight_name = format!("{prefix}.weight");
+        let weight = weights
+            .weights
+            .remove(&weight_name)
+            .ok_or_else(|| anyhow::anyhow!("missing {weight_name}"))?;
+        Ok(Linear::new(weight))
+    }
+}
+
+#[cfg(feature = "candle-backend")]
 impl LlamaModel {
     pub fn new(config: &ModelConfig, mut weights: WeightMap, device: &Device) -> Result<Self> {
         let num_heads = config.num_attention_heads;
@@ -157,7 +215,7 @@ impl LlamaModel {
             weights.weights.remove("lm_head.weight").unwrap()
         } else {
             tracing::info!("lm_head is tied with embed_tokens, reusing embedding weight");
-            embed_tokens.weight().clone()
+            embed_tokens.weight()?.clone()
         };
         let lm_head = Linear::new(lm_head_weight);
 
@@ -168,22 +226,10 @@ impl LlamaModel {
         for i in 0..config.num_layers {
             let prefix = format!("model.layers.{i}");
 
-            let q_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.q_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.q_proj.weight"))?;
-            let k_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.k_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.k_proj.weight"))?;
-            let v_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.v_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.v_proj.weight"))?;
-            let o_proj = weights
-                .weights
-                .remove(&format!("{prefix}.self_attn.o_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.self_attn.o_proj.weight"))?;
+            let q_proj = load_linear(&format!("{prefix}.self_attn.q_proj"), &mut weights, config, device)?;
+            let k_proj = load_linear(&format!("{prefix}.self_attn.k_proj"), &mut weights, config, device)?;
+            let v_proj = load_linear(&format!("{prefix}.self_attn.v_proj"), &mut weights, config, device)?;
+            let o_proj = load_linear(&format!("{prefix}.self_attn.o_proj"), &mut weights, config, device)?;
 
             let attn = LlamaAttention::new(
                 q_proj,
@@ -195,18 +241,9 @@ impl LlamaModel {
                 head_dim,
             );
 
-            let gate_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.gate_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.gate_proj.weight"))?;
-            let up_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.up_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.up_proj.weight"))?;
-            let down_proj = weights
-                .weights
-                .remove(&format!("{prefix}.mlp.down_proj.weight"))
-                .ok_or_else(|| anyhow::anyhow!("missing {prefix}.mlp.down_proj.weight"))?;
+            let gate_proj = load_linear(&format!("{prefix}.mlp.gate_proj"), &mut weights, config, device)?;
+            let up_proj = load_linear(&format!("{prefix}.mlp.up_proj"), &mut weights, config, device)?;
+            let down_proj = load_linear(&format!("{prefix}.mlp.down_proj"), &mut weights, config, device)?;
             let mlp = LlamaMLP::new(gate_proj, up_proj, down_proj);
 
             let input_ln_w = weights
@@ -266,7 +303,7 @@ impl LlamaModel {
         positions: &[usize],
         kv_cache: &mut [Option<(Tensor, Tensor)>],
     ) -> Result<Tensor> {
-        let hidden_states = embedding_lookup(self.embed_tokens.weight(), input_ids)
+        let hidden_states = embedding_lookup(self.embed_tokens.weight()?, input_ids)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut hidden_states = hidden_states;
