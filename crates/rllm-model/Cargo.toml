@@ -8,6 +8,7 @@ description = "Model registry, HF config parsing, Llama model implementation, an
 
 [dependencies]
 rllm-core.workspace = true
+rllm-kernels.workspace = true
 rllm-tensor.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -26,6 +27,7 @@ default = ["candle-backend"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "tokio"]
 cuda = [
     "candle-backend",
+    "rllm-kernels/cuda",
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",

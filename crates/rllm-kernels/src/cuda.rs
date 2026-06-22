@@ -33,6 +33,36 @@ mod ffi {
         pub fn rllm_block_copy(src: *const u8, dst: *mut u8, nbytes: i64, stream: usize) -> c_int;
 
         pub fn rllm_block_copy_sync(src: *const u8, dst: *mut u8, nbytes: i64) -> c_int;
+
+        // GPTQ GEMM (FP16 activations, FP16 output, FP16 scales)
+        pub fn rllm_gptq_gemm_f16(
+            x: *const u16,
+            qweight: *const i32,
+            qzeros: *const i32,
+            scales: *const u16,
+            g_idx: *const u32,
+            out: *mut u16,
+            m: i64,
+            in_features: i64,
+            out_features: i64,
+            num_groups: i64,
+            group_size: i64,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_gptq_gemm_f16_sync(
+            x: *const u16,
+            qweight: *const i32,
+            qzeros: *const i32,
+            scales: *const u16,
+            g_idx: *const u32,
+            out: *mut u16,
+            m: i64,
+            in_features: i64,
+            out_features: i64,
+            num_groups: i64,
+            group_size: i64,
+        ) -> c_int;
     }
 }
 
@@ -117,6 +147,87 @@ pub unsafe fn block_copy_sync(
     check(rc)
 }
 
+// ── GPTQ GEMM ────────────────────────────────────────────────────────────
+
+/// Launch async GPTQ GEMM with FP16 activations/output and packed INT4 weights.
+///
+/// # Safety
+/// - All pointers must be valid CUDA device pointers.
+/// - `x` must contain `m * in_features` FP16 elements.
+/// - `qweight` must contain `(in_features / 8) * out_features` packed i32 words.
+/// - `qzeros` must contain `num_groups * (out_features / 8)` packed i32 words.
+/// - `scales` must contain `num_groups * out_features` FP16 elements.
+/// - `g_idx` must contain `in_features` entries.
+/// - `out` must contain `m * out_features` FP16 elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn gptq_gemm_f16(
+    x: *const u16,
+    qweight: *const i32,
+    qzeros: *const i32,
+    scales: *const u16,
+    g_idx: *const u32,
+    out: *mut u16,
+    m: i64,
+    in_features: i64,
+    out_features: i64,
+    num_groups: i64,
+    group_size: i64,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gptq_gemm_f16(
+            x,
+            qweight,
+            qzeros,
+            scales,
+            g_idx,
+            out,
+            m,
+            in_features,
+            out_features,
+            num_groups,
+            group_size,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous GPTQ GEMM for testing/debugging.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn gptq_gemm_f16_sync(
+    x: *const u16,
+    qweight: *const i32,
+    qzeros: *const i32,
+    scales: *const u16,
+    g_idx: *const u32,
+    out: *mut u16,
+    m: i64,
+    in_features: i64,
+    out_features: i64,
+    num_groups: i64,
+    group_size: i64,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gptq_gemm_f16_sync(
+            x,
+            qweight,
+            qzeros,
+            scales,
+            g_idx,
+            out,
+            m,
+            in_features,
+            out_features,
+            num_groups,
+            group_size,
+        )
+    };
+    check(rc)
+}
+
 // ── Non-CUDA stubs ──────────────────────────────────────────────────────
 
 #[cfg(not(has_cuda))]
@@ -162,6 +273,41 @@ mod stubs {
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gptq_gemm_f16(
+        _x: *const u16,
+        _qweight: *const i32,
+        _qzeros: *const i32,
+        _scales: *const u16,
+        _g_idx: *const u32,
+        _out: *mut u16,
+        _m: i64,
+        _in_features: i64,
+        _out_features: i64,
+        _num_groups: i64,
+        _group_size: i64,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gptq_gemm_f16_sync(
+        _x: *const u16,
+        _qweight: *const i32,
+        _qzeros: *const i32,
+        _scales: *const u16,
+        _g_idx: *const u32,
+        _out: *mut u16,
+        _m: i64,
+        _in_features: i64,
+        _out_features: i64,
+        _num_groups: i64,
+        _group_size: i64,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +350,27 @@ mod tests {
             let mut buf = [0u8; 16];
             let result = block_copy_sync(buf.as_ptr(), buf.as_mut_ptr(), 16);
             assert!(result.is_err());
+        }
+
+        #[test]
+        fn gptq_gemm_returns_not_available() {
+            let mut out = [0u16; 8];
+            let result = gptq_gemm_f16(
+                out.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                out.as_ptr(),
+                std::ptr::null(),
+                out.as_mut_ptr(),
+                1,
+                8,
+                8,
+                1,
+                8,
+                0,
+            );
+            assert!(result.is_err());
+            assert!(matches!(result.unwrap_err(), CudaKernelError::NotAvailable));
         }
 
         #[test]

@@ -129,8 +129,8 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 rllm-core = { path = "crates/rllm-core", version = "0.1.0" }
 rllm-tokenizer = { path = "crates/rllm-tokenizer", version = "0.1.0" }
 rllm-model = { path = "crates/rllm-model", version = "0.1.0" }
-rllm-tensor = { path = "crates/rllm-tensor", version = "0.1.0" }
 rllm-kernels = { path = "crates/rllm-kernels", version = "0.1.0" }
+rllm-tensor = { path = "crates/rllm-tensor", version = "0.1.0" }
 rllm-cache = { path = "crates/rllm-cache", version = "0.1.0" }
 rllm-scheduler = { path = "crates/rllm-scheduler", version = "0.1.0" }
 rllm-sampling = { path = "crates/rllm-sampling", version = "0.1.0" }

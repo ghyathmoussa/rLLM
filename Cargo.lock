@@ -2806,6 +2806,7 @@ dependencies = [
  "candle-transformers",
  "hf-hub",
  "rllm-core",
+ "rllm-kernels",
  "rllm-tensor",
  "safetensors 0.6.2",
  "serde",

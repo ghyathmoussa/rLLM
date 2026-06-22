@@ -1,5 +1,7 @@
 #[cfg(feature = "candle-backend")]
 use candle_core::{D, DType, Device, Result, Tensor};
+#[cfg(all(feature = "candle-backend", feature = "cuda"))]
+use rllm_kernels::cuda::CudaKernelError;
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
@@ -165,8 +167,8 @@ impl Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let weight = match &self.weight {
-            LinearWeight::Fp(w) => w,
+        match &self.weight {
+            LinearWeight::Fp(weight) => self.forward_fp(x, weight),
             LinearWeight::Gptq {
                 qweight,
                 qzeros,
@@ -176,28 +178,23 @@ impl Linear {
                 group_size,
                 dequantized,
             } => {
-                if let Some(w) = dequantized.get() {
+                #[cfg(feature = "cuda")]
+                if let Some(out) =
+                    self.try_forward_gptq_cuda(x, qweight, qzeros, scales, g_idx, *bits, *group_size)?
+                {
+                    return Ok(out);
+                }
+
+                let weight = if let Some(w) = dequantized.get() {
                     w
                 } else {
                     let w = dequantize_gptq(qweight, qzeros, scales, g_idx, *bits, *group_size)?;
                     let _ = dequantized.set(w);
                     dequantized.get().unwrap()
-                }
+                };
+                self.forward_fp(x, weight)
             }
-        };
-
-        // weight shape: [out_features, in_features]
-        // x shape: [..., in_features]
-        let in_features = weight.dim(D::Minus1)?;
-        let out_features = weight.dim(D::Minus2)?;
-        let x_shape = x.dims();
-        let trailing = x_shape.len().saturating_sub(1);
-        let batch: usize = x_shape[..trailing].iter().product();
-        let x_2d = x.reshape((batch, in_features))?;
-        let out = x_2d.matmul(&weight.t()?)?;
-        let mut out_shape = x_shape[..trailing].to_vec();
-        out_shape.push(out_features);
-        out.reshape(out_shape)
+        }
     }
 
     pub fn weight(&self) -> Result<&Tensor> {
@@ -221,6 +218,70 @@ impl Linear {
                 }
             }
         }
+    }
+
+    fn forward_fp(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        let in_features = weight.dim(D::Minus1)?;
+        let out_features = weight.dim(D::Minus2)?;
+        let x_shape = x.dims();
+        let trailing = x_shape.len().saturating_sub(1);
+        let batch: usize = x_shape[..trailing].iter().product();
+        let x_2d = x.reshape((batch, in_features))?;
+        let out = x_2d.matmul(&weight.t()?)?;
+        let mut out_shape = x_shape[..trailing].to_vec();
+        out_shape.push(out_features);
+        out.reshape(out_shape)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn try_forward_gptq_cuda(
+        &self,
+        x: &Tensor,
+        qweight: &Tensor,
+        qzeros: &Tensor,
+        scales: &Tensor,
+        g_idx: &Tensor,
+        bits: usize,
+        _group_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if bits != 4
+            || x.dtype() != DType::F16
+            || scales.dtype() != DType::F16
+            || !matches!(x.device(), Device::Cuda(_))
+            || !matches!(qweight.device(), Device::Cuda(_))
+            || !matches!(qzeros.device(), Device::Cuda(_))
+            || !matches!(scales.device(), Device::Cuda(_))
+            || !matches!(g_idx.device(), Device::Cuda(_))
+        {
+            return Ok(None);
+        }
+
+        let (_packed_in_features, out_features) = qweight.dims2()?;
+        if out_features % 8 != 0 {
+            return Ok(None);
+        }
+
+        let x_shape = x.dims();
+        let trailing = x_shape.len().saturating_sub(1);
+        let batch: usize = x_shape[..trailing].iter().product();
+        let in_features = x.dim(D::Minus1)?;
+        if in_features % 8 != 0 || g_idx.dim(0)? != in_features {
+            return Ok(None);
+        }
+
+        // The GPTQ CUDA kernel FFI now exists in rllm-kernels, but this repo
+        // does not yet expose stable Candle raw-device-pointer extraction for
+        // general tensors. Keep the dispatch gate in place and fall back until
+        // the tensor-to-device-pointer bridge is added.
+        tracing::debug!(
+            batch,
+            in_features,
+            out_features,
+            "GPTQ CUDA fast path requested but Candle raw device pointer interop is not wired; falling back to FP dequantize+matmul"
+        );
+        let _ = core::mem::size_of::<CudaKernelError>();
+        Ok(None)
     }
 }
 
