@@ -1,6 +1,7 @@
 pub mod hf_config;
 pub mod loader;
 pub mod registry;
+pub mod gptq;
 
 #[cfg(feature = "candle-backend")]
 pub mod layers;
