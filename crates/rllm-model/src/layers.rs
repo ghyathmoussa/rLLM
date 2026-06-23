@@ -311,6 +311,18 @@ impl LlamaMLP {
         let gate = gate.silu()?;
         self.down_proj.forward(&gate.broadcast_mul(&up)?)
     }
+
+    pub fn gate_proj(&self) -> &Linear {
+        &self.gate_proj
+    }
+
+    pub fn up_proj(&self) -> &Linear {
+        &self.up_proj
+    }
+
+    pub fn down_proj(&self) -> &Linear {
+        &self.down_proj
+    }
 }
 
 // ── LlamaAttention (GQA) ────────────────────────────────────────────────
@@ -416,10 +428,38 @@ impl LlamaAttention {
 
         self.o_proj.forward(&attn_output)
     }
+
+    pub fn q_proj(&self) -> &Linear {
+        &self.q_proj
+    }
+
+    pub fn k_proj(&self) -> &Linear {
+        &self.k_proj
+    }
+
+    pub fn v_proj(&self) -> &Linear {
+        &self.v_proj
+    }
+
+    pub fn o_proj(&self) -> &Linear {
+        &self.o_proj
+    }
+
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    pub fn num_kv_heads(&self) -> usize {
+        self.num_kv_heads
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
 }
 
 #[cfg(feature = "candle-backend")]
-fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
+pub(crate) fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
         return Ok(x);
     }
@@ -435,7 +475,7 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
 }
 
 #[cfg(feature = "candle-backend")]
-fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
+pub(crate) fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
     // Upper triangular mask with -inf for positions that should be masked
     let mask: Vec<f32> = (0..seq_len)
         .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
@@ -484,6 +524,22 @@ impl LlamaDecoderLayer {
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         residual + hidden_states
+    }
+
+    pub fn self_attn(&self) -> &LlamaAttention {
+        &self.self_attn
+    }
+
+    pub fn mlp(&self) -> &LlamaMLP {
+        &self.mlp
+    }
+
+    pub fn input_layernorm(&self) -> &RmsNorm {
+        &self.input_layernorm
+    }
+
+    pub fn post_attention_layernorm(&self) -> &RmsNorm {
+        &self.post_attention_layernorm
     }
 }
 

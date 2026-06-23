@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use candle_core::Device;
 
 #[cfg(feature = "candle-backend")]
+#[derive(Clone)]
 pub struct WeightMap {
     pub weights: HashMap<String, candle_core::Tensor>,
     pub device: Device,

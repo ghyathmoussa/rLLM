@@ -386,6 +386,82 @@ mod tests {
     #[cfg(has_cuda)]
     mod with_cuda {
         use super::*;
+        use crate::cache_ops::{gpu_alloc, gpu_free};
+
+        fn f32_to_f16_bits(f: f32) -> u16 {
+            let x = f.to_bits();
+            let sign = (x >> 31) & 0x1;
+            let exp = ((x >> 23) & 0xFF) as i32;
+            let mantissa = x & 0x7FFFFF;
+            if exp == 0 {
+                return (sign << 15) as u16;
+            }
+            if exp == 255 {
+                return ((sign << 15) | 0x7C00) as u16;
+            }
+            let new_exp = exp - 127 + 15;
+            if new_exp <= 0 {
+                return (sign << 15) as u16;
+            }
+            if new_exp >= 31 {
+                return ((sign << 15) | 0x7C00) as u16;
+            }
+            ((sign << 15) | ((new_exp as u32) << 10) | (mantissa >> 13)) as u16
+        }
+
+        fn f16_bits_to_f32(h: u16) -> f32 {
+            let sign = (h >> 15) & 0x1;
+            let exponent = (h >> 10) & 0x1F;
+            let mantissa = h & 0x3FF;
+            if exponent == 0 {
+                if mantissa == 0 {
+                    return f32::from_bits((sign as u32) << 31);
+                }
+                let mut e = 0u32;
+                let mut m = mantissa;
+                while (m & 0x400) == 0 {
+                    m <<= 1;
+                    e += 1;
+                }
+                m &= 0x3FF;
+                return f32::from_bits(((sign as u32) << 31) | ((127 - 15 - e) << 23) | ((m as u32) << 13));
+            }
+            if exponent == 31 {
+                return f32::from_bits(((sign as u32) << 31) | 0x7F800000 | ((mantissa as u32) << 13));
+            }
+            f32::from_bits(((sign as u32) << 31) | (((exponent as u32) + 112) << 23) | ((mantissa as u32) << 13))
+        }
+
+        unsafe fn upload_u16(data: &[u16]) -> *mut u16 {
+            let nbytes = std::mem::size_of_val(data);
+            let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
+            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            ptr
+        }
+
+        unsafe fn upload_i32(data: &[i32]) -> *mut i32 {
+            let nbytes = std::mem::size_of_val(data);
+            let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut i32;
+            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            ptr
+        }
+
+        unsafe fn upload_u32(data: &[u32]) -> *mut u32 {
+            let nbytes = std::mem::size_of_val(data);
+            let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u32;
+            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            ptr
+        }
+
+        unsafe fn download_u16(ptr: *mut u16, len: usize) -> Vec<u16> {
+            let mut host = vec![0u16; len];
+            libc::memcpy(
+                host.as_mut_ptr() as *mut libc::c_void,
+                ptr as *const libc::c_void,
+                len * std::mem::size_of::<u16>(),
+            );
+            host
+        }
 
         #[test]
         fn vector_add_correctness() {
@@ -407,6 +483,53 @@ mod tests {
                 block_copy_sync(src.as_ptr(), dst.as_mut_ptr(), 8).expect("block_copy_sync failed");
             }
             assert_eq!(src, dst);
+        }
+
+        #[test]
+        fn gptq_gemm_correctness() {
+            let x_f = [1.0f32, -1.0, 0.5, 2.0, 0.25, -0.5, 1.5, -2.0];
+            let x_h = x_f.iter().map(|&v| f32_to_f16_bits(v)).collect::<Vec<_>>();
+            let qweight = [0x76543210i32; 8];
+            let qzeros = [0x11111111i32];
+            let scales = [f32_to_f16_bits(0.5f32); 8];
+            let g_idx = [0u32; 8];
+
+            let d_x = unsafe { upload_u16(&x_h) };
+            let d_qweight = unsafe { upload_i32(&qweight) };
+            let d_qzeros = unsafe { upload_i32(&qzeros) };
+            let d_scales = unsafe { upload_u16(&scales) };
+            let d_gidx = unsafe { upload_u32(&g_idx) };
+            let d_out = unsafe { gpu_alloc(8 * std::mem::size_of::<u16>()).expect("gpu_alloc failed") as *mut u16 };
+
+            unsafe {
+                gptq_gemm_f16_sync(d_x, d_qweight, d_qzeros, d_scales, d_gidx, d_out, 1, 8, 8, 1, 8)
+                    .expect("gptq_gemm_f16_sync failed");
+            }
+
+            let out = unsafe { download_u16(d_out, 8) };
+            unsafe {
+                gpu_free(d_x as *mut u8).expect("gpu_free failed");
+                gpu_free(d_qweight as *mut u8).expect("gpu_free failed");
+                gpu_free(d_qzeros as *mut u8).expect("gpu_free failed");
+                gpu_free(d_scales as *mut u8).expect("gpu_free failed");
+                gpu_free(d_gidx as *mut u8).expect("gpu_free failed");
+                gpu_free(d_out as *mut u8).expect("gpu_free failed");
+            }
+
+            for col in 0..8 {
+                let mut expected = 0.0f32;
+                for k in 0..8 {
+                    let q = k as f32;
+                    let zero = 2.0f32;
+                    let w = (q - zero) * 0.5f32;
+                    expected += x_f[k] * w;
+                }
+                let actual = f16_bits_to_f32(out[col]);
+                assert!(
+                    (actual - expected).abs() < 0.2,
+                    "col {col}: expected {expected:.4}, got {actual:.4}"
+                );
+            }
         }
     }
 }

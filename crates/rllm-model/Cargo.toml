@@ -9,6 +9,7 @@ description = "Model registry, HF config parsing, Llama model implementation, an
 [dependencies]
 rllm-core.workspace = true
 rllm-kernels.workspace = true
+rllm-tokenizer.workspace = true
 rllm-tensor.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -18,6 +19,7 @@ hf-hub.workspace = true
 safetensors.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, optional = true }
+half = "2"
 
 [dev-dependencies]
 tempfile = "3"

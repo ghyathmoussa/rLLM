@@ -1,12 +1,14 @@
 #[cfg(feature = "candle-backend")]
 use anyhow::{Context, Result};
 #[cfg(feature = "candle-backend")]
-use candle_core::{D, Device, Tensor};
+use candle_core::{D, DType, Device, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::config::ModelConfig;
 
 #[cfg(feature = "candle-backend")]
-use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm};
+use crate::gptq::GptqCalibration;
+#[cfg(feature = "candle-backend")]
+use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm, repeat_kv, causal_mask};
 #[cfg(feature = "candle-backend")]
 use crate::loader::WeightMap;
 #[cfg(feature = "candle-backend")]
@@ -39,6 +41,27 @@ impl LlamaForCausalLM {
 
     pub fn device(&self) -> &Device {
         self.model.device()
+    }
+
+    pub fn collect_gptq_calibrations(
+        &self,
+        calibration_token_batches: &[Vec<u32>],
+        include_lm_head: bool,
+    ) -> Result<std::collections::BTreeMap<String, GptqCalibration>> {
+        let mut calibrations = std::collections::BTreeMap::new();
+        for token_ids in calibration_token_batches {
+            if token_ids.is_empty() {
+                continue;
+            }
+            let input_ids = Tensor::new(token_ids.clone(), self.device())
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .reshape((1, token_ids.len()))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let positions: Vec<usize> = (0..token_ids.len()).collect();
+            self.model
+                .collect_gptq_calibrations(&input_ids, &positions, include_lm_head, &mut calibrations)?;
+        }
+        Ok(calibrations)
     }
 }
 
@@ -210,14 +233,14 @@ impl LlamaModel {
         let embed_tokens = Linear::new(embed_weight);
 
         // LM head - may be tied with embedding
-        let has_lm_head = weights.weights.contains_key("lm_head.weight");
-        let lm_head_weight = if has_lm_head {
-            weights.weights.remove("lm_head.weight").unwrap()
+        let lm_head = if weights.weights.contains_key("lm_head.qweight")
+            || weights.weights.contains_key("lm_head.weight")
+        {
+            load_linear("lm_head", &mut weights, config, device)?
         } else {
             tracing::info!("lm_head is tied with embed_tokens, reusing embedding weight");
-            embed_tokens.weight()?.clone()
+            Linear::new(embed_tokens.weight()?.clone())
         };
-        let lm_head = Linear::new(lm_head_weight);
 
         let rms_norm_eps = 1e-6;
 
@@ -319,6 +342,35 @@ impl LlamaModel {
     pub fn device(&self) -> &Device {
         &self.device
     }
+
+    pub fn collect_gptq_calibrations(
+        &self,
+        input_ids: &Tensor,
+        positions: &[usize],
+        include_lm_head: bool,
+        calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
+    ) -> Result<()> {
+        let mut hidden_states =
+            embedding_lookup(self.embed_tokens.weight()?, input_ids).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            hidden_states = collect_decoder_layer_calibration(
+                layer,
+                &hidden_states,
+                positions,
+                &self.rope,
+                &format!("model.layers.{i}"),
+                calibrations,
+            )
+            .map_err(|e| anyhow::anyhow!("layer {i}: {e}"))?;
+        }
+
+        let hidden_states = self.norm.forward(&hidden_states).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if include_lm_head {
+            observe_linear_input("lm_head", &self.lm_head, &hidden_states, calibrations)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "candle-backend")]
@@ -330,6 +382,109 @@ fn embedding_lookup(weight: &Tensor, ids: &Tensor) -> candle_core::Result<Tensor
     let indices = Tensor::from_vec(id_vec, (bsz * seq,), ids.device())?;
     let embedded = weight.index_select(&indices, 0)?;
     embedded.reshape((bsz, seq, hidden))
+}
+
+#[cfg(feature = "candle-backend")]
+fn collect_decoder_layer_calibration(
+    layer: &LlamaDecoderLayer,
+    hidden_states: &Tensor,
+    positions: &[usize],
+    rope: &RotaryEmbedding,
+    prefix: &str,
+    calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
+) -> Result<Tensor> {
+    let residual = hidden_states.clone();
+    let normed = layer.input_layernorm().forward(hidden_states)?;
+    let attn_out = collect_attention_calibration(layer.self_attn(), &normed, positions, rope, prefix, calibrations)?;
+    let hidden_states = (residual + attn_out)?;
+
+    let residual = hidden_states.clone();
+    let normed = layer.post_attention_layernorm().forward(&hidden_states)?;
+    let mlp_out = collect_mlp_calibration(layer.mlp(), &normed, prefix, calibrations)?;
+    Ok((residual + mlp_out)?)
+}
+
+#[cfg(feature = "candle-backend")]
+fn collect_attention_calibration(
+    attn: &LlamaAttention,
+    hidden_states: &Tensor,
+    positions: &[usize],
+    rope: &RotaryEmbedding,
+    prefix: &str,
+    calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
+) -> Result<Tensor> {
+    let (bsz, seq_len, _) = hidden_states.dims3()?;
+
+    observe_linear_input(&format!("{prefix}.self_attn.q_proj"), attn.q_proj(), hidden_states, calibrations)?;
+    let q = attn.q_proj().forward(hidden_states)?;
+    observe_linear_input(&format!("{prefix}.self_attn.k_proj"), attn.k_proj(), hidden_states, calibrations)?;
+    let k = attn.k_proj().forward(hidden_states)?;
+    observe_linear_input(&format!("{prefix}.self_attn.v_proj"), attn.v_proj(), hidden_states, calibrations)?;
+    let v = attn.v_proj().forward(hidden_states)?;
+
+    let q = q.reshape((bsz, seq_len, attn.num_heads(), attn.head_dim()))?.transpose(1, 2)?;
+    let k = k.reshape((bsz, seq_len, attn.num_kv_heads(), attn.head_dim()))?.transpose(1, 2)?;
+    let v = v.reshape((bsz, seq_len, attn.num_kv_heads(), attn.head_dim()))?.transpose(1, 2)?;
+    let (q, k) = rope.apply(&q, &k, positions)?;
+    let (k, v) = if attn.num_kv_heads() < attn.num_heads() {
+        let n_rep = attn.num_heads() / attn.num_kv_heads();
+        (repeat_kv(k, n_rep)?, repeat_kv(v, n_rep)?)
+    } else {
+        (k, v)
+    };
+
+    let scale = 1.0f32 / (attn.head_dim() as f32).sqrt();
+    let attn_weights = q
+        .matmul(&k.t()?)?
+        .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
+    let attn_weights = if seq_len > 1 {
+        let mask = causal_mask(seq_len, q.device())?.to_dtype(q.dtype())?;
+        attn_weights.broadcast_add(&mask)?
+    } else {
+        attn_weights
+    };
+    let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+    let attn_output = attn_weights.matmul(&v)?;
+    let attn_output =
+        attn_output.transpose(1, 2)?.reshape((bsz, seq_len, attn.num_heads() * attn.head_dim()))?;
+
+    observe_linear_input(&format!("{prefix}.self_attn.o_proj"), attn.o_proj(), &attn_output, calibrations)?;
+    attn.o_proj().forward(&attn_output).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(feature = "candle-backend")]
+fn collect_mlp_calibration(
+    mlp: &LlamaMLP,
+    hidden_states: &Tensor,
+    prefix: &str,
+    calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
+) -> Result<Tensor> {
+    observe_linear_input(&format!("{prefix}.mlp.gate_proj"), mlp.gate_proj(), hidden_states, calibrations)?;
+    let gate = mlp.gate_proj().forward(hidden_states)?;
+    observe_linear_input(&format!("{prefix}.mlp.up_proj"), mlp.up_proj(), hidden_states, calibrations)?;
+    let up = mlp.up_proj().forward(hidden_states)?;
+    let gate = gate.silu()?;
+    let down_input = gate.broadcast_mul(&up)?;
+    observe_linear_input(&format!("{prefix}.mlp.down_proj"), mlp.down_proj(), &down_input, calibrations)?;
+    mlp.down_proj().forward(&down_input).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+#[cfg(feature = "candle-backend")]
+fn observe_linear_input(
+    name: &str,
+    linear: &Linear,
+    input: &Tensor,
+    calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
+) -> Result<()> {
+    let weight = linear.weight()?;
+    let in_features = weight.dim(D::Minus1)?;
+    let input = input.to_dtype(DType::F32)?;
+    let numel = input.dims().iter().product::<usize>();
+    let samples = input.reshape((numel / in_features, in_features))?.to_vec2::<f32>()?;
+    let calib = calibrations
+        .entry(name.to_string())
+        .or_insert_with(|| GptqCalibration::new(in_features));
+    calib.observe(&samples)
 }
 
 #[cfg(all(test, feature = "candle-backend"))]

@@ -19,3 +19,4 @@ cpu = []
 cuda = []
 
 [dev-dependencies]
+libc = "0.2"

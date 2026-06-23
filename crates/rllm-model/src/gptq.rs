@@ -155,6 +155,13 @@ pub fn quantize_gptq(
     let order = column_order(calibration, config.act_order);
     let hessian = damped_permuted_hessian(calibration, &order, config.damp_percent)?;
     let hessian_inv = invert_spd(&hessian, in_features)?;
+    let l_inv = cholesky(&hessian_inv, in_features)?;
+    let mut h_inv_chol = vec![0.0f64; in_features * in_features];
+    for r in 0..in_features {
+        for c in 0..in_features {
+            h_inv_chol[r * in_features + c] = l_inv[c * in_features + r];
+        }
+    }
     let g_idx = make_group_index(in_features, config.group_size, &order);
     let num_groups = g_idx
         .iter()
@@ -197,13 +204,13 @@ pub fn quantize_gptq(
             work[perm_i] = dequant.dequant;
 
             let err = dequant.error;
-            let denom = hessian_inv[perm_i * in_features + perm_i];
+            let denom = h_inv_chol[perm_i * in_features + perm_i];
             if denom.abs() < 1e-12 {
                 continue;
             }
             let coeff = err / denom;
             for perm_j in (perm_i + 1)..in_features {
-                work[perm_j] -= coeff * hessian_inv[perm_i * in_features + perm_j];
+                work[perm_j] -= coeff * h_inv_chol[perm_i * in_features + perm_j];
             }
         }
     }
@@ -549,6 +556,12 @@ mod tests {
             vec![3.5, 0.1, -3.2, 0.2, 2.1, -0.5, 0.2, 0.8],
             vec![-4.2, -0.1, 4.1, 0.0, -2.4, 0.3, -0.1, -0.9],
             vec![2.9, 0.0, -2.7, 0.3, 1.8, -0.4, 0.1, 0.7],
+            vec![4.1, 0.3, -3.9, 0.0, 2.6, -0.3, -0.1, 1.1],
+            vec![3.2, 0.0, -3.0, 0.2, 2.0, -0.6, 0.1, 0.9],
+            vec![-4.0, -0.2, 3.8, 0.1, -2.5, 0.4, 0.0, -1.0],
+            vec![2.7, 0.1, -2.5, 0.4, 1.7, -0.3, 0.2, 0.6],
+            vec![4.3, 0.2, -4.0, 0.1, 2.7, -0.5, 0.0, 1.2],
+            vec![3.4, 0.1, -3.1, 0.3, 2.2, -0.4, 0.1, 0.8],
         ];
         let mut calib = GptqCalibration::new(8);
         calib.observe(&samples).unwrap();
