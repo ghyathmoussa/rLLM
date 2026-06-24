@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 fn main() {
     // Declare the has_cuda cfg key so cargo check doesn't warn about it.
@@ -27,7 +30,7 @@ fn main() {
     let nvcc = nvcc.unwrap();
 
     // Locate CUDA toolkit root.
-    let cuda_home = find_cuda_home();
+    let cuda_home = find_cuda_home(nvcc.as_path());
     if cuda_home.is_none() {
         println!("cargo:warning=CUDA toolkit not found; CUDA kernels will not be compiled");
         return;
@@ -181,6 +184,18 @@ fn find_cuda_lib_dir(cuda_home: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
+fn has_cuda_headers(path: &Path) -> bool {
+    path.join("include").join("cuda_runtime.h").exists()
+}
+
+fn cuda_lib_dirs(cuda_home: &Path) -> Vec<PathBuf> {
+    ["lib64", "lib", "lib/x86_64-linux-gnu"]
+        .iter()
+        .map(|dir| cuda_home.join(dir))
+        .filter(|dir| dir.exists())
+        .collect()
+}
+
 fn cuda_arch_flags() -> Vec<String> {
     if let Ok(archs) = env::var("CUDA_ARCH") {
         return archs
@@ -192,7 +207,10 @@ fn cuda_arch_flags() -> Vec<String> {
             .collect();
     }
 
-    let default_archs = ["7.0", "7.5", "8.0", "8.6", "8.9", "9.0"];
+    // Turing (7.5) through Hopper (9.0). `sm_70` (Volta) is intentionally
+    // omitted: CUDA 13 removed Volta support, so a `compute_70` gencode line
+    // makes nvcc from a CUDA-13 toolkit fail. Override with CUDA_ARCH if needed.
+    let default_archs = ["7.5", "8.0", "8.6", "8.9", "9.0"];
     default_archs
         .iter()
         .map(|a| {

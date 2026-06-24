@@ -12,6 +12,10 @@ pub struct ServeArgs {
     /// Hugging Face model ID or local path
     pub model: String,
 
+    /// Hugging Face tokenizer ID or local path (defaults to model ID/path)
+    #[arg(long)]
+    pub tokenizer: Option<String>,
+
     /// Host to bind to
     #[arg(long, default_value = "0.0.0.0")]
     pub host: String,
@@ -41,7 +45,7 @@ pub struct ServeArgs {
     pub gpu_memory_utilization: f32,
 
     /// Enable prefix caching
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub enable_prefix_caching: bool,
 
     /// API key for authenticated endpoints (reads RLLM_API_KEY env var)
@@ -75,6 +79,22 @@ pub struct ServeArgs {
     /// Log level
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// Quantization format (auto, none, fp8, mxfp8, mxfp4, nvfp4, int8, int4, compressed-tensors, modelopt, torchao)
+    #[arg(long, default_value = "auto")]
+    pub quantization: String,
+
+    /// Quantization bit width (e.g. 4 or 8)
+    #[arg(long)]
+    pub quant_bits: Option<usize>,
+
+    /// Quantization group size (e.g. 32 or 128)
+    #[arg(long)]
+    pub quant_group_size: Option<usize>,
+
+    /// KV Cache data type (auto, f16, bf16, fp8_e4m3, fp8_e5m2, int8)
+    #[arg(long, default_value = "auto")]
+    pub kv_cache_dtype: String,
 }
 
 fn parse_gpu_utilization(s: &str) -> Result<f32, String> {

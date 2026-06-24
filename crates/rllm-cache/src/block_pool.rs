@@ -269,6 +269,38 @@ impl BlockPool {
         }
     }
 
+    /// Check whether a block is shared by multiple requests (ref_count > 1).
+    ///
+    /// Shared blocks should not be modified directly — use [`copy_on_write`]
+    /// to get an exclusive copy when writes are needed.
+    pub fn is_shared(&self, block_id: BlockId) -> bool {
+        let idx = block_id.0 as usize;
+        if idx >= self.blocks.len() {
+            return false;
+        }
+        let block = &self.blocks[idx];
+        !block.is_null && block.ref_count > 1
+    }
+
+    /// Copy-on-write: allocate a new exclusive block and decref the shared one.
+    ///
+    /// Returns the new block ID if allocation succeeds. The caller is
+    /// responsible for copying the actual data from `old_block_id` to the
+    /// returned block (using `cache_block_copy` kernel).
+    ///
+    /// Returns `None` if no free blocks are available.
+    pub fn copy_on_write(&mut self, old_block_id: BlockId) -> Option<BlockId> {
+        if !self.is_shared(old_block_id) {
+            // Not shared — no copy needed, return the same block.
+            return Some(old_block_id);
+        }
+        // Allocate a new block.
+        let new_block_id = self.allocate()?;
+        // Decref the old shared block.
+        self.free(old_block_id);
+        Some(new_block_id)
+    }
+
     /// Touch a cached block, moving it to the MRU end of the free queue.
     ///
     /// This is called on a prefix cache hit to keep the block alive.

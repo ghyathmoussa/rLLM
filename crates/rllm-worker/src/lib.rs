@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod calibration;
 pub mod model_runner;
 pub mod overlap;
 pub mod worker;

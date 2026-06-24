@@ -2,6 +2,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rllm_core::{config::ModelConfig, dtype::DType};
+use rllm_quant::QuantSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -258,5 +259,34 @@ mod tests {
         );
         let config = parse_hf_config(f.path()).unwrap();
         assert_eq!(config.architecture, "LlamaForCausalLM");
+    }
+
+    #[test]
+    fn parses_int8_quantization_config() {
+        let f = write_config_json(
+            r#"{
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "quantization_config": {
+                    "quant_method": "compressed-tensors",
+                    "format": "int-quantized",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "num_bits": 8,
+                                "strategy": "channel",
+                                "symmetric": true
+                            }
+                        }
+                    }
+                }
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        let quant = config.quantization.unwrap();
+        assert_eq!(quant.kind, rllm_core::config::QuantizationKind::Int8);
+        assert_eq!(quant.bits, Some(8));
     }
 }

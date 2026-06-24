@@ -41,6 +41,10 @@ struct ModelRuntime {
     model_dir: String,
     architecture: String,
     device: String,
+    quantization: Option<String>,
+    quant_bits: Option<usize>,
+    kv_cache_dtype: String,
+    quantized_layer_count: usize,
 }
 
 /// Application state shared across handlers.
@@ -197,26 +201,39 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.max_model_len = max_len;
     }
     model_config.dtype = parse_dtype(&args.dtype).unwrap_or(model_config.dtype);
+    if !args.quantization.eq_ignore_ascii_case("auto") {
+        model_config.quantization =
+            parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size)?;
+    }
 
-    let tokenizer = load_tokenizer(model_ref, &model_dir)?;
+    let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
+    let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);
     let tokenizer = Arc::new(AsyncTokenizerPool::new(tokenizer, 4));
 
+    // Worst-case block count (max_num_seqs * full context); used only as an
+    // upper bound. The executor profiles real GPU memory after loading weights
+    // and returns the actual number of blocks it could allocate.
     let kv_config = kv_cache_config(&model_config, args);
     let cache_config = cache_config(args, &model_config);
     let scheduler_config = scheduler_config(args);
-    let scheduler = Scheduler::new(
-        scheduler_config,
-        &cache_config,
-        kv_config.num_blocks,
-        model_config.max_model_len,
-    );
 
     let worker = Worker::new(0, model_config.clone(), rllm_tensor::Device::cuda(0), BLOCK_SIZE);
     let mut executor = UniProcExecutor::new(worker);
     executor.set_eos_token_id(eos_token_id);
     executor.worker_mut().initialize_rng_seed(0).context("initializing worker RNG")?;
-    executor.initialize(&[kv_config]).context("initializing executor and loading model weights")?;
+    let num_gpu_blocks = executor
+        .initialize(&[kv_config], args.gpu_memory_utilization)
+        .context("initializing executor and loading model weights")?;
+    tracing::info!(num_gpu_blocks, "KV cache allocated; sizing scheduler to match");
+
+    let quantized_layer_count = executor.worker().quantized_layer_count();
+    let quantization = model_config.quantization.as_ref().map(|q| format!("{:?}", q.kind));
+    let quant_bits = model_config.quantization.as_ref().and_then(|q| q.bits);
+    let kv_cache_dtype = format!("{:?}", cache_config.cache_dtype);
+
+    let scheduler =
+        Scheduler::new(scheduler_config, &cache_config, num_gpu_blocks, model_config.max_model_len);
 
     let device = "cuda:0".to_string();
     let architecture = model_config.architecture.clone();
@@ -238,6 +255,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_dir: model_dir.to_string_lossy().to_string(),
         architecture,
         device,
+        quantization,
+        quant_bits,
+        kv_cache_dtype,
+        quantized_layer_count,
     })
 }
 
@@ -266,17 +287,88 @@ fn parse_dtype(dtype: &str) -> Option<DType> {
     }
 }
 
+fn parse_quantization(
+    quant_str: &str,
+    bits: Option<usize>,
+    group_size: Option<usize>,
+) -> Result<Option<rllm_core::config::QuantizationConfig>> {
+    use rllm_core::config::{QuantizationConfig, QuantizationKind};
+    let kind = match quant_str.to_lowercase().as_str() {
+        "none" => return Ok(None),
+        "fp8" => QuantizationKind::FP8,
+        "mxfp8" => QuantizationKind::MXFP8,
+        "mxfp4" => QuantizationKind::MXFP4,
+        "nvfp4" => QuantizationKind::NVFP4,
+        "int8" => QuantizationKind::Int8,
+        "int4" => QuantizationKind::Int4,
+        "gptq" => QuantizationKind::GPTQ,
+        "awq" => QuantizationKind::AWQ,
+        "gguf" => QuantizationKind::Gguf,
+        "compressed-tensors" | "compressed_tensors" => QuantizationKind::CompressedTensors,
+        "modelopt" => QuantizationKind::ModelOpt,
+        "torchao" => QuantizationKind::TorchAO,
+        _ => anyhow::bail!("unsupported quantization format: {quant_str}"),
+    };
+    if kind == QuantizationKind::Int8 && bits != Some(8) {
+        anyhow::bail!("INT8 quantization requires --quant-bits 8");
+    }
+    Ok(Some(QuantizationConfig { kind, group_size, bits }))
+}
+
 fn cache_config(args: &ServeArgs, model_config: &ModelConfig) -> CacheConfig {
+    let cache_dtype = match args.kv_cache_dtype.to_lowercase().as_str() {
+        "f16" => rllm_core::dtype::DType::F16,
+        "bf16" => rllm_core::dtype::DType::BF16,
+        "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
+        "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
+        _ => {
+            if let Some(ref q) = model_config.quantization {
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                plan.kv_cache_dtype
+            } else {
+                model_config.dtype
+            }
+        }
+    };
+
     CacheConfig {
         block_size: BLOCK_SIZE,
         hash_block_size: BLOCK_SIZE,
         gpu_memory_utilization: args.gpu_memory_utilization,
         cpu_swap_bytes: 0,
-        cache_dtype: model_config.dtype,
+        cache_dtype,
         num_gpu_blocks: num_cache_blocks(args, model_config.max_model_len),
         enable_prefix_caching: args.enable_prefix_caching,
         prefix_hash_algorithm: PrefixHashAlgorithm::Sha256Cbor,
         sliding_window: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rllm_core::config::QuantizationKind;
+
+    use super::*;
+
+    #[test]
+    fn parse_int8_quantization_requires_eight_bits() {
+        let missing_bits = parse_quantization("int8", None, None).unwrap_err().to_string();
+        assert!(missing_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let wrong_bits = parse_quantization("int8", Some(4), None).unwrap_err().to_string();
+        assert!(wrong_bits.contains("INT8 quantization requires --quant-bits 8"));
+
+        let config = parse_quantization("int8", Some(8), None).unwrap().unwrap();
+        assert_eq!(config.kind, QuantizationKind::Int8);
+        assert_eq!(config.bits, Some(8));
+    }
+
+    #[test]
+    fn parse_unknown_quantization_fails() {
+        let err = parse_quantization("made-up-format", None, None).unwrap_err().to_string();
+        assert!(err.contains("unsupported quantization format"));
     }
 }
 
@@ -294,6 +386,23 @@ fn scheduler_config(args: &ServeArgs) -> SchedulerConfig {
 }
 
 fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfig {
+    let cache_dtype = match args.kv_cache_dtype.to_lowercase().as_str() {
+        "f16" => rllm_core::dtype::DType::F16,
+        "bf16" => rllm_core::dtype::DType::BF16,
+        "fp8_e4m3" | "fp8-e4m3" | "e4m3" => rllm_core::dtype::DType::FP8E4M3,
+        "fp8_e5m2" | "fp8-e5m2" | "e5m2" => rllm_core::dtype::DType::FP8E5M2,
+        "int8" | "i8" => rllm_core::dtype::DType::INT8,
+        _ => {
+            if let Some(ref q) = model_config.quantization {
+                let plan =
+                    rllm_core::optimizations::QuantizationPlan::from_config(q).unwrap_or_default();
+                plan.kv_cache_dtype
+            } else {
+                model_config.dtype
+            }
+        }
+    };
+
     KVCacheConfig {
         num_blocks: num_cache_blocks(args, model_config.max_model_len),
         spec: KVCacheSpec {
@@ -301,7 +410,7 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
             num_layers: model_config.num_layers,
             num_kv_heads: model_config.num_kv_heads,
             head_dim: model_config.head_dim,
-            dtype: model_config.dtype,
+            dtype: cache_dtype,
             sliding_window: None,
         },
     }
@@ -367,6 +476,10 @@ struct DebugModelResponse {
     model_dir: Option<String>,
     architecture: Option<String>,
     device: Option<String>,
+    quantization: Option<String>,
+    bits: Option<usize>,
+    kv_cache_dtype: Option<String>,
+    quantized_layer_count: Option<usize>,
 }
 
 async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelResponse> {
@@ -374,9 +487,13 @@ async fn debug_model_handler(State(state): State<AppState>) -> Json<DebugModelRe
     Json(DebugModelResponse {
         model: state.model_name.clone(),
         loaded: runtime.is_some(),
-        model_dir: Some(state.model_name),
+        model_dir: runtime.map(|rt| rt.model_dir.clone()),
         architecture: runtime.map(|rt| rt.architecture.clone()),
         device: runtime.map(|rt| rt.device.clone()),
+        quantization: runtime.and_then(|rt| rt.quantization.clone()),
+        bits: runtime.and_then(|rt| rt.quant_bits),
+        kv_cache_dtype: runtime.map(|rt| rt.kv_cache_dtype.clone()),
+        quantized_layer_count: runtime.map(|rt| rt.quantized_layer_count),
     })
 }
 
@@ -429,10 +546,70 @@ async fn chat_completions_handler(
         return placeholder_chat_response(&state.model_name, started);
     };
 
-    let result =
-        run_chat_completion(runtime, req, Duration::from_secs(state.request_timeout_secs)).await;
+    let messages = req
+        .messages
+        .iter()
+        .map(|msg| rllm_core::request::ChatMessage {
+            role: msg.role.clone(),
+            content: msg.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    let prompt = match runtime.tokenizer.render_chat(messages.clone(), true).await {
+        Ok(p) => p,
+        Err(e) => {
+            return typed_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to render chat template: {e}"),
+                "internal_error",
+                started,
+            );
+        }
+    };
+    let token_ids = match runtime.tokenizer.encode(prompt.clone(), false).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            return typed_error_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to tokenize chat prompt: {e}"),
+                "internal_error",
+                started,
+            );
+        }
+    };
+    let sampling_params = chat_request_to_sampling_params(&req);
+    if let Err(e) = sampling_params.validate() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("invalid sampling params: {e}"),
+            "invalid_request_error",
+            started,
+        );
+    }
 
     if is_stream {
+        let inference_req = InferenceRequest {
+            request_id: RequestId::new(),
+            prompt: Some(prompt.clone()),
+            token_ids: Some(token_ids),
+            messages: None,
+            sampling_params,
+            arrival_time: std::time::Instant::now(),
+            priority: 0,
+            stream: true,
+            cache_salt: None,
+        };
+        let mut receiver = match runtime.engine.add_request_stream(inference_req) {
+            Ok(rx) => rx,
+            Err(e) => {
+                return typed_error_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("failed to submit stream request: {e}"),
+                    "internal_error",
+                    started,
+                );
+            }
+        };
+
         let sse_stream = async_stream::stream! {
             let id = generate_completion_id("chatcmpl");
             let created = now_timestamp();
@@ -452,35 +629,40 @@ async fn chat_completions_handler(
                 Event::default().data(serialize_sse(&role_chunk))
             );
 
-            if let Ok(ref completion) = result {
-                let content_chunk = ChatCompletionChunk {
-                    id: id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created,
-                    model: model.clone(),
-                    choices: vec![ChunkChoice {
-                        index: 0,
-                        delta: ChunkDelta { role: None, content: Some(completion.text.clone()) },
-                        finish_reason: None,
-                    }],
-                    generation_time: Some(completion.generation_time),
-                };
-                yield Ok(Event::default().data(serialize_sse(&content_chunk)));
+            let elapsed_start = std::time::Instant::now();
+            while let Some(output) = receiver.recv().await {
+                let mut chunk_text = String::new();
+                for completion in &output.outputs {
+                    if !completion.token_ids.is_empty() {
+                        if let Ok(text) = runtime.tokenizer.decode(completion.token_ids.clone(), true).await {
+                            chunk_text.push_str(&text);
+                        }
+                    }
+                }
+
+                let finish_reason = output.outputs.first().and_then(|c| c.finish_reason).map(finish_reason_to_openai);
+
+                if !chunk_text.is_empty() || finish_reason.is_some() {
+                    let content_chunk = ChatCompletionChunk {
+                        id: id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![ChunkChoice {
+                            index: 0,
+                            delta: ChunkDelta { role: None, content: Some(chunk_text) },
+                            finish_reason,
+                        }],
+                        generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
+                    };
+                    yield Ok(Event::default().data(serialize_sse(&content_chunk)));
+                }
+
+                if output.finished {
+                    break;
+                }
             }
 
-            let done_chunk = ChatCompletionChunk {
-                id,
-                object: "chat.completion.chunk".to_string(),
-                created,
-                model,
-                choices: vec![ChunkChoice {
-                    index: 0,
-                    delta: ChunkDelta { role: None, content: None },
-                    finish_reason: Some("stop".into()),
-                }],
-                generation_time: None,
-            };
-            yield Ok(Event::default().data(serialize_sse(&done_chunk)));
             yield Ok(Event::default().data("[DONE]"));
         };
 
@@ -490,6 +672,15 @@ async fn chat_completions_handler(
             .keep_alive(axum::response::sse::KeepAlive::default())
             .into_response();
     }
+
+    let result = submit_and_collect(
+        runtime,
+        Some(prompt),
+        token_ids,
+        sampling_params,
+        Duration::from_secs(state.request_timeout_secs),
+    )
+    .await;
 
     match result {
         Ok(completion) => {
@@ -584,32 +775,6 @@ struct EngineCompletion {
     generation_time: f64,
 }
 
-async fn run_chat_completion(
-    runtime: ModelRuntime,
-    req: ChatCompletionRequest,
-    timeout: Duration,
-) -> Result<EngineCompletion> {
-    let messages = req
-        .messages
-        .iter()
-        .map(|msg| rllm_core::request::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    let prompt = runtime
-        .tokenizer
-        .render_chat(messages.clone(), true)
-        .await
-        .context("rendering chat template")?;
-    let token_ids =
-        runtime.tokenizer.encode(prompt.clone(), false).await.context("tokenizing chat prompt")?;
-    let sampling_params = chat_request_to_sampling_params(&req);
-    sampling_params.validate().context("invalid sampling params")?;
-
-    submit_and_collect(runtime, Some(prompt), token_ids, sampling_params, timeout).await
-}
-
 async fn run_text_completion(
     runtime: ModelRuntime,
     req: CompletionRequest,
@@ -647,8 +812,7 @@ async fn submit_and_collect(
         "submitting request to inference engine"
     );
 
-    let mut output_rx = runtime.engine.output_receiver();
-    runtime.engine.add_request(InferenceRequest {
+    let mut receiver = runtime.engine.add_request_stream(InferenceRequest {
         request_id,
         prompt,
         token_ids: Some(token_ids.clone()),
@@ -664,23 +828,18 @@ async fn submit_and_collect(
     let mut finish_reason = "length".to_string();
 
     let collect = async {
-        loop {
-            output_rx.changed().await.context("engine output channel closed")?;
-            for output in output_rx.borrow_and_update().iter() {
-                if output.request_id != request_id {
-                    continue;
-                }
-                for completion in &output.outputs {
-                    generated_ids.extend_from_slice(&completion.token_ids);
-                    if let Some(reason) = completion.finish_reason {
-                        finish_reason = finish_reason_to_openai(reason);
-                    }
-                }
-                if output.finished {
-                    return Ok::<(), anyhow::Error>(());
+        while let Some(output) = receiver.recv().await {
+            for completion in &output.outputs {
+                generated_ids.extend_from_slice(&completion.token_ids);
+                if let Some(reason) = completion.finish_reason {
+                    finish_reason = finish_reason_to_openai(reason);
                 }
             }
+            if output.finished {
+                return Ok::<(), anyhow::Error>(());
+            }
         }
+        anyhow::bail!("Engine closed output stream before finishing request")
     };
     tokio::time::timeout(timeout, collect)
         .await

@@ -8,8 +8,16 @@ use crate::engine_core::EngineCore;
 
 /// Commands sent to the engine background task.
 enum EngineCommand {
-    AddRequest { request: Box<InferenceRequest> },
-    AbortRequest { request_id: RequestId },
+    AddRequest {
+        request: Box<InferenceRequest>,
+    },
+    AddRequestStream {
+        request: Box<InferenceRequest>,
+        sender: mpsc::UnboundedSender<RequestOutput>,
+    },
+    AbortRequest {
+        request_id: RequestId,
+    },
     Shutdown,
 }
 
@@ -46,6 +54,18 @@ impl AsyncLLMEngine {
         Ok(())
     }
 
+    /// Add a new inference request and return a lossless receiver for its outputs.
+    pub fn add_request_stream(
+        &self,
+        request: InferenceRequest,
+    ) -> anyhow::Result<mpsc::UnboundedReceiver<RequestOutput>> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.cmd_tx
+            .send(EngineCommand::AddRequestStream { request: Box::new(request), sender })
+            .map_err(|_| anyhow::anyhow!("Engine task shut down"))?;
+        Ok(receiver)
+    }
+
     /// Abort a running request.
     pub fn abort_request(&self, request_id: RequestId) -> anyhow::Result<()> {
         self.cmd_tx
@@ -78,8 +98,56 @@ async fn engine_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
     output_tx: watch::Sender<Vec<RequestOutput>>,
 ) {
+    let mut senders: std::collections::HashMap<RequestId, mpsc::UnboundedSender<RequestOutput>> =
+        std::collections::HashMap::new();
+
     loop {
-        // Drain all pending commands into a local Vec (no lock needed for try_recv).
+        // Check if there is active work in the engine.
+        let has_work = {
+            let core = core.lock();
+            core.has_work()
+        };
+
+        if !has_work {
+            // Block asynchronously until a command is received to avoid busy-spinning.
+            match cmd_rx.recv().await {
+                Some(EngineCommand::Shutdown) => {
+                    tracing::info!("Engine loop shutting down");
+                    return;
+                }
+                Some(cmd) => {
+                    let mut core = core.lock();
+                    match cmd {
+                        EngineCommand::AddRequest { request } => {
+                            let request = *request;
+                            if let Err(e) = core.add_request(request) {
+                                tracing::error!("Failed to add request: {}", e);
+                            }
+                        }
+                        EngineCommand::AddRequestStream { request, sender } => {
+                            let request_id = request.request_id;
+                            let request = *request;
+                            if let Err(e) = core.add_request(request) {
+                                tracing::error!("Failed to add request: {}", e);
+                            } else {
+                                senders.insert(request_id, sender);
+                            }
+                        }
+                        EngineCommand::AbortRequest { request_id } => {
+                            core.abort_request(request_id);
+                            senders.remove(&request_id);
+                        }
+                        EngineCommand::Shutdown => unreachable!(),
+                    }
+                }
+                None => {
+                    // Channel closed, terminate loop.
+                    return;
+                }
+            }
+        }
+
+        // Drain any other pending commands that arrived.
         let mut commands = Vec::new();
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
@@ -91,7 +159,6 @@ async fn engine_loop(
             }
         }
 
-        // Acquire mutex once, process all commands + run step, then release.
         {
             let mut core = core.lock();
             for cmd in commands.drain(..) {
@@ -102,22 +169,42 @@ async fn engine_loop(
                             tracing::error!("Failed to add request: {}", e);
                         }
                     }
+                    EngineCommand::AddRequestStream { request, sender } => {
+                        let request_id = request.request_id;
+                        let request = *request;
+                        if let Err(e) = core.add_request(request) {
+                            tracing::error!("Failed to add request: {}", e);
+                        } else {
+                            senders.insert(request_id, sender);
+                        }
+                    }
                     EngineCommand::AbortRequest { request_id } => {
                         core.abort_request(request_id);
+                        senders.remove(&request_id);
                     }
-                    EngineCommand::Shutdown => unreachable!(), // handled above
+                    EngineCommand::Shutdown => unreachable!(),
                 }
             }
 
             if core.has_work() {
                 let outputs = core.step();
                 if !outputs.is_empty() {
+                    for output in &outputs {
+                        if let Some(sender) = senders.get(&output.request_id) {
+                            let _ = sender.send(output.clone());
+                        }
+                    }
+                    for output in &outputs {
+                        if output.finished {
+                            senders.remove(&output.request_id);
+                        }
+                    }
                     let _ = output_tx.send(outputs);
                 }
             }
         }
 
-        // Yield to the runtime.
+        // Yield to the tokio scheduler to let other tasks (like server handlers) execute.
         tokio::task::yield_now().await;
     }
 }

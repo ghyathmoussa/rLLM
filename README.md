@@ -49,19 +49,31 @@ What rLLM provides:
 ## Quick Start
 
 ```bash
-# Clone and build
+# Clone the repository
 git clone https://github.com/ghyathmoussa/rLLM.git
 cd rLLM
-cargo build --release
 
-# Serve a model
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct --dtype bf16
+# Option A: Serve on CPU
+cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
+
+# Option B: Serve on GPU (CUDA accelerated)
+cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
+
+# Option C: Serve on GPU with INT8 weight quantization
+CUDA_HOME=/usr CUDA_ARCH=8.9 CUDA_COMPUTE_CAP=89 \
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
+cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
+  --quantization int8 \
+  --quant-bits 8 \
+  --gpu-memory-utilization 0.55 \
+  --max-model-len 4096 \
+  --max-num-seqs 1
 
 # In another terminal, send a request
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"meta-llama/Llama-3.1-8B-Instruct",
+    "model":"meta-llama/Llama-3.2-1B-Instruct",
     "messages":[{"role":"user","content":"Say hello"}],
     "max_tokens":16,
     "temperature":0
@@ -73,13 +85,30 @@ curl http://localhost:8000/v1/chat/completions \
 ## Requirements
 
 - **Rust** 1.85 or newer
-- **NVIDIA GPU** with compute capability 7.0+ (Volta or newer)
-- **CUDA** 12.x toolkit (`nvcc` on `PATH`)
-- **Linux** (Ubuntu 22.04+, CentOS 7+)
+- **NVIDIA GPU** with compute capability 7.5+ (Turing or newer; e.g. RTX 20xx,
+  Titan RTX, A100, H100). Volta `sm_70` is no longer targeted, as CUDA 13 drops it.
+- **CUDA** 12.x toolkit (`nvcc` on `PATH`). **CUDA 13.x is not yet supported** —
+  the pinned `cudarc`/`candle` versions only ship bindings up to CUDA 13.2, and a
+  13.3 toolkit makes the build fail with `Unsupported cuda toolkit version: 13.3`.
+  Install CUDA 12.x (e.g. 12.8) and point `CUDA_HOME`/`PATH` at it; your GPU driver
+  can stay newer (drivers are backward compatible).
+- **Linux** (Ubuntu 22.04+, RHEL/AlmaLinux/Rocky 8+, CentOS 7+)
+
+> **Building CUDA kernels for a specific GPU:** by default kernels are compiled for
+> `sm_75`–`sm_90`. To build only for your card (faster compile) set `CUDA_ARCH`,
+> e.g. `export CUDA_ARCH=7.5` for a Titan RTX before `cargo build --features cuda`.
+
+> **Pre-built release binaries** are statically linked (`x86_64-unknown-linux-musl`)
+> and **CPU-only** — they run on any Linux without a glibc dependency, but do not use
+> the GPU. For GPU inference, build from source with `--features cuda`.
 
 ---
 
 ## Installation
+
+> 📦 For portable static (musl) release builds, AlmaLinux/RHEL build steps, and the CUDA
+> GPU build, see the [Building guide](docs/building.md). To verify a CUDA build on a GPU host,
+> run [`scripts/verify_cuda_build.sh`](scripts/verify_cuda_build.sh).
 
 ### Cargo Installation (From Source)
 
@@ -119,20 +148,47 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 
 ### Local model
 
-```bash
-cargo run --release -- serve /path/to/model-directory --dtype bf16
-```
+* **For CPU:**
+  ```bash
+  cargo run --release -- serve /path/to/model-directory
+  ```
+
+* **For GPU:**
+  ```bash
+  cargo run --release --features cuda -- serve /path/to/model-directory --dtype bf16
+  ```
 
 ### Hugging Face models
 
-```bash
-# Public models
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct
+* **For CPU:**
+  ```bash
+  # Public models
+  cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
 
-# Gated/private models (set HF_TOKEN)
-export HF_TOKEN=hf_xxxxxxxxxxxx
-cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct
-```
+  # Gated/private models (set HF_TOKEN)
+  export HF_TOKEN=hf_xxxxxxxxxxxx
+  cargo run --release -- serve meta-llama/Llama-3.2-1B-Instruct
+  ```
+
+* **For GPU:**
+  ```bash
+  # Public models
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
+
+  # Public models with INT8 weight quantization
+  CUDA_HOME=/usr CUDA_ARCH=8.9 CUDA_COMPUTE_CAP=89 \
+  LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
+    --quantization int8 \
+    --quant-bits 8 \
+    --gpu-memory-utilization 0.55 \
+    --max-model-len 4096 \
+    --max-num-seqs 1
+
+  # Gated/private models (set HF_TOKEN)
+  export HF_TOKEN=hf_xxxxxxxxxxxx
+  cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16
+  ```
 
 ---
 
@@ -144,6 +200,9 @@ cargo run --release -- serve meta-llama/Llama-3.1-8B-Instruct
 | `--host` | `0.0.0.0` | Host to bind to |
 | `--port` | `8000` | Port to bind to |
 | `--dtype` | `auto` | Data type (`auto`, `fp16`, `bf16`, `fp32`) |
+| `--quantization` | `auto` | Quantization format (`auto`, `none`, `int8`, `int4`, `compressed-tensors`, etc.) |
+| `--quant-bits` | (none) | Quantization bit width, such as `8` for INT8 |
+| `--quant-group-size` | (none) | Quantization group size for formats that use grouped weights |
 | `--max-model-len` | (auto) | Maximum model context length |
 | `--max-num-seqs` | `256` | Maximum concurrent sequences |
 | `--max-num-batched-tokens` | `4096` | Maximum batched tokens per step |
@@ -258,6 +317,27 @@ rLLM exports the following Prometheus metrics on the `/metrics` endpoint:
 | `rllm_e2e_latency_seconds` | Histogram | End-to-end request latency |
 | `rllm_sampling_duration_seconds` | Histogram | Sampling step duration |
 | `rllm_tokens_per_second` | Histogram | Token generation throughput |
+
+## Benchmarking & Concurrency Testing
+
+### Concurrency Load Generator (Python Script)
+A helper script is provided in `scripts/concurrency_test.py` to test the concurrency and throughput of the running server without external dependencies:
+
+```bash
+# Run with 10 concurrent clients submitting 50 total requests
+./scripts/concurrency_test.py --concurrency 10 --total-requests 50 --max-tokens 32
+
+# Run in streaming mode to calculate Time-to-First-Token (TTFT)
+./scripts/concurrency_test.py --concurrency 20 --total-requests 100 --max-tokens 64 --stream
+```
+
+### Rust Benchmarking Harness (rllm-bench)
+For local and simulated offline benchmarks, you can use the built-in `rllm-bench` tool:
+
+```bash
+# Run offline benchmark with 100 requests
+cargo run --release -p rllm-bench -- offline --num-requests 100 --concurrency 32
+```
 
 ---
 

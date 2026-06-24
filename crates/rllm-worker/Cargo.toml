@@ -19,6 +19,8 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+candle-core = { workspace = true, optional = true }
+cudarc = { workspace = true, optional = true }
 
 [dev-dependencies]
 rllm-core.workspace = true
@@ -26,6 +28,6 @@ rllm-core.workspace = true
 [features]
 default = ["candle-backend"]
 cpu = ["rllm-kernels/cpu", "rllm-tensor/cpu"]
-cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda", "rllm-model/cuda"]
-candle-backend = ["rllm-model/candle-backend"]
+cuda = ["rllm-kernels/cuda", "rllm-tensor/cuda", "rllm-model/cuda", "dep:cudarc"]
+candle-backend = ["rllm-model/candle-backend", "dep:candle-core"]
 experimental-tp = []

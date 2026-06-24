@@ -40,9 +40,10 @@ impl TestExecutor {
 impl Executor for TestExecutor {
     fn initialize(
         &mut self,
-        _kv_cache_configs: &[rllm_cache::spec::KVCacheConfig],
-    ) -> anyhow::Result<()> {
-        Ok(())
+        kv_cache_configs: &[rllm_cache::spec::KVCacheConfig],
+        _gpu_memory_utilization: f32,
+    ) -> anyhow::Result<usize> {
+        Ok(kv_cache_configs.first().map(|c| c.num_blocks).unwrap_or(0))
     }
 
     fn determine_available_memory(&self) -> anyhow::Result<usize> {

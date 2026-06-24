@@ -12,6 +12,8 @@ rllm-tensor.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+libc.workspace = true
+
 
 [features]
 default = []

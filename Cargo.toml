@@ -35,6 +35,7 @@ path = "examples/server.rs"
 resolver = "2"
 members = [
     "crates/rllm-core",
+    "crates/rllm-quant",
     "crates/rllm-tokenizer",
     "crates/rllm-model",
     "crates/rllm-tensor",
@@ -83,7 +84,10 @@ smallvec = "1"
 indexmap = "2"
 
 # Tokenizer and model loading
-tokenizers = "0.21"
+# default features dropped: `esaxx_fast` (C++ suffix-automaton, BPE *training* only)
+# and `progressbar` are never used for inference, and `esaxx_fast` breaks musl-static
+# builds (needs a musl C++ toolchain). `onig` is kept for tokenizer regex support.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
 safetensors = "0.6"
 minijinja = "2"
@@ -92,6 +96,7 @@ minijinja = "2"
 candle-core = "0.9"
 candle-nn = "0.9"
 candle-transformers = "0.9"
+half = "2"
 
 # HTTP server
 axum = "0.8"
@@ -121,6 +126,14 @@ proptest = "1"
 # Constant-time comparison
 subtle = "2"
 
+# CUDA runtime driver API wrappers
+# `fallback-latest` makes cudarc use its highest known bindings instead of
+# panicking when the installed CUDA toolkit is newer than it recognizes
+# (e.g. CUDA 13.3). Prefer matching the toolkit (CUDA 12.x) for tested builds.
+cudarc = { version = "0.19.7", features = ["driver", "fallback-latest"] }
+libc = "0.2"
+
+
 # Hashing
 sha2 = "0.10"
 ciborium = "0.2"
@@ -128,6 +141,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Internal crates
 rllm-core = { path = "crates/rllm-core", version = "0.1.0" }
+rllm-quant = { path = "crates/rllm-quant", version = "0.1.0", default-features = false }
 rllm-tokenizer = { path = "crates/rllm-tokenizer", version = "0.1.0" }
 rllm-model = { path = "crates/rllm-model", version = "0.1.0" }
 rllm-kernels = { path = "crates/rllm-kernels", version = "0.1.0" }
