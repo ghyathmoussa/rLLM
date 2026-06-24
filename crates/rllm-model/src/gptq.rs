@@ -14,10 +14,7 @@ pub struct GptqConfig {
 impl GptqConfig {
     pub fn validate(&self) -> Result<()> {
         if self.bits != GPTQ_SUPPORTED_BITS {
-            bail!(
-                "only {GPTQ_SUPPORTED_BITS}-bit GPTQ is currently supported, got {}",
-                self.bits
-            );
+            bail!("only {GPTQ_SUPPORTED_BITS}-bit GPTQ is currently supported, got {}", self.bits);
         }
         if self.group_size == 0 {
             bail!("group_size must be > 0");
@@ -31,12 +28,7 @@ impl GptqConfig {
 
 impl Default for GptqConfig {
     fn default() -> Self {
-        Self {
-            bits: GPTQ_SUPPORTED_BITS,
-            group_size: 128,
-            damp_percent: 0.01,
-            act_order: false,
-        }
+        Self { bits: GPTQ_SUPPORTED_BITS, group_size: 128, damp_percent: 0.01, act_order: false }
     }
 }
 
@@ -49,11 +41,7 @@ pub struct GptqCalibration {
 
 impl GptqCalibration {
     pub fn new(in_features: usize) -> Self {
-        Self {
-            in_features,
-            hessian: vec![0.0; in_features * in_features],
-            nsamples: 0,
-        }
+        Self { in_features, hessian: vec![0.0; in_features * in_features], nsamples: 0 }
     }
 
     pub fn in_features(&self) -> usize {
@@ -98,9 +86,7 @@ impl GptqCalibration {
         if self.in_features == 0 {
             return 0.0;
         }
-        (0..self.in_features)
-            .map(|i| self.hessian[i * self.in_features + i])
-            .sum::<f64>()
+        (0..self.in_features).map(|i| self.hessian[i * self.in_features + i]).sum::<f64>()
             / self.in_features as f64
     }
 }
@@ -163,13 +149,7 @@ pub fn quantize_gptq(
         }
     }
     let g_idx = make_group_index(in_features, config.group_size, &order);
-    let num_groups = g_idx
-        .iter()
-        .copied()
-        .map(|v| v as usize)
-        .max()
-        .map(|v| v + 1)
-        .unwrap_or(0);
+    let num_groups = g_idx.iter().copied().map(|v| v as usize).max().map(|v| v + 1).unwrap_or(0);
 
     let mut q_by_input = vec![0u8; in_features * out_features];
     let mut scales = vec![0.0f32; num_groups * out_features];
@@ -324,26 +304,17 @@ fn quant_params(group: &[f64], qmax: i32) -> Result<QuantParams> {
         max_v = max_v.max(v);
     }
     if (max_v - min_v).abs() < 1e-12 {
-        return Ok(QuantParams {
-            scale: 1.0,
-            zero: ((qmax + 2) / 2) as u8,
-        });
+        return Ok(QuantParams { scale: 1.0, zero: ((qmax + 2) / 2) as u8 });
     }
     let scale = ((max_v - min_v) / qmax as f64).max(1e-8) as f32;
-    let zero = (-min_v / scale as f64)
-        .round()
-        .clamp(1.0, (qmax + 1) as f64) as u8;
+    let zero = (-min_v / scale as f64).round().clamp(1.0, (qmax + 1) as f64) as u8;
     Ok(QuantParams { scale, zero })
 }
 
 fn quantize_value(value: f64, scale: f32, zero: u8, qmax: i32) -> QuantizedValue {
     let q = ((value / scale as f64).round() as i32 + zero as i32).clamp(0, qmax);
     let dequant = (q - zero as i32) as f64 * scale as f64;
-    QuantizedValue {
-        q,
-        dequant,
-        error: value - dequant,
-    }
+    QuantizedValue { q, dequant, error: value - dequant }
 }
 
 fn pack_qweight(q_by_input: &[u8], in_features: usize, out_features: usize) -> Vec<i32> {
@@ -463,8 +434,10 @@ mod tests {
             for group in 0..num_groups {
                 let start = group * config.group_size;
                 let end = ((group + 1) * config.group_size).min(in_features);
-                let params =
-                    quant_params(&row[start..end].iter().map(|v| *v as f64).collect::<Vec<_>>(), qmax)?;
+                let params = quant_params(
+                    &row[start..end].iter().map(|v| *v as f64).collect::<Vec<_>>(),
+                    qmax,
+                )?;
                 scales[group * out_features + out_col] = params.scale;
                 zeros[group * out_features + out_col] = params.zero;
                 for in_idx in start..end {
@@ -491,12 +464,14 @@ mod tests {
         let mut out = vec![0.0f32; layer.out_features * layer.in_features];
         for out_col in 0..layer.out_features {
             for in_idx in 0..layer.in_features {
-                let packed = layer.qweight[(in_idx / PACK_FACTOR) * layer.out_features + out_col] as u32;
+                let packed =
+                    layer.qweight[(in_idx / PACK_FACTOR) * layer.out_features + out_col] as u32;
                 let q = ((packed >> (4 * (in_idx % PACK_FACTOR))) & 0xF) as i32;
                 let group = layer.g_idx[in_idx] as usize;
                 let scale = layer.scales[group * layer.out_features + out_col];
-                let packed_zero =
-                    layer.qzeros[group * (layer.out_features / PACK_FACTOR) + out_col / PACK_FACTOR] as u32;
+                let packed_zero = layer.qzeros
+                    [group * (layer.out_features / PACK_FACTOR) + out_col / PACK_FACTOR]
+                    as u32;
                 let zero = (((packed_zero >> (4 * (out_col % PACK_FACTOR))) & 0xF) as i32) + 1;
                 out[out_col * layer.in_features + in_idx] = (q - zero) as f32 * scale;
             }
@@ -527,30 +502,14 @@ mod tests {
     #[test]
     fn calibration_accumulates_hessian() {
         let mut calib = GptqCalibration::new(3);
-        calib.observe(&[
-            vec![1.0, 2.0, 3.0],
-            vec![0.0, -1.0, 2.0],
-        ])
-        .unwrap();
+        calib.observe(&[vec![1.0, 2.0, 3.0], vec![0.0, -1.0, 2.0]]).unwrap();
         assert_eq!(calib.nsamples(), 2);
-        assert_eq!(
-            calib.hessian(),
-            &[
-                1.0, 2.0, 3.0,
-                2.0, 5.0, 4.0,
-                3.0, 4.0, 13.0,
-            ]
-        );
+        assert_eq!(calib.hessian(), &[1.0, 2.0, 3.0, 2.0, 5.0, 4.0, 3.0, 4.0, 13.0,]);
     }
 
     #[test]
     fn gptq_quantization_reduces_calibration_error_vs_rtn() {
-        let config = GptqConfig {
-            bits: 4,
-            group_size: 4,
-            damp_percent: 0.05,
-            act_order: true,
-        };
+        let config = GptqConfig { bits: 4, group_size: 4, damp_percent: 0.05, act_order: true };
         let samples = vec![
             vec![4.0, 0.2, -3.8, 0.1, 2.5, -0.4, 0.0, 1.0],
             vec![3.5, 0.1, -3.2, 0.2, 2.1, -0.5, 0.2, 0.8],
@@ -567,14 +526,11 @@ mod tests {
         calib.observe(&samples).unwrap();
 
         let weights = vec![
-            1.2, 0.02, -1.1, 0.03, 0.8, -0.02, 0.01, 0.4,
-            -0.7, 0.01, 0.9, -0.02, -0.6, 0.03, -0.01, -0.3,
-            0.5, -0.04, -0.6, 0.02, 0.4, 0.01, 0.02, 0.2,
-            -1.0, 0.03, 1.1, -0.01, -0.9, 0.02, 0.0, -0.5,
-            0.3, 0.02, -0.2, 0.01, 0.1, -0.01, 0.03, 0.2,
-            -0.4, -0.02, 0.5, 0.02, -0.3, 0.01, -0.02, -0.2,
-            0.9, 0.01, -0.8, 0.0, 0.7, -0.02, 0.01, 0.3,
-            -0.2, -0.01, 0.3, 0.01, -0.1, 0.02, 0.0, -0.1,
+            1.2, 0.02, -1.1, 0.03, 0.8, -0.02, 0.01, 0.4, -0.7, 0.01, 0.9, -0.02, -0.6, 0.03,
+            -0.01, -0.3, 0.5, -0.04, -0.6, 0.02, 0.4, 0.01, 0.02, 0.2, -1.0, 0.03, 1.1, -0.01,
+            -0.9, 0.02, 0.0, -0.5, 0.3, 0.02, -0.2, 0.01, 0.1, -0.01, 0.03, 0.2, -0.4, -0.02, 0.5,
+            0.02, -0.3, 0.01, -0.02, -0.2, 0.9, 0.01, -0.8, 0.0, 0.7, -0.02, 0.01, 0.3, -0.2,
+            -0.01, 0.3, 0.01, -0.1, 0.02, 0.0, -0.1,
         ];
 
         let gptq = quantize_gptq(&weights, 8, 8, &calib, config).unwrap();
@@ -588,12 +544,7 @@ mod tests {
     #[cfg(feature = "candle-backend")]
     #[test]
     fn packed_quantized_layer_matches_runtime_dequantizer() -> Result<()> {
-        let config = GptqConfig {
-            bits: 4,
-            group_size: 4,
-            damp_percent: 0.01,
-            act_order: true,
-        };
+        let config = GptqConfig { bits: 4, group_size: 4, damp_percent: 0.01, act_order: true };
         let mut calib = GptqCalibration::new(8);
         calib.observe(&[
             vec![1.0, 0.5, -1.0, 0.2, 0.7, -0.3, 0.1, 0.4],
@@ -601,19 +552,16 @@ mod tests {
         ])?;
 
         let weights = vec![
-            0.9, 0.1, -0.8, 0.0, 0.7, -0.1, 0.2, 0.3,
-            -0.4, 0.0, 0.5, -0.1, -0.3, 0.2, 0.0, -0.2,
-            0.6, -0.1, -0.5, 0.1, 0.4, 0.0, 0.1, 0.2,
-            -0.7, 0.2, 0.8, -0.2, -0.5, 0.1, -0.1, -0.3,
-            0.3, 0.0, -0.2, 0.0, 0.2, -0.1, 0.1, 0.1,
-            -0.2, -0.1, 0.3, 0.1, -0.1, 0.1, -0.1, -0.1,
-            0.8, 0.1, -0.7, 0.0, 0.6, -0.1, 0.2, 0.2,
-            -0.1, 0.0, 0.2, 0.0, -0.1, 0.1, 0.0, -0.1,
+            0.9, 0.1, -0.8, 0.0, 0.7, -0.1, 0.2, 0.3, -0.4, 0.0, 0.5, -0.1, -0.3, 0.2, 0.0, -0.2,
+            0.6, -0.1, -0.5, 0.1, 0.4, 0.0, 0.1, 0.2, -0.7, 0.2, 0.8, -0.2, -0.5, 0.1, -0.1, -0.3,
+            0.3, 0.0, -0.2, 0.0, 0.2, -0.1, 0.1, 0.1, -0.2, -0.1, 0.3, 0.1, -0.1, 0.1, -0.1, -0.1,
+            0.8, 0.1, -0.7, 0.0, 0.6, -0.1, 0.2, 0.2, -0.1, 0.0, 0.2, 0.0, -0.1, 0.1, 0.0, -0.1,
         ];
 
         let quantized = quantize_gptq(&weights, 8, 8, &calib, config)?;
         let device = Device::Cpu;
-        let qweight = Tensor::from_vec(quantized.qweight.clone(), quantized.qweight_shape(), &device)?;
+        let qweight =
+            Tensor::from_vec(quantized.qweight.clone(), quantized.qweight_shape(), &device)?;
         let qzeros = Tensor::from_vec(quantized.qzeros.clone(), quantized.qzeros_shape(), &device)?;
         let scales = Tensor::from_vec(quantized.scales.clone(), quantized.scales_shape(), &device)?;
         let g_idx = Tensor::from_vec(quantized.g_idx.clone(), (quantized.in_features,), &device)?;

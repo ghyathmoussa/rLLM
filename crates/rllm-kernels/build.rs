@@ -102,8 +102,7 @@ fn main() {
     // Link against CUDA runtime. Locate the lib dir robustly: some distros
     // (Debian/Ubuntu `nvidia-cuda-toolkit`) install libcudart under a multiarch
     // path like /usr/lib/x86_64-linux-gnu rather than $CUDA_HOME/lib64.
-    let lib_dir = find_cuda_lib_dir(&cuda_home)
-        .unwrap_or_else(|| cuda_home.join("lib64"));
+    let lib_dir = find_cuda_lib_dir(&cuda_home).unwrap_or_else(|| cuda_home.join("lib64"));
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=cudart");
 }
@@ -129,7 +128,7 @@ fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn find_cuda_home() -> Option<PathBuf> {
+fn find_cuda_home(nvcc: &Path) -> Option<PathBuf> {
     // 1. Explicit env vars (highest priority).
     for var in &["CUDA_HOME", "CUDA_PATH"] {
         if let Ok(home) = env::var(var) {
@@ -146,15 +145,11 @@ fn find_cuda_home() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // 3. Derive from the nvcc location. Distros that ship CUDA via the package
-    //    manager (e.g. Debian/Ubuntu `nvidia-cuda-toolkit`) put nvcc in
-    //    /usr/bin, so the toolkit root is the parent of `bin` (i.e. /usr).
-    if let Some(nvcc) = which_nvcc() {
-        if let Some(bin) = nvcc.parent() {
-            if let Some(root) = bin.parent() {
-                if toolkit_has_headers(root) {
-                    return Some(root.to_path_buf());
-                }
+    // 3. Derive from the nvcc location.
+    if let Some(bin) = nvcc.parent() {
+        if let Some(root) = bin.parent() {
+            if toolkit_has_headers(root) {
+                return Some(root.to_path_buf());
             }
         }
     }
@@ -171,11 +166,8 @@ fn toolkit_has_headers(root: &std::path::Path) -> bool {
 /// `<root>/lib64` layout as well as Debian/Ubuntu multiarch (`<root>/lib` and
 /// `<root>/lib/x86_64-linux-gnu`).
 fn find_cuda_lib_dir(cuda_home: &std::path::Path) -> Option<PathBuf> {
-    let candidates = [
-        cuda_home.join("lib64"),
-        cuda_home.join("lib/x86_64-linux-gnu"),
-        cuda_home.join("lib"),
-    ];
+    let candidates =
+        [cuda_home.join("lib64"), cuda_home.join("lib/x86_64-linux-gnu"), cuda_home.join("lib")];
     for c in &candidates {
         if c.join("libcudart.so").exists() {
             return Some(c.clone());

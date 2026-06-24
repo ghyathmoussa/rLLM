@@ -424,12 +424,20 @@ mod tests {
                     e += 1;
                 }
                 m &= 0x3FF;
-                return f32::from_bits(((sign as u32) << 31) | ((127 - 15 - e) << 23) | ((m as u32) << 13));
+                return f32::from_bits(
+                    ((sign as u32) << 31) | ((127 - 15 - e) << 23) | ((m as u32) << 13),
+                );
             }
             if exponent == 31 {
-                return f32::from_bits(((sign as u32) << 31) | 0x7F800000 | ((mantissa as u32) << 13));
+                return f32::from_bits(
+                    ((sign as u32) << 31) | 0x7F800000 | ((mantissa as u32) << 13),
+                );
             }
-            f32::from_bits(((sign as u32) << 31) | (((exponent as u32) + 112) << 23) | ((mantissa as u32) << 13))
+            f32::from_bits(
+                ((sign as u32) << 31)
+                    | (((exponent as u32) + 112) << 23)
+                    | ((mantissa as u32) << 13),
+            )
         }
 
         unsafe fn upload_u16(data: &[u16]) -> *mut u16 {
@@ -519,11 +527,15 @@ mod tests {
             let d_qzeros = unsafe { upload_i32(&qzeros) };
             let d_scales = unsafe { upload_u16(&scales) };
             let d_gidx = unsafe { upload_u32(&g_idx) };
-            let d_out = unsafe { gpu_alloc(8 * std::mem::size_of::<u16>()).expect("gpu_alloc failed") as *mut u16 };
+            let d_out = unsafe {
+                gpu_alloc(8 * std::mem::size_of::<u16>()).expect("gpu_alloc failed") as *mut u16
+            };
 
             unsafe {
-                gptq_gemm_f16_sync(d_x, d_qweight, d_qzeros, d_scales, d_gidx, d_out, 1, 8, 8, 1, 8)
-                    .expect("gptq_gemm_f16_sync failed");
+                gptq_gemm_f16_sync(
+                    d_x, d_qweight, d_qzeros, d_scales, d_gidx, d_out, 1, 8, 8, 1, 8,
+                )
+                .expect("gptq_gemm_f16_sync failed");
             }
 
             let out = unsafe { download_u16(d_out, 8) };

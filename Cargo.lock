@@ -2808,6 +2808,7 @@ dependencies = [
  "hf-hub",
  "rllm-core",
  "rllm-kernels",
+ "rllm-quant",
  "rllm-tensor",
  "rllm-tokenizer",
  "safetensors 0.6.2",

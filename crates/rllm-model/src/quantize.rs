@@ -84,9 +84,10 @@ pub fn quantize_model_dir_to_gptq(
     }
 
     let device = Device::Cpu;
-    let (weight_map, tied_lm_head) = load_weights_with_tied_detection(model_dir, &device)?;
+    let (weight_map, tied_lm_head) = load_weights_with_tied_detection(model_dir, &device, None)?;
     let model = LlamaForCausalLM::from_weights(config.clone(), weight_map.clone())?;
-    let calibrations = model.collect_gptq_calibrations(&calibration_batches, opts.include_lm_head)?;
+    let calibrations =
+        model.collect_gptq_calibrations(&calibration_batches, opts.include_lm_head)?;
 
     let quantized = quantize_weight_map(&weight_map, &calibrations, opts, tied_lm_head)?;
     materialize_output_dir(model_dir, output_dir)?;
@@ -96,13 +97,12 @@ pub fn quantize_model_dir_to_gptq(
 }
 
 #[cfg(feature = "candle-backend")]
-fn build_calibration_batches(tokenizer: &Tokenizer, opts: &GptqExportOptions) -> Result<Vec<Vec<u32>>> {
+fn build_calibration_batches(
+    tokenizer: &Tokenizer,
+    opts: &GptqExportOptions,
+) -> Result<Vec<Vec<u32>>> {
     let mut batches = Vec::new();
-    for prompt in opts
-        .calibration_prompts
-        .iter()
-        .take(opts.max_calibration_samples)
-    {
+    for prompt in opts.calibration_prompts.iter().take(opts.max_calibration_samples) {
         let mut ids = tokenizer.encode(prompt, true)?;
         if ids.is_empty() {
             continue;
@@ -138,7 +138,10 @@ fn quantize_weight_map(
     }
 
     for (name, calibration) in calibrations {
-        let weight = if name == "lm_head" && tied_lm_head && !weight_map.weights.contains_key("lm_head.weight") {
+        let weight = if name == "lm_head"
+            && tied_lm_head
+            && !weight_map.weights.contains_key("lm_head.weight")
+        {
             weight_map
                 .weights
                 .get("model.embed_tokens.weight")
@@ -220,11 +223,7 @@ fn insert_quantized_layer(
     );
     out.insert(
         format!("{prefix}.g_idx"),
-        SerializableTensor::from_typed(
-            SafeDtype::U32,
-            vec![in_features],
-            quantized.g_idx,
-        ),
+        SerializableTensor::from_typed(SafeDtype::U32, vec![in_features], quantized.g_idx),
     );
     Ok(())
 }
@@ -249,7 +248,11 @@ fn write_quantized_checkpoint(
 }
 
 #[cfg(feature = "candle-backend")]
-fn write_quantized_config(model_dir: &Path, output_dir: &Path, opts: &GptqExportOptions) -> Result<()> {
+fn write_quantized_config(
+    model_dir: &Path,
+    output_dir: &Path,
+    opts: &GptqExportOptions,
+) -> Result<()> {
     let config_path = model_dir.join("config.json");
     let content = fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
@@ -273,13 +276,11 @@ fn materialize_output_dir(model_dir: &Path, output_dir: &Path) -> Result<()> {
         let mut entries = fs::read_dir(output_dir)
             .with_context(|| format!("reading {}", output_dir.display()))?;
         if entries.next().is_some() {
-            bail!(
-                "output directory {} already exists and is not empty",
-                output_dir.display()
-            );
+            bail!("output directory {} already exists and is not empty", output_dir.display());
         }
     } else {
-        fs::create_dir_all(output_dir).with_context(|| format!("creating {}", output_dir.display()))?;
+        fs::create_dir_all(output_dir)
+            .with_context(|| format!("creating {}", output_dir.display()))?;
     }
     copy_support_files(model_dir, output_dir)
 }
@@ -309,7 +310,9 @@ fn should_skip_copy(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
-    name == "config.json" || name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json")
+    name == "config.json"
+        || name.ends_with(".safetensors")
+        || name.ends_with(".safetensors.index.json")
 }
 
 #[cfg(feature = "candle-backend")]
@@ -355,11 +358,7 @@ struct SerializableTensor {
 #[cfg(feature = "candle-backend")]
 impl SerializableTensor {
     fn from_typed<T: Copy>(dtype: SafeDtype, shape: Vec<usize>, values: Vec<T>) -> Self {
-        Self {
-            dtype,
-            shape,
-            bytes: typed_vec_to_bytes(values),
-        }
+        Self { dtype, shape, bytes: typed_vec_to_bytes(values) }
     }
 }
 

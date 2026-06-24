@@ -133,8 +133,16 @@ mod ffi {
         pub fn rllm_gpu_free_host(ptr: *mut std::ffi::c_void) -> c_int;
 
         // Host <-> device memory copies (host memcpy cannot touch device memory).
-        pub fn rllm_gpu_memcpy_h2d(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
-        pub fn rllm_gpu_memcpy_d2h(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
+        pub fn rllm_gpu_memcpy_h2d(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
+        pub fn rllm_gpu_memcpy_d2h(
+            dst: *mut std::ffi::c_void,
+            src: *const std::ffi::c_void,
+            nbytes: i64,
+        ) -> c_int;
     }
 }
 
@@ -481,7 +489,11 @@ pub unsafe fn gpu_free(ptr: *mut u8) -> Result<(), CudaKernelError> {
 /// - `dst` must be a valid device pointer with at least `nbytes` allocated.
 /// - `src` must be a valid host pointer with at least `nbytes` readable.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_h2d(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_h2d(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_h2d(
             dst as *mut std::ffi::c_void,
@@ -498,7 +510,11 @@ pub unsafe fn gpu_memcpy_h2d(dst: *mut u8, src: *const u8, nbytes: usize) -> Res
 /// - `src` must be a valid device pointer with at least `nbytes` readable.
 /// - `dst` must be a valid host pointer with at least `nbytes` writable.
 #[cfg(has_cuda)]
-pub unsafe fn gpu_memcpy_d2h(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+pub unsafe fn gpu_memcpy_d2h(
+    dst: *mut u8,
+    src: *const u8,
+    nbytes: usize,
+) -> Result<(), CudaKernelError> {
     let rc = unsafe {
         ffi::rllm_gpu_memcpy_d2h(
             dst as *mut std::ffi::c_void,

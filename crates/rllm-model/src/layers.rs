@@ -5,7 +5,6 @@ use rllm_core::optimizations::QuantizationPlan;
 #[cfg(feature = "candle-backend")]
 use rllm_quant::{LinearMethod, UnquantizedLinear};
 
-
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
 
@@ -196,9 +195,7 @@ fn dequantize_gptq_impl(
     device: &Device,
 ) -> Result<Tensor> {
     if bits != 4 {
-        return Err(candle_core::Error::Msg(format!(
-            "Only 4-bit GPTQ is supported, got {bits}"
-        )));
+        return Err(candle_core::Error::Msg(format!("Only 4-bit GPTQ is supported, got {bits}")));
     }
 
     // We expect qweight to be (in_features / 8, out_features)
@@ -259,7 +256,7 @@ fn dequantize_gptq_impl(
 
     // Select scales and zero-points for each input feature
     let select_scales = scales.index_select(&g_idx_u32, 0)?; // [in_features, out_features]
-    let select_zeros = z_raw.index_select(&g_idx_u32, 0)?;   // [in_features, out_features]
+    let select_zeros = z_raw.index_select(&g_idx_u32, 0)?; // [in_features, out_features]
 
     // Apply dequantization formula: (W_q - ZP) * Scale
     let target_dtype = scales.dtype();
@@ -278,9 +275,7 @@ pub struct Linear {
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self {
-            weight: LinearWeight::Fp(weight),
-        }
+        Self { weight: LinearWeight::Fp(weight) }
     }
 
     pub fn new_gptq(
@@ -317,9 +312,15 @@ impl Linear {
                 dequantized,
             } => {
                 #[cfg(feature = "cuda")]
-                if let Some(out) =
-                    self.try_forward_gptq_cuda(x, qweight, qzeros, scales, g_idx, *bits, *group_size)?
-                {
+                if let Some(out) = self.try_forward_gptq_cuda(
+                    x,
+                    qweight,
+                    qzeros,
+                    scales,
+                    g_idx,
+                    *bits,
+                    *group_size,
+                )? {
                     return Ok(out);
                 }
 
@@ -356,6 +357,10 @@ impl Linear {
                 }
             }
         }
+    }
+
+    pub fn is_quantized(&self) -> bool {
+        matches!(self.weight, LinearWeight::Gptq { .. })
     }
 
     fn forward_fp(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
@@ -439,7 +444,8 @@ impl Linear {
                 out_features as i64,
                 num_groups,
                 group_size as i64,
-            ).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+            )
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         }
 
         let mut out_shape = x_shape[..trailing].to_vec();
@@ -460,11 +466,7 @@ pub struct LlamaMLP {
 #[cfg(feature = "candle-backend")]
 impl LlamaMLP {
     pub fn new(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
-        Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-        }
+        Self { gate_proj, up_proj, down_proj }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -524,15 +526,7 @@ impl LlamaAttention {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        }
+        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
     }
 
     pub fn forward(
@@ -1151,7 +1145,10 @@ mod tests {
             -19088744i32,   // Col 1: 0xFEDCBA98
             -324508640i32,  // Col 2: 0xECA86420
             -1985229329i32, // Col 3: 0x89ABCDEF
-            0i32, 0i32, 0i32, 0i32, // Col 4-7
+            0i32,
+            0i32,
+            0i32,
+            0i32, // Col 4-7
         ];
         let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
 
@@ -1160,7 +1157,11 @@ mod tests {
         let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
 
         // Shape: (1, 8)
-        let scales = Tensor::from_vec(vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32], (1, 8), &device)?;
+        let scales = Tensor::from_vec(
+            vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32],
+            (1, 8),
+            &device,
+        )?;
 
         // Shape: (8,)
         let g_idx = Tensor::from_vec(vec![0u32; 8], (8,), &device)?;
@@ -1205,7 +1206,10 @@ mod tests {
             -19088744i32,   // Col 1: 0xFEDCBA98
             -324508640i32,  // Col 2: 0xECA86420
             -1985229329i32, // Col 3: 0x89ABCDEF
-            0i32, 0i32, 0i32, 0i32, // Col 4-7
+            0i32,
+            0i32,
+            0i32,
+            0i32, // Col 4-7
         ];
         let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
 
@@ -1213,7 +1217,11 @@ mod tests {
         let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
 
         // Shape: (1, 8)
-        let scales_f32 = Tensor::from_vec(vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32], (1, 8), &device)?;
+        let scales_f32 = Tensor::from_vec(
+            vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32],
+            (1, 8),
+            &device,
+        )?;
         let scales = scales_f32.to_dtype(DType::F16)?;
 
         // Shape: (8,)
@@ -1227,13 +1235,16 @@ mod tests {
 
         let out = linear.forward(&x)?;
         assert_eq!(out.dims(), &[1, 8]);
-        
+
         let out_f32 = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-        
+
         // Let's compute the expected outputs using the CPU baseline
-        let expected_out = x.to_device(&Device::Cpu)?.reshape((1, 8))?.matmul(&linear.weight()?.to_device(&Device::Cpu)?.t()?)?;
+        let expected_out = x
+            .to_device(&Device::Cpu)?
+            .reshape((1, 8))?
+            .matmul(&linear.weight()?.to_device(&Device::Cpu)?.t()?)?;
         let expected_vals = expected_out.to_dtype(DType::F32)?.to_vec2::<f32>()?[0].clone();
-        
+
         for col in 0..8 {
             let expected = expected_vals[col];
             let actual = out_f32[0][col];
@@ -1247,9 +1258,7 @@ mod tests {
 }
 
 #[cfg(all(feature = "candle-backend", feature = "cuda"))]
-fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType + 'static>(
-    t: &Tensor,
-) -> Result<*const T> {
+fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType + 'static>(t: &Tensor) -> Result<*const T> {
     use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     let (storage, layout) = t.storage_and_layout();
     match &*storage {
@@ -1264,4 +1273,3 @@ fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType + 'static>(
         _ => Err(candle_core::Error::Msg("Not a CUDA tensor".to_string())),
     }
 }
-

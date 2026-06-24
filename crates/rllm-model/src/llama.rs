@@ -10,7 +10,9 @@ use rllm_quant::{WeightSource, factory_from_config};
 #[cfg(feature = "candle-backend")]
 use crate::gptq::GptqCalibration;
 #[cfg(feature = "candle-backend")]
-use crate::layers::{Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm, repeat_kv, causal_mask};
+use crate::layers::{
+    Linear, LlamaAttention, LlamaDecoderLayer, LlamaMLP, RmsNorm, causal_mask, repeat_kv,
+};
 #[cfg(feature = "candle-backend")]
 use crate::loader::WeightMap;
 #[cfg(feature = "candle-backend")]
@@ -60,8 +62,12 @@ impl LlamaForCausalLM {
                 .reshape((1, token_ids.len()))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let positions: Vec<usize> = (0..token_ids.len()).collect();
-            self.model
-                .collect_gptq_calibrations(&input_ids, &positions, include_lm_head, &mut calibrations)?;
+            self.model.collect_gptq_calibrations(
+                &input_ids,
+                &positions,
+                include_lm_head,
+                &mut calibrations,
+            )?;
         }
         Ok(calibrations)
     }
@@ -200,32 +206,20 @@ fn load_linear(
             .weights
             .remove(&format!("{prefix}.scales"))
             .ok_or_else(|| anyhow::anyhow!("missing {prefix}.scales"))?;
-            
-        let bits = config
-            .quantization
-            .as_ref()
-            .and_then(|q| q.bits)
-            .unwrap_or(4);
-        let group_size = config
-            .quantization
-            .as_ref()
-            .and_then(|q| q.group_size)
-            .unwrap_or(128);
+
+        let bits = config.quantization.as_ref().and_then(|q| q.bits).unwrap_or(4);
+        let group_size = config.quantization.as_ref().and_then(|q| q.group_size).unwrap_or(128);
 
         let in_features = qweight.dim(0)? * 8;
 
         let g_idx = if let Some(g) = weights.weights.remove(&format!("{prefix}.g_idx")) {
             g
         } else {
-            let g_idx_vec: Vec<u32> = (0..in_features)
-                .map(|r| (r / group_size) as u32)
-                .collect();
+            let g_idx_vec: Vec<u32> = (0..in_features).map(|r| (r / group_size) as u32).collect();
             Tensor::from_vec(g_idx_vec, (in_features,), device)?
         };
 
-        Ok(Linear::new_gptq(
-            qweight, qzeros, scales, g_idx, bits, group_size,
-        ))
+        Ok(Linear::new_gptq(qweight, qzeros, scales, g_idx, bits, group_size))
     } else {
         let weight_name = format!("{prefix}.weight");
         let weight = weights
@@ -282,10 +276,14 @@ impl LlamaModel {
         for i in 0..config.num_layers {
             let prefix = format!("model.layers.{i}");
 
-            let q_proj = load_linear(&format!("{prefix}.self_attn.q_proj"), &mut weights, config, device)?;
-            let k_proj = load_linear(&format!("{prefix}.self_attn.k_proj"), &mut weights, config, device)?;
-            let v_proj = load_linear(&format!("{prefix}.self_attn.v_proj"), &mut weights, config, device)?;
-            let o_proj = load_linear(&format!("{prefix}.self_attn.o_proj"), &mut weights, config, device)?;
+            let q_proj =
+                load_linear(&format!("{prefix}.self_attn.q_proj"), &mut weights, config, device)?;
+            let k_proj =
+                load_linear(&format!("{prefix}.self_attn.k_proj"), &mut weights, config, device)?;
+            let v_proj =
+                load_linear(&format!("{prefix}.self_attn.v_proj"), &mut weights, config, device)?;
+            let o_proj =
+                load_linear(&format!("{prefix}.self_attn.o_proj"), &mut weights, config, device)?;
 
             let attn = LlamaAttention::new(
                 q_proj,
@@ -297,9 +295,12 @@ impl LlamaModel {
                 head_dim,
             );
 
-            let gate_proj = load_linear(&format!("{prefix}.mlp.gate_proj"), &mut weights, config, device)?;
-            let up_proj = load_linear(&format!("{prefix}.mlp.up_proj"), &mut weights, config, device)?;
-            let down_proj = load_linear(&format!("{prefix}.mlp.down_proj"), &mut weights, config, device)?;
+            let gate_proj =
+                load_linear(&format!("{prefix}.mlp.gate_proj"), &mut weights, config, device)?;
+            let up_proj =
+                load_linear(&format!("{prefix}.mlp.up_proj"), &mut weights, config, device)?;
+            let down_proj =
+                load_linear(&format!("{prefix}.mlp.down_proj"), &mut weights, config, device)?;
             let mlp = LlamaMLP::new(gate_proj, up_proj, down_proj);
 
             let input_ln_w = weights
@@ -355,7 +356,9 @@ impl LlamaModel {
 
         // Log quantization mode, bits, and strategy at startup.
         if let Some(ref q) = config.quantization {
-            let strategy = weights.quant_schema.as_ref()
+            let strategy = weights
+                .quant_schema
+                .as_ref()
                 .and_then(|s| s.weight_strategy.clone())
                 .unwrap_or_else(|| "channel".to_string());
             tracing::info!(
@@ -430,7 +433,7 @@ impl LlamaModel {
         gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
         attn_meta: &rllm_kernels::AttentionMetadata,
     ) -> Result<Tensor> {
-        let hidden_states = embedding_lookup(self.embed_tokens.weight(), input_ids)
+        let hidden_states = embedding_lookup(self.embed_tokens.weight()?, input_ids)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let mut hidden_states = hidden_states;
@@ -454,8 +457,8 @@ impl LlamaModel {
         include_lm_head: bool,
         calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
     ) -> Result<()> {
-        let mut hidden_states =
-            embedding_lookup(self.embed_tokens.weight()?, input_ids).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut hidden_states = embedding_lookup(self.embed_tokens.weight()?, input_ids)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             hidden_states = collect_decoder_layer_calibration(
@@ -469,7 +472,8 @@ impl LlamaModel {
             .map_err(|e| anyhow::anyhow!("layer {i}: {e}"))?;
         }
 
-        let hidden_states = self.norm.forward(&hidden_states).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let hidden_states =
+            self.norm.forward(&hidden_states).map_err(|e| anyhow::anyhow!("{e}"))?;
         if include_lm_head {
             observe_linear_input("lm_head", &self.lm_head, &hidden_states, calibrations)?;
         }
@@ -499,7 +503,14 @@ fn collect_decoder_layer_calibration(
 ) -> Result<Tensor> {
     let residual = hidden_states.clone();
     let normed = layer.input_layernorm().forward(hidden_states)?;
-    let attn_out = collect_attention_calibration(layer.self_attn(), &normed, positions, rope, prefix, calibrations)?;
+    let attn_out = collect_attention_calibration(
+        layer.self_attn(),
+        &normed,
+        positions,
+        rope,
+        prefix,
+        calibrations,
+    )?;
     let hidden_states = (residual + attn_out)?;
 
     let residual = hidden_states.clone();
@@ -519,11 +530,26 @@ fn collect_attention_calibration(
 ) -> Result<Tensor> {
     let (bsz, seq_len, _) = hidden_states.dims3()?;
 
-    observe_linear_input(&format!("{prefix}.self_attn.q_proj"), attn.q_proj(), hidden_states, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.self_attn.q_proj"),
+        attn.q_proj(),
+        hidden_states,
+        calibrations,
+    )?;
     let q = attn.q_proj().forward(hidden_states)?;
-    observe_linear_input(&format!("{prefix}.self_attn.k_proj"), attn.k_proj(), hidden_states, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.self_attn.k_proj"),
+        attn.k_proj(),
+        hidden_states,
+        calibrations,
+    )?;
     let k = attn.k_proj().forward(hidden_states)?;
-    observe_linear_input(&format!("{prefix}.self_attn.v_proj"), attn.v_proj(), hidden_states, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.self_attn.v_proj"),
+        attn.v_proj(),
+        hidden_states,
+        calibrations,
+    )?;
     let v = attn.v_proj().forward(hidden_states)?;
 
     let q = q.reshape((bsz, seq_len, attn.num_heads(), attn.head_dim()))?.transpose(1, 2)?;
@@ -538,9 +564,8 @@ fn collect_attention_calibration(
     };
 
     let scale = 1.0f32 / (attn.head_dim() as f32).sqrt();
-    let attn_weights = q
-        .matmul(&k.t()?)?
-        .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
+    let attn_weights =
+        q.matmul(&k.t()?)?.broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
     let attn_weights = if seq_len > 1 {
         let mask = causal_mask(seq_len, q.device())?.to_dtype(q.dtype())?;
         attn_weights.broadcast_add(&mask)?
@@ -552,7 +577,12 @@ fn collect_attention_calibration(
     let attn_output =
         attn_output.transpose(1, 2)?.reshape((bsz, seq_len, attn.num_heads() * attn.head_dim()))?;
 
-    observe_linear_input(&format!("{prefix}.self_attn.o_proj"), attn.o_proj(), &attn_output, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.self_attn.o_proj"),
+        attn.o_proj(),
+        &attn_output,
+        calibrations,
+    )?;
     attn.o_proj().forward(&attn_output).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -563,13 +593,28 @@ fn collect_mlp_calibration(
     prefix: &str,
     calibrations: &mut std::collections::BTreeMap<String, GptqCalibration>,
 ) -> Result<Tensor> {
-    observe_linear_input(&format!("{prefix}.mlp.gate_proj"), mlp.gate_proj(), hidden_states, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.mlp.gate_proj"),
+        mlp.gate_proj(),
+        hidden_states,
+        calibrations,
+    )?;
     let gate = mlp.gate_proj().forward(hidden_states)?;
-    observe_linear_input(&format!("{prefix}.mlp.up_proj"), mlp.up_proj(), hidden_states, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.mlp.up_proj"),
+        mlp.up_proj(),
+        hidden_states,
+        calibrations,
+    )?;
     let up = mlp.up_proj().forward(hidden_states)?;
     let gate = gate.silu()?;
     let down_input = gate.broadcast_mul(&up)?;
-    observe_linear_input(&format!("{prefix}.mlp.down_proj"), mlp.down_proj(), &down_input, calibrations)?;
+    observe_linear_input(
+        &format!("{prefix}.mlp.down_proj"),
+        mlp.down_proj(),
+        &down_input,
+        calibrations,
+    )?;
     mlp.down_proj().forward(&down_input).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -585,9 +630,8 @@ fn observe_linear_input(
     let input = input.to_dtype(DType::F32)?;
     let numel = input.dims().iter().product::<usize>();
     let samples = input.reshape((numel / in_features, in_features))?.to_vec2::<f32>()?;
-    let calib = calibrations
-        .entry(name.to_string())
-        .or_insert_with(|| GptqCalibration::new(in_features));
+    let calib =
+        calibrations.entry(name.to_string()).or_insert_with(|| GptqCalibration::new(in_features));
     calib.observe(&samples)
 }
 

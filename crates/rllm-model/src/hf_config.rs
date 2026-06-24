@@ -69,11 +69,7 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
             "awq" => rllm_core::config::QuantizationKind::AWQ,
             _ => return None,
         };
-        Some(rllm_core::config::QuantizationConfig {
-            kind,
-            group_size: q.group_size,
-            bits: q.bits,
-        })
+        Some(rllm_core::config::QuantizationConfig { kind, group_size: q.group_size, bits: q.bits })
     });
 
     Ok(ModelConfig {

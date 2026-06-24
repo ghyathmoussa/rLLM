@@ -579,7 +579,8 @@ mod tests {
                     d_positions as *mut u8,
                     positions.as_ptr() as *const u8,
                     num_tokens as usize * 4,
-                ).unwrap();
+                )
+                .unwrap();
             }
 
             unsafe {
