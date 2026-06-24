@@ -1,7 +1,6 @@
 #[cfg(feature = "candle-backend")]
 use candle_core::{D, DType, Device, Result, Tensor};
-#[cfg(all(feature = "candle-backend", feature = "cuda"))]
-use rllm_kernels::cuda::CudaKernelError;
+
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
@@ -53,7 +52,39 @@ pub fn dequantize_gptq(
     scales: &Tensor,
     g_idx: &Tensor,
     bits: usize,
+    group_size: usize,
+) -> Result<Tensor> {
+    let device = qweight.device();
+    if let Device::Cuda(_) = device {
+        // Dequantize on CPU. The packed-INT4 unpacking relies on I64/integer
+        // ops whose CUDA kernels are incomplete in this Candle/cudarc build
+        // (they raise "named symbol not found"). The result is cached per layer,
+        // so the host transfer is a one-time cost; the dequantized FP weights
+        // then live on the GPU for the matmul.
+        let cpu = Device::Cpu;
+        let out = dequantize_gptq_impl(
+            &qweight.to_device(&cpu)?,
+            &qzeros.to_device(&cpu)?,
+            &scales.to_device(&cpu)?,
+            &g_idx.to_device(&cpu)?,
+            bits,
+            group_size,
+            &cpu,
+        )?;
+        return out.to_device(device);
+    }
+    dequantize_gptq_impl(qweight, qzeros, scales, g_idx, bits, group_size, device)
+}
+
+#[cfg(feature = "candle-backend")]
+fn dequantize_gptq_impl(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    g_idx: &Tensor,
+    bits: usize,
     _group_size: usize,
+    device: &Device,
 ) -> Result<Tensor> {
     if bits != 4 {
         return Err(candle_core::Error::Msg(format!(
@@ -61,28 +92,26 @@ pub fn dequantize_gptq(
         )));
     }
 
-    let device = qweight.device();
-    
     // We expect qweight to be (in_features / 8, out_features)
     let (packed_in_features, out_features) = qweight.dims2()?;
     let in_features = packed_in_features * 8;
 
-    // Convert qweight from signed I32 to unsigned I64 to avoid sign-extension bugs.
+    // Convert qweight from signed I32 to unsigned F64 to avoid sign-extension bugs.
     // If it's negative, add 2^32.
-    let qweight_i64 = qweight.to_dtype(DType::I64)?;
-    let zero_w = Tensor::new(0i64, device)?.broadcast_as(qweight_i64.shape())?;
-    let is_neg = qweight_i64.lt(&zero_w)?;
-    let offset_w = Tensor::new(4294967296i64, device)?.broadcast_as(qweight_i64.shape())?;
-    let qweight_u64 = qweight_i64.add(&is_neg.to_dtype(DType::I64)?.mul(&offset_w)?)?;
+    let qweight_f64 = qweight.to_dtype(DType::F64)?;
+    let zero_w = Tensor::new(0.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let is_neg = qweight_f64.lt(&zero_w)?;
+    let offset_w = Tensor::new(4294967296.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let qweight_u64 = qweight_f64.add(&is_neg.to_dtype(DType::F64)?.mul(&offset_w)?)?;
 
     // Unpack qweight (bits = 4, so 8 values per i32/i64)
     let mut w_unpacked = Vec::with_capacity(8);
-    let c16_w = Tensor::new(16i64, device)?.broadcast_as(qweight_u64.shape())?;
+    let c16_w = Tensor::new(16.0f64, device)?.broadcast_as(qweight_u64.shape())?;
     for i in 0..8 {
-        let divisor = 1i64 << (4 * i);
+        let divisor = (1i64 << (4 * i)) as f64;
         let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qweight_u64.shape())?;
-        let shifted = qweight_u64.div(&divisor_t)?;
-        let temp = shifted.div(&c16_w)?.mul(&c16_w)?;
+        let shifted = qweight_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_w)?.floor()?.mul(&c16_w)?;
         let masked = shifted.sub(&temp)?;
         w_unpacked.push(masked);
     }
@@ -91,22 +120,22 @@ pub fn dequantize_gptq(
     // Reshape to [in_features, out_features]
     let w_raw = w_stacked.reshape((in_features, out_features))?.to_dtype(DType::F32)?;
 
-    // Convert qzeros from signed I32 to unsigned I64.
-    let qzeros_i64 = qzeros.to_dtype(DType::I64)?;
-    let zero_z = Tensor::new(0i64, device)?.broadcast_as(qzeros_i64.shape())?;
-    let is_neg_z = qzeros_i64.lt(&zero_z)?;
-    let offset_z = Tensor::new(4294967296i64, device)?.broadcast_as(qzeros_i64.shape())?;
-    let qzeros_u64 = qzeros_i64.add(&is_neg_z.to_dtype(DType::I64)?.mul(&offset_z)?)?;
+    // Convert qzeros from signed I32 to unsigned F64.
+    let qzeros_f64 = qzeros.to_dtype(DType::F64)?;
+    let zero_z = Tensor::new(0.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let is_neg_z = qzeros_f64.lt(&zero_z)?;
+    let offset_z = Tensor::new(4294967296.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let qzeros_u64 = qzeros_f64.add(&is_neg_z.to_dtype(DType::F64)?.mul(&offset_z)?)?;
 
     // Unpack qzeros
     let mut z_unpacked = Vec::with_capacity(8);
-    let c16_z = Tensor::new(16i64, device)?.broadcast_as(qzeros_u64.shape())?;
+    let c16_z = Tensor::new(16.0f64, device)?.broadcast_as(qzeros_u64.shape())?;
     let one_z = Tensor::new(1.0f32, device)?.broadcast_as(qzeros_u64.shape())?;
     for i in 0..8 {
-        let divisor = 1i64 << (4 * i);
+        let divisor = (1i64 << (4 * i)) as f64;
         let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qzeros_u64.shape())?;
-        let shifted = qzeros_u64.div(&divisor_t)?;
-        let temp = shifted.div(&c16_z)?.mul(&c16_z)?;
+        let shifted = qzeros_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_z)?.floor()?.mul(&c16_z)?;
         let masked = shifted.sub(&temp)?;
         let adjusted = masked.to_dtype(DType::F32)?.add(&one_z)?;
         z_unpacked.push(adjusted);
@@ -243,7 +272,7 @@ impl Linear {
         scales: &Tensor,
         g_idx: &Tensor,
         bits: usize,
-        _group_size: usize,
+        group_size: usize,
     ) -> Result<Option<Tensor>> {
         if bits != 4
             || x.dtype() != DType::F16
@@ -270,18 +299,43 @@ impl Linear {
             return Ok(None);
         }
 
-        // The GPTQ CUDA kernel FFI now exists in rllm-kernels, but this repo
-        // does not yet expose stable Candle raw-device-pointer extraction for
-        // general tensors. Keep the dispatch gate in place and fall back until
-        // the tensor-to-device-pointer bridge is added.
-        tracing::debug!(
-            batch,
-            in_features,
-            out_features,
-            "GPTQ CUDA fast path requested but Candle raw device pointer interop is not wired; falling back to FP dequantize+matmul"
-        );
-        let _ = core::mem::size_of::<CudaKernelError>();
-        Ok(None)
+        // Ensure all tensors are contiguous to pass safely to raw CUDA kernel
+        let x_contig = x.contiguous()?;
+        let qweight_contig = qweight.contiguous()?;
+        let qzeros_contig = qzeros.contiguous()?;
+        let scales_contig = scales.contiguous()?;
+        let g_idx_contig = g_idx.contiguous()?;
+
+        let out = Tensor::zeros((batch, out_features), DType::F16, x.device())?;
+
+        let p_x = get_cuda_ptr::<half::f16>(&x_contig)?;
+        let p_qweight = get_cuda_ptr::<i32>(&qweight_contig)?;
+        let p_qzeros = get_cuda_ptr::<i32>(&qzeros_contig)?;
+        let p_scales = get_cuda_ptr::<half::f16>(&scales_contig)?;
+        let p_gidx = get_cuda_ptr::<u32>(&g_idx_contig)?;
+        let p_out = get_cuda_ptr::<half::f16>(&out)?;
+
+        let num_groups = (in_features / group_size) as i64;
+
+        unsafe {
+            rllm_kernels::cuda::gptq_gemm_f16_sync(
+                p_x as *const u16,
+                p_qweight,
+                p_qzeros,
+                p_scales as *const u16,
+                p_gidx,
+                p_out as *mut u16,
+                batch as i64,
+                in_features as i64,
+                out_features as i64,
+                num_groups,
+                group_size as i64,
+            ).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        }
+
+        let mut out_shape = x_shape[..trailing].to_vec();
+        out_shape.push(out_features);
+        out.reshape(out_shape).map(Some)
     }
 }
 
@@ -405,10 +459,14 @@ impl LlamaAttention {
             (k, v)
         };
 
-        // Scaled dot-product attention
+        // Scaled dot-product attention. Candle's CUDA matmul requires contiguous
+        // operands; `q`, `k`/`v` are non-contiguous views after transpose (and RoPE/cat),
+        // so materialize them before the batched matmul.
         let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-        let attn_weights = q
-            .matmul(&k.t()?)?
+        let q_contig = q.contiguous()?;
+        let k_t = k.t()?.contiguous()?;
+        let attn_weights = q_contig
+            .matmul(&k_t)?
             .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
 
         // Apply causal mask for prefill (seq_len > 1)
@@ -420,7 +478,8 @@ impl LlamaAttention {
         };
 
         let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
-        let attn_output = attn_weights.matmul(&v)?;
+        let v_contig = v.contiguous()?;
+        let attn_output = attn_weights.matmul(&v_contig)?;
 
         // Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden_size]
         let attn_output =
@@ -691,4 +750,75 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn gptq_cuda_linear_forward_correctness() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+
+        // Setup same weights as CPU test but on CUDA device
+        let qweight_data = vec![
+            1985229328i32,  // Col 0: 0x76543210
+            -19088744i32,   // Col 1: 0xFEDCBA98
+            -324508640i32,  // Col 2: 0xECA86420
+            -1985229329i32, // Col 3: 0x89ABCDEF
+            0i32, 0i32, 0i32, 0i32, // Col 4-7
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
+
+        // Shape: (1, 1)
+        let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
+
+        // Shape: (1, 8)
+        let scales_f32 = Tensor::from_vec(vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32], (1, 8), &device)?;
+        let scales = scales_f32.to_dtype(DType::F16)?;
+
+        // Shape: (8,)
+        let g_idx = Tensor::from_vec(vec![0u32; 8], (8,), &device)?;
+
+        let linear = Linear::new_gptq(qweight, qzeros, scales, g_idx, 4, 8);
+
+        // Input x (shape [1, 8], dtype F16)
+        let x_data = vec![1.0f32, -1.0, 0.5, 2.0, 0.25, -0.5, 1.5, -2.0];
+        let x = Tensor::from_vec(x_data, (1, 8), &device)?.to_dtype(DType::F16)?;
+
+        let out = linear.forward(&x)?;
+        assert_eq!(out.dims(), &[1, 8]);
+        
+        let out_f32 = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+        
+        // Let's compute the expected outputs using the CPU baseline
+        let expected_out = x.to_device(&Device::Cpu)?.reshape((1, 8))?.matmul(&linear.weight()?.to_device(&Device::Cpu)?.t()?)?;
+        let expected_vals = expected_out.to_dtype(DType::F32)?.to_vec2::<f32>()?[0].clone();
+        
+        for col in 0..8 {
+            let expected = expected_vals[col];
+            let actual = out_f32[0][col];
+            assert!(
+                (actual - expected).abs() < 0.2,
+                "col {col}: expected {expected:.4}, got {actual:.4}"
+            );
+        }
+        Ok(())
+    }
 }
+
+#[cfg(all(feature = "candle-backend", feature = "cuda"))]
+fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType + 'static>(
+    t: &Tensor,
+) -> Result<*const T> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    let (storage, layout) = t.storage_and_layout();
+    match &*storage {
+        candle_core::Storage::Cuda(cuda_storage) => {
+            let slice = cuda_storage.as_cuda_slice::<T>()?;
+            let stream = cuda_storage.device.cuda_stream();
+            let (raw_ptr_u64, _guard) = slice.device_ptr(&stream);
+            let offset = layout.start_offset();
+            let raw_device_ptr = raw_ptr_u64 as *const T;
+            unsafe { Ok(raw_device_ptr.add(offset)) }
+        }
+        _ => Err(candle_core::Error::Msg("Not a CUDA tensor".to_string())),
+    }
+}
+

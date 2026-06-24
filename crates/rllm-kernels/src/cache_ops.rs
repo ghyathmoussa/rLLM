@@ -71,6 +71,10 @@ mod ffi {
         pub fn rllm_gpu_free(ptr: *mut std::ffi::c_void) -> c_int;
         pub fn rllm_gpu_alloc_host(ptr: *mut *mut std::ffi::c_void, nbytes: i64) -> c_int;
         pub fn rllm_gpu_free_host(ptr: *mut std::ffi::c_void) -> c_int;
+
+        // Host <-> device memory copies (host memcpy cannot touch device memory).
+        pub fn rllm_gpu_memcpy_h2d(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
+        pub fn rllm_gpu_memcpy_d2h(dst: *mut std::ffi::c_void, src: *const std::ffi::c_void, nbytes: i64) -> c_int;
     }
 }
 
@@ -230,6 +234,40 @@ pub unsafe fn gpu_alloc(nbytes: usize) -> Result<*mut u8, CudaKernelError> {
 #[cfg(has_cuda)]
 pub unsafe fn gpu_free(ptr: *mut u8) -> Result<(), CudaKernelError> {
     let rc = unsafe { ffi::rllm_gpu_free(ptr as *mut std::ffi::c_void) };
+    check(rc)
+}
+
+/// Copy `nbytes` from host memory to a device pointer (cudaMemcpy H2D).
+///
+/// # Safety
+/// - `dst` must be a valid device pointer with at least `nbytes` allocated.
+/// - `src` must be a valid host pointer with at least `nbytes` readable.
+#[cfg(has_cuda)]
+pub unsafe fn gpu_memcpy_h2d(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gpu_memcpy_h2d(
+            dst as *mut std::ffi::c_void,
+            src as *const std::ffi::c_void,
+            nbytes as i64,
+        )
+    };
+    check(rc)
+}
+
+/// Copy `nbytes` from a device pointer to host memory (cudaMemcpy D2H).
+///
+/// # Safety
+/// - `src` must be a valid device pointer with at least `nbytes` readable.
+/// - `dst` must be a valid host pointer with at least `nbytes` writable.
+#[cfg(has_cuda)]
+pub unsafe fn gpu_memcpy_d2h(dst: *mut u8, src: *const u8, nbytes: usize) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_gpu_memcpy_d2h(
+            dst as *mut std::ffi::c_void,
+            src as *const std::ffi::c_void,
+            nbytes as i64,
+        )
+    };
     check(rc)
 }
 
@@ -479,16 +517,16 @@ mod tests {
         fn cache_zero_clears_memory() {
             let nbytes = 256;
             let ptr = unsafe { gpu_alloc(nbytes).expect("gpu_alloc failed") };
-            // Write non-zero
-            unsafe { cache_zero_sync(ptr, nbytes as i64).expect("cache_zero_sync failed") };
+            // Initialize with non-zero
+            let initial = vec![42u8; nbytes];
+            unsafe {
+                gpu_memcpy_h2d(ptr, initial.as_ptr(), nbytes).unwrap();
+                cache_zero_sync(ptr, nbytes as i64).expect("cache_zero_sync failed");
+            }
             // Verify zeroed — copy to host
             let mut host_buf = vec![0u8; nbytes];
             unsafe {
-                libc::memcpy(
-                    host_buf.as_mut_ptr() as *mut libc::c_void,
-                    ptr as *const libc::c_void,
-                    nbytes,
-                );
+                gpu_memcpy_d2h(host_buf.as_mut_ptr(), ptr, nbytes).unwrap();
             }
             assert!(host_buf.iter().all(|&b| b == 0));
             unsafe { gpu_free(ptr).expect("gpu_free failed") };
@@ -503,6 +541,12 @@ mod tests {
             let src = unsafe { gpu_alloc(total).expect("gpu_alloc failed") };
             let dst = unsafe { gpu_alloc(total).expect("gpu_alloc failed") };
 
+            // Initialize src
+            let src_initial = (0..total).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+            unsafe {
+                gpu_memcpy_h2d(src, src_initial.as_ptr(), total).unwrap();
+            }
+
             // Zero dst first
             unsafe { cache_zero_sync(dst, total as i64).expect("cache_zero failed") };
 
@@ -516,16 +560,8 @@ mod tests {
             let mut src_host = vec![0u8; total];
             let mut dst_host = vec![0u8; total];
             unsafe {
-                libc::memcpy(
-                    src_host.as_mut_ptr() as *mut libc::c_void,
-                    src as *const libc::c_void,
-                    total,
-                );
-                libc::memcpy(
-                    dst_host.as_mut_ptr() as *mut libc::c_void,
-                    dst as *const libc::c_void,
-                    total,
-                );
+                gpu_memcpy_d2h(src_host.as_mut_ptr(), src, total).unwrap();
+                gpu_memcpy_d2h(dst_host.as_mut_ptr(), dst, total).unwrap();
             }
             assert_eq!(src_host, dst_host);
 

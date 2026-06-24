@@ -407,7 +407,7 @@ mod tests {
     #[cfg(has_cuda)]
     mod with_cuda {
         use super::*;
-        use crate::cache_ops::{gpu_alloc, gpu_free};
+        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_d2h, gpu_memcpy_h2d};
 
         /// Convert f32 to IEEE 754 FP16 bit pattern.
         fn f32_to_f16_bits(f: f32) -> u16 {
@@ -433,9 +433,9 @@ mod tests {
 
         /// Convert IEEE 754 FP16 bit pattern to f32.
         fn f16_bits_to_f32(h: u16) -> f32 {
-            let sign = (h >> 15) & 0x1;
-            let exponent = (h >> 10) & 0x1F;
-            let mantissa = h & 0x3FF;
+            let sign = ((h >> 15) & 0x1) as u32;
+            let exponent = ((h >> 10) & 0x1F) as u32;
+            let mantissa = (h & 0x3FF) as u32;
             if exponent == 0 {
                 if mantissa == 0 {
                     return f32::from_bits(sign << 31);
@@ -458,17 +458,14 @@ mod tests {
         unsafe fn upload(data: &[u16]) -> *mut u16 {
             let nbytes = data.len() * 2;
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
-            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
             ptr
         }
 
         unsafe fn download(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
-            libc::memcpy(
-                host.as_mut_ptr() as *mut libc::c_void,
-                ptr as *const libc::c_void,
-                len * 2,
-            );
+            let nbytes = len * 2;
+            gpu_memcpy_d2h(host.as_mut_ptr() as *mut u8, ptr as *const u8, nbytes).unwrap();
             host
         }
 
@@ -588,15 +585,15 @@ mod tests {
                 unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
             let d_out_k =
                 unsafe { gpu_alloc(n as usize * 2).expect("gpu_alloc failed") as *mut u16 };
-            let mut d_positions = unsafe {
+            let d_positions = unsafe {
                 gpu_alloc(num_tokens as usize * 4).expect("gpu_alloc failed") as *mut i32
             };
             unsafe {
-                libc::memcpy(
-                    d_positions as *mut libc::c_void,
-                    positions.as_ptr() as *const libc::c_void,
+                gpu_memcpy_h2d(
+                    d_positions as *mut u8,
+                    positions.as_ptr() as *const u8,
                     num_tokens as usize * 4,
-                );
+                ).unwrap();
             }
 
             unsafe {

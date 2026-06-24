@@ -386,7 +386,7 @@ mod tests {
     #[cfg(has_cuda)]
     mod with_cuda {
         use super::*;
-        use crate::cache_ops::{gpu_alloc, gpu_free};
+        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_d2h, gpu_memcpy_h2d};
 
         fn f32_to_f16_bits(f: f32) -> u16 {
             let x = f.to_bits();
@@ -435,31 +435,28 @@ mod tests {
         unsafe fn upload_u16(data: &[u16]) -> *mut u16 {
             let nbytes = std::mem::size_of_val(data);
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
-            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
             ptr
         }
 
         unsafe fn upload_i32(data: &[i32]) -> *mut i32 {
             let nbytes = std::mem::size_of_val(data);
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut i32;
-            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
             ptr
         }
 
         unsafe fn upload_u32(data: &[u32]) -> *mut u32 {
             let nbytes = std::mem::size_of_val(data);
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u32;
-            libc::memcpy(ptr as *mut libc::c_void, data.as_ptr() as *const libc::c_void, nbytes);
+            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
             ptr
         }
 
         unsafe fn download_u16(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
-            libc::memcpy(
-                host.as_mut_ptr() as *mut libc::c_void,
-                ptr as *const libc::c_void,
-                len * std::mem::size_of::<u16>(),
-            );
+            let nbytes = len * std::mem::size_of::<u16>();
+            gpu_memcpy_d2h(host.as_mut_ptr() as *mut u8, ptr as *const u8, nbytes).unwrap();
             host
         }
 
@@ -468,9 +465,22 @@ mod tests {
             let a = [1.0f32, 2.0, 3.0, 4.0];
             let b = [10.0f32, 20.0, 30.0, 40.0];
             let mut out = [0.0f32; 4];
+            let nbytes = 4 * std::mem::size_of::<f32>();
             unsafe {
-                vector_add_f32_sync(a.as_ptr(), b.as_ptr(), out.as_mut_ptr(), 4)
-                    .expect("vector_add_f32_sync failed");
+                let d_a = gpu_alloc(nbytes).unwrap() as *mut f32;
+                let d_b = gpu_alloc(nbytes).unwrap() as *mut f32;
+                let d_out = gpu_alloc(nbytes).unwrap() as *mut f32;
+
+                gpu_memcpy_h2d(d_a as *mut u8, a.as_ptr() as *const u8, nbytes).unwrap();
+                gpu_memcpy_h2d(d_b as *mut u8, b.as_ptr() as *const u8, nbytes).unwrap();
+
+                vector_add_f32_sync(d_a, d_b, d_out, 4).expect("vector_add_f32_sync failed");
+
+                gpu_memcpy_d2h(out.as_mut_ptr() as *mut u8, d_out as *const u8, nbytes).unwrap();
+
+                gpu_free(d_a as *mut u8).unwrap();
+                gpu_free(d_b as *mut u8).unwrap();
+                gpu_free(d_out as *mut u8).unwrap();
             }
             assert_eq!(out, [11.0, 22.0, 33.0, 44.0]);
         }
@@ -480,7 +490,17 @@ mod tests {
             let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
             let mut dst = [0u8; 8];
             unsafe {
-                block_copy_sync(src.as_ptr(), dst.as_mut_ptr(), 8).expect("block_copy_sync failed");
+                let d_src = gpu_alloc(8).unwrap();
+                let d_dst = gpu_alloc(8).unwrap();
+
+                gpu_memcpy_h2d(d_src, src.as_ptr(), 8).unwrap();
+
+                block_copy_sync(d_src, d_dst, 8).expect("block_copy_sync failed");
+
+                gpu_memcpy_d2h(dst.as_mut_ptr(), d_dst, 8).unwrap();
+
+                gpu_free(d_src).unwrap();
+                gpu_free(d_dst).unwrap();
             }
             assert_eq!(src, dst);
         }
