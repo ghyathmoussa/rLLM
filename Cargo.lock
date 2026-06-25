@@ -2674,6 +2674,7 @@ dependencies = [
  "clap",
  "rllm-core",
  "rllm-engine",
+ "rllm-model",
  "rllm-server",
  "rllm-tokenizer",
  "tokio",
@@ -2779,7 +2780,6 @@ name = "rllm-kernels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "half",
  "libc",
  "rllm-core",
  "rllm-tensor",
@@ -2810,6 +2810,7 @@ dependencies = [
  "rllm-kernels",
  "rllm-quant",
  "rllm-tensor",
+ "rllm-tokenizer",
  "safetensors 0.6.2",
  "serde",
  "serde_json",

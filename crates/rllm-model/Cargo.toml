@@ -8,9 +8,10 @@ description = "Model registry, HF config parsing, Llama model implementation, an
 
 [dependencies]
 rllm-core.workspace = true
-rllm-quant = { workspace = true, default-features = false }
-rllm-tensor.workspace = true
 rllm-kernels.workspace = true
+rllm-tokenizer.workspace = true
+rllm-tensor.workspace = true
+rllm-quant.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -19,7 +20,7 @@ hf-hub.workspace = true
 safetensors.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, optional = true }
-half.workspace = true
+half = "2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -35,6 +36,7 @@ candle-backend = [
 ]
 cuda = [
     "candle-backend",
+    "rllm-kernels/cuda",
     "candle-core/cuda",
     "candle-nn/cuda",
     "candle-transformers/cuda",

@@ -1872,8 +1872,12 @@ mod tests {
                     cache_elems,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(query as *mut u8, q_u16.as_ptr() as *const u8, num_tokens * head_dim * 2)
-                    .unwrap();
+                gpu_memcpy_to_device(
+                    query as *mut u8,
+                    q_u16.as_ptr() as *const u8,
+                    num_tokens * head_dim * 2,
+                )
+                .unwrap();
                 gpu_memcpy_to_device(
                     bt_dev as *mut u8,
                     block_tables.as_ptr() as *const u8,
@@ -1929,12 +1933,26 @@ mod tests {
 
             // Oracle output for token 0 (kv_len = 1)
             let out_ref_0 = paged_attention_i8_reference(
-                &q_oracle[0..4], &key_i8[0..4], &value_i8[0..4], 1, head_dim, k_scale, v_scale, soft_scale,
+                &q_oracle[0..4],
+                &key_i8[0..4],
+                &value_i8[0..4],
+                1,
+                head_dim,
+                k_scale,
+                v_scale,
+                soft_scale,
             );
 
             // Oracle output for token 1 (kv_len = 2)
             let out_ref_1 = paged_attention_i8_reference(
-                &q_oracle[4..8], &key_i8[0..8], &value_i8[0..8], 2, head_dim, k_scale, v_scale, soft_scale,
+                &q_oracle[4..8],
+                &key_i8[0..8],
+                &value_i8[0..8],
+                2,
+                head_dim,
+                k_scale,
+                v_scale,
+                soft_scale,
             );
 
             // Verify token 0

@@ -21,4 +21,4 @@ cpu = []
 cuda = []
 
 [dev-dependencies]
-half.workspace = true
+libc = "0.2"

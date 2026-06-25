@@ -25,27 +25,24 @@ __global__ void fused_rmsnorm_kernel(
     int64_t n_elements,
     float eps) {
 
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t row = blockIdx.x;
     int64_t num_rows = n_elements / hidden_size;
-    int64_t row = idx / hidden_size;
-    int64_t col = idx % hidden_size;
-
     if (row >= num_rows) return;
 
-    // Compute sum of squares for this row using a single-thread approach.
-    // Each thread computes its own element's contribution, then we reduce.
-    float val = __half2float(input[idx]);
-    float sq = val * val;
+    float sum_sq = 0.0f;
+    for (int64_t col = threadIdx.x; col < hidden_size; col += blockDim.x) {
+        float val = __half2float(input[row * hidden_size + col]);
+        sum_sq += val * val;
+    }
 
-    // Shared memory for block-level reduction
+    // Shared memory for block reduction
     extern __shared__ float s_sum[];
-    s_sum[threadIdx.x] = sq;
+    s_sum[threadIdx.x] = sum_sq;
     __syncthreads();
 
-    // Only threads within hidden_size contribute to the same row.
-    // We reduce across the block.
+    // Reduce within the block
     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride && (threadIdx.x + stride) < hidden_size) {
+        if (threadIdx.x < stride) {
             s_sum[threadIdx.x] += s_sum[threadIdx.x + stride];
         }
         __syncthreads();
@@ -54,8 +51,12 @@ __global__ void fused_rmsnorm_kernel(
     float variance = s_sum[0] / static_cast<float>(hidden_size);
     float rms = rsqrtf(variance + eps);
 
-    float w = __half2float(weight[col]);
-    output[idx] = __float2half(val * rms * w);
+    for (int64_t col = threadIdx.x; col < hidden_size; col += blockDim.x) {
+        int64_t idx = row * hidden_size + col;
+        float val = __half2float(input[idx]);
+        float w = __half2float(weight[col]);
+        output[idx] = __float2half(val * rms * w);
+    }
 }
 
 int32_t rllm_fused_rmsnorm_f16(
@@ -68,11 +69,13 @@ int32_t rllm_fused_rmsnorm_f16(
     cudaStream_t stream) {
 
     if (n_elements <= 0 || hidden_size <= 0) return 0;
+    int64_t num_rows = n_elements / hidden_size;
     int64_t threads = 256;
-    // Round threads to at least hidden_size for correct reduction
-    if (threads < hidden_size) threads = ((hidden_size + 31) / 32) * 32;
-    if (threads > 1024) threads = 1024;
-    int64_t blocks = (n_elements + threads - 1) / threads;
+    if (hidden_size < 256) {
+        threads = 32;
+        while (threads < hidden_size) threads *= 2;
+    }
+    int64_t blocks = num_rows;
     int64_t shared_mem = threads * sizeof(float);
 
     fused_rmsnorm_kernel<<<blocks, threads, shared_mem, stream>>>(

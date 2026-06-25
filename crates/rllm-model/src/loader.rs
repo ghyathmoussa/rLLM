@@ -14,6 +14,7 @@ use rllm_quant::{QuantSchema, QuantTensor};
 use safetensors::tensor::{Dtype as SafeTensorDtype, SafeTensors, TensorView};
 
 #[cfg(feature = "candle-backend")]
+#[derive(Clone)]
 pub struct WeightMap {
     pub weights: HashMap<String, candle_core::Tensor>,
     pub quantized: HashMap<String, QuantTensor>,

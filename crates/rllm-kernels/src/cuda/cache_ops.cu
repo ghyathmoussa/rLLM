@@ -539,13 +539,18 @@ int32_t rllm_gpu_free_host(void* ptr) {
     return 0;
 }
 
-int32_t rllm_gpu_memcpy_to_device(void* dst, const void* src, int64_t nbytes) {
+// ── Host <-> Device Memcpy ───────────────────────────────────────────────
+// Host memcpy cannot touch device memory, so the test harness must route all
+// transfers through the CUDA runtime. These synchronous helpers cover the
+// common upload/download paths used by tests and debug tooling.
+
+int32_t rllm_gpu_memcpy_h2d(void* dst, const void* src, int64_t nbytes) {
     cudaError_t err = cudaMemcpy(dst, src, static_cast<size_t>(nbytes), cudaMemcpyHostToDevice);
     if (err != cudaSuccess) return static_cast<int32_t>(err);
     return 0;
 }
 
-int32_t rllm_gpu_memcpy_to_host(void* dst, const void* src, int64_t nbytes) {
+int32_t rllm_gpu_memcpy_d2h(void* dst, const void* src, int64_t nbytes) {
     cudaError_t err = cudaMemcpy(dst, src, static_cast<size_t>(nbytes), cudaMemcpyDeviceToHost);
     if (err != cudaSuccess) return static_cast<int32_t>(err);
     return 0;

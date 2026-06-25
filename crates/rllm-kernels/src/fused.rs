@@ -407,7 +407,7 @@ mod tests {
     #[cfg(has_cuda)]
     mod with_cuda {
         use super::*;
-        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_to_device, gpu_memcpy_to_host};
+        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_d2h, gpu_memcpy_h2d};
 
         /// Convert f32 to IEEE 754 FP16 bit pattern.
         fn f32_to_f16_bits(f: f32) -> u16 {
@@ -458,15 +458,14 @@ mod tests {
         unsafe fn upload(data: &[u16]) -> *mut u16 {
             let nbytes = data.len() * 2;
             let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
-            gpu_memcpy_to_device(ptr as *mut u8, data.as_ptr() as *const u8, nbytes)
-                .expect("gpu_memcpy_to_device failed");
+            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
             ptr
         }
 
         unsafe fn download(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
-            gpu_memcpy_to_host(host.as_mut_ptr() as *mut u8, ptr as *const u8, len * 2)
-                .expect("gpu_memcpy_to_host failed");
+            let nbytes = len * 2;
+            gpu_memcpy_d2h(host.as_mut_ptr() as *mut u8, ptr as *const u8, nbytes).unwrap();
             host
         }
 
@@ -576,12 +575,12 @@ mod tests {
                 gpu_alloc(num_tokens as usize * 4).expect("gpu_alloc failed") as *mut i32
             };
             unsafe {
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     d_positions as *mut u8,
                     positions.as_ptr() as *const u8,
                     num_tokens as usize * 4,
                 )
-                .expect("gpu_memcpy_to_device failed");
+                .unwrap();
             }
 
             unsafe {

@@ -6,6 +6,13 @@ use rllm_quant::QuantSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+struct HfQuantizationConfigJson {
+    quant_method: Option<String>,
+    bits: Option<usize>,
+    group_size: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct HfConfigJson {
     model_type: Option<String>,
@@ -55,11 +62,27 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         _ => DType::F16,
     };
 
-    let quantization = hf
-        .quantization_config
-        .as_ref()
-        .and_then(QuantSchema::from_hf_value)
-        .and_then(|schema| schema.to_core_config());
+    let quantization = hf.quantization_config.as_ref().and_then(|q_val| {
+        // 1. Try parsing using the new GPTQ / AWQ logic
+        if let Ok(q) = serde_json::from_value::<HfQuantizationConfigJson>(q_val.clone()) {
+            if let Some(ref quant_method) = q.quant_method {
+                let kind = match quant_method.to_lowercase().as_str() {
+                    "gptq" => Some(rllm_core::config::QuantizationKind::GPTQ),
+                    "awq" => Some(rllm_core::config::QuantizationKind::AWQ),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    return Some(rllm_core::config::QuantizationConfig {
+                        kind,
+                        group_size: q.group_size,
+                        bits: q.bits,
+                    });
+                }
+            }
+        }
+        // 2. Fall back to QuantSchema::from_hf_value (e.g. for compressed-tensors / int-quantized / INT8)
+        QuantSchema::from_hf_value(q_val).and_then(|schema| schema.to_core_config())
+    });
 
     Ok(ModelConfig {
         model_id: path.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string(),

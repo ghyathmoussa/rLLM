@@ -22,5 +22,6 @@ target
 .env
 .env.*
 .venv
-graphify-out/
+
 .vscode/
+.cuda_home

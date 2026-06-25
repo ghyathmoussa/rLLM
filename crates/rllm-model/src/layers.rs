@@ -3,7 +3,7 @@ use candle_core::{D, DType, Device, Result, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::optimizations::QuantizationPlan;
 #[cfg(feature = "candle-backend")]
-use rllm_quant::{LinearMethod, UnquantizedLinear};
+use rllm_quant::LinearMethod;
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
@@ -140,32 +140,330 @@ impl RmsNorm {
 // ── Linear (no bias, as in Llama) ────────────────────────────────────────
 
 #[cfg(feature = "candle-backend")]
+pub enum LinearWeight {
+    Fp(Tensor),
+    Gptq {
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        g_idx: Tensor,
+        bits: usize,
+        group_size: usize,
+        dequantized: std::sync::OnceLock<Tensor>,
+    },
+    Method(Box<dyn LinearMethod>),
+}
+
+#[cfg(feature = "candle-backend")]
+pub fn dequantize_gptq(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    g_idx: &Tensor,
+    bits: usize,
+    group_size: usize,
+) -> Result<Tensor> {
+    let device = qweight.device();
+    if let Device::Cuda(_) = device {
+        // Dequantize on CPU. The packed-INT4 unpacking relies on I64/integer
+        // ops whose CUDA kernels are incomplete in this Candle/cudarc build
+        // (they raise "named symbol not found"). The result is cached per layer,
+        // so the host transfer is a one-time cost; the dequantized FP weights
+        // then live on the GPU for the matmul.
+        let cpu = Device::Cpu;
+        let out = dequantize_gptq_impl(
+            &qweight.to_device(&cpu)?,
+            &qzeros.to_device(&cpu)?,
+            &scales.to_device(&cpu)?,
+            &g_idx.to_device(&cpu)?,
+            bits,
+            group_size,
+            &cpu,
+        )?;
+        return out.to_device(device);
+    }
+    dequantize_gptq_impl(qweight, qzeros, scales, g_idx, bits, group_size, device)
+}
+
+#[cfg(feature = "candle-backend")]
+fn dequantize_gptq_impl(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    g_idx: &Tensor,
+    bits: usize,
+    _group_size: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    if bits != 4 {
+        return Err(candle_core::Error::Msg(format!("Only 4-bit GPTQ is supported, got {bits}")));
+    }
+
+    // We expect qweight to be (in_features / 8, out_features)
+    let (packed_in_features, out_features) = qweight.dims2()?;
+    let in_features = packed_in_features * 8;
+
+    // Convert qweight from signed I32 to unsigned F64 to avoid sign-extension bugs.
+    // If it's negative, add 2^32.
+    let qweight_f64 = qweight.to_dtype(DType::F64)?;
+    let zero_w = Tensor::new(0.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let is_neg = qweight_f64.lt(&zero_w)?;
+    let offset_w = Tensor::new(4294967296.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let qweight_u64 = qweight_f64.add(&is_neg.to_dtype(DType::F64)?.mul(&offset_w)?)?;
+
+    // Unpack qweight (bits = 4, so 8 values per i32/i64)
+    let mut w_unpacked = Vec::with_capacity(8);
+    let c16_w = Tensor::new(16.0f64, device)?.broadcast_as(qweight_u64.shape())?;
+    for i in 0..8 {
+        let divisor = (1i64 << (4 * i)) as f64;
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qweight_u64.shape())?;
+        let shifted = qweight_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_w)?.floor()?.mul(&c16_w)?;
+        let masked = shifted.sub(&temp)?;
+        w_unpacked.push(masked);
+    }
+    // Stack along dimension 1 (shape: [packed_in_features, 8, out_features])
+    let w_stacked = Tensor::stack(&w_unpacked, 1)?;
+    // Reshape to [in_features, out_features]
+    let w_raw = w_stacked.reshape((in_features, out_features))?.to_dtype(DType::F32)?;
+
+    // Convert qzeros from signed I32 to unsigned F64.
+    let qzeros_f64 = qzeros.to_dtype(DType::F64)?;
+    let zero_z = Tensor::new(0.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let is_neg_z = qzeros_f64.lt(&zero_z)?;
+    let offset_z = Tensor::new(4294967296.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let qzeros_u64 = qzeros_f64.add(&is_neg_z.to_dtype(DType::F64)?.mul(&offset_z)?)?;
+
+    // Unpack qzeros
+    let mut z_unpacked = Vec::with_capacity(8);
+    let c16_z = Tensor::new(16.0f64, device)?.broadcast_as(qzeros_u64.shape())?;
+    let one_z = Tensor::new(1.0f32, device)?.broadcast_as(qzeros_u64.shape())?;
+    for i in 0..8 {
+        let divisor = (1i64 << (4 * i)) as f64;
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qzeros_u64.shape())?;
+        let shifted = qzeros_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_z)?.floor()?.mul(&c16_z)?;
+        let masked = shifted.sub(&temp)?;
+        let adjusted = masked.to_dtype(DType::F32)?.add(&one_z)?;
+        z_unpacked.push(adjusted);
+    }
+    // Stack along dimension 2 (shape: [num_groups, out_features / 8, 8])
+    let z_stacked = Tensor::stack(&z_unpacked, 2)?;
+    // Reshape to [num_groups, out_features]
+    let z_raw = z_stacked.reshape((qzeros.dim(0)?, out_features))?;
+
+    // Prepare g_idx (cast to U32 for index_select)
+    let g_idx_u32 = g_idx.to_dtype(DType::U32)?;
+
+    // Select scales and zero-points for each input feature
+    let select_scales = scales.index_select(&g_idx_u32, 0)?; // [in_features, out_features]
+    let select_zeros = z_raw.index_select(&g_idx_u32, 0)?; // [in_features, out_features]
+
+    // Apply dequantization formula: (W_q - ZP) * Scale
+    let target_dtype = scales.dtype();
+    let w_dequant = w_raw.sub(&select_zeros)?.mul(&select_scales.to_dtype(DType::F32)?)?;
+    let w_dequant = w_dequant.to_dtype(target_dtype)?;
+
+    // Transpose back to match [out_features, in_features] shape
+    w_dequant.t()
+}
+
+#[cfg(feature = "candle-backend")]
 pub struct Linear {
-    method: Box<dyn LinearMethod>,
+    weight: LinearWeight,
 }
 
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self { method: Box::new(UnquantizedLinear::new(weight)) }
+        Self { weight: LinearWeight::Fp(weight) }
     }
 
     pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
-        Self { method }
+        Self { weight: LinearWeight::Method(method) }
+    }
+
+    pub fn new_gptq(
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        g_idx: Tensor,
+        bits: usize,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            weight: LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized: std::sync::OnceLock::new(),
+            },
+        }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.method.apply(x)
+        match &self.weight {
+            LinearWeight::Fp(weight) => self.forward_fp(x, weight),
+            LinearWeight::Method(method) => method.apply(x),
+            LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                #[cfg(feature = "cuda")]
+                if let Some(out) = self.try_forward_gptq_cuda(
+                    x,
+                    qweight,
+                    qzeros,
+                    scales,
+                    g_idx,
+                    *bits,
+                    *group_size,
+                )? {
+                    return Ok(out);
+                }
+
+                let weight = if let Some(w) = dequantized.get() {
+                    w
+                } else {
+                    let w = dequantize_gptq(qweight, qzeros, scales, g_idx, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    dequantized.get().unwrap()
+                };
+                self.forward_fp(x, weight)
+            }
+        }
     }
 
-    pub fn weight(&self) -> &Tensor {
-        self.method
-            .weight()
-            .expect("Linear::weight() is only available for unquantized linear layers")
+    pub fn weight(&self) -> Result<&Tensor> {
+        match &self.weight {
+            LinearWeight::Fp(w) => Ok(w),
+            LinearWeight::Method(method) => method
+                .weight()
+                .ok_or_else(|| candle_core::Error::Msg("method weight not available".to_string())),
+            LinearWeight::Gptq {
+                qweight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                if let Some(w) = dequantized.get() {
+                    Ok(w)
+                } else {
+                    let w = dequantize_gptq(qweight, qzeros, scales, g_idx, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    Ok(dequantized.get().unwrap())
+                }
+            }
+        }
     }
 
     pub fn is_quantized(&self) -> bool {
-        self.method.is_quantized()
+        match &self.weight {
+            LinearWeight::Gptq { .. } => true,
+            LinearWeight::Method(method) => method.is_quantized(),
+            LinearWeight::Fp(_) => false,
+        }
+    }
+
+    fn forward_fp(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        let in_features = weight.dim(D::Minus1)?;
+        let out_features = weight.dim(D::Minus2)?;
+        let x_shape = x.dims();
+        let trailing = x_shape.len().saturating_sub(1);
+        let batch: usize = x_shape[..trailing].iter().product();
+        let x_2d = x.reshape((batch, in_features))?;
+        let out = x_2d.matmul(&weight.t()?)?;
+        let mut out_shape = x_shape[..trailing].to_vec();
+        out_shape.push(out_features);
+        out.reshape(out_shape)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn try_forward_gptq_cuda(
+        &self,
+        x: &Tensor,
+        qweight: &Tensor,
+        qzeros: &Tensor,
+        scales: &Tensor,
+        g_idx: &Tensor,
+        bits: usize,
+        group_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if bits != 4
+            || x.dtype() != DType::F16
+            || scales.dtype() != DType::F16
+            || !matches!(x.device(), Device::Cuda(_))
+            || !matches!(qweight.device(), Device::Cuda(_))
+            || !matches!(qzeros.device(), Device::Cuda(_))
+            || !matches!(scales.device(), Device::Cuda(_))
+            || !matches!(g_idx.device(), Device::Cuda(_))
+        {
+            return Ok(None);
+        }
+
+        let (_packed_in_features, out_features) = qweight.dims2()?;
+        if out_features % 8 != 0 {
+            return Ok(None);
+        }
+
+        let x_shape = x.dims();
+        let trailing = x_shape.len().saturating_sub(1);
+        let batch: usize = x_shape[..trailing].iter().product();
+        let in_features = x.dim(D::Minus1)?;
+        if in_features % 8 != 0 || g_idx.dim(0)? != in_features {
+            return Ok(None);
+        }
+
+        // Ensure all tensors are contiguous to pass safely to raw CUDA kernel
+        let x_contig = x.contiguous()?;
+        let qweight_contig = qweight.contiguous()?;
+        let qzeros_contig = qzeros.contiguous()?;
+        let scales_contig = scales.contiguous()?;
+        let g_idx_contig = g_idx.contiguous()?;
+
+        let out = Tensor::zeros((batch, out_features), DType::F16, x.device())?;
+
+        let p_x = get_cuda_ptr::<half::f16>(&x_contig)?;
+        let p_qweight = get_cuda_ptr::<i32>(&qweight_contig)?;
+        let p_qzeros = get_cuda_ptr::<i32>(&qzeros_contig)?;
+        let p_scales = get_cuda_ptr::<half::f16>(&scales_contig)?;
+        let p_gidx = get_cuda_ptr::<u32>(&g_idx_contig)?;
+        let p_out = get_cuda_ptr::<half::f16>(&out)?;
+
+        let num_groups = (in_features / group_size) as i64;
+
+        unsafe {
+            rllm_kernels::cuda::gptq_gemm_f16_sync(
+                p_x as *const u16,
+                p_qweight,
+                p_qzeros,
+                p_scales as *const u16,
+                p_gidx,
+                p_out as *mut u16,
+                batch as i64,
+                in_features as i64,
+                out_features as i64,
+                num_groups,
+                group_size as i64,
+            )
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        }
+
+        let mut out_shape = x_shape[..trailing].to_vec();
+        out_shape.push(out_features);
+        out.reshape(out_shape).map(Some)
     }
 }
 
@@ -180,16 +478,8 @@ pub struct LlamaMLP {
 
 #[cfg(feature = "candle-backend")]
 impl LlamaMLP {
-    pub fn from_linears(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
+    pub fn new(gate_proj: Linear, up_proj: Linear, down_proj: Linear) -> Self {
         Self { gate_proj, up_proj, down_proj }
-    }
-
-    pub fn new(gate_proj: Tensor, up_proj: Tensor, down_proj: Tensor) -> Self {
-        Self {
-            gate_proj: Linear::new(gate_proj),
-            up_proj: Linear::new(up_proj),
-            down_proj: Linear::new(down_proj),
-        }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -198,6 +488,18 @@ impl LlamaMLP {
         let up = self.up_proj.forward(x)?;
         let gate = gate.silu()?;
         self.down_proj.forward(&gate.broadcast_mul(&up)?)
+    }
+
+    pub fn gate_proj(&self) -> &Linear {
+        &self.gate_proj
+    }
+
+    pub fn up_proj(&self) -> &Linear {
+        &self.up_proj
+    }
+
+    pub fn down_proj(&self) -> &Linear {
+        &self.down_proj
     }
 }
 
@@ -229,23 +531,15 @@ impl LlamaAttention {
     }
 
     pub fn new(
-        q_proj: Tensor,
-        k_proj: Tensor,
-        v_proj: Tensor,
-        o_proj: Tensor,
+        q_proj: Linear,
+        k_proj: Linear,
+        v_proj: Linear,
+        o_proj: Linear,
         num_heads: usize,
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self {
-            q_proj: Linear::new(q_proj),
-            k_proj: Linear::new(k_proj),
-            v_proj: Linear::new(v_proj),
-            o_proj: Linear::new(o_proj),
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        }
+        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
     }
 
     pub fn forward(
@@ -293,10 +587,14 @@ impl LlamaAttention {
             (k, v)
         };
 
-        // Scaled dot-product attention
+        // Scaled dot-product attention. Candle's CUDA matmul requires contiguous
+        // operands; `q`, `k`/`v` are non-contiguous views after transpose (and RoPE/cat),
+        // so materialize them before the batched matmul.
         let scale = 1.0f32 / (self.head_dim as f32).sqrt();
-        let attn_weights = q
-            .matmul(&k.t()?)?
+        let q_contig = q.contiguous()?;
+        let k_t = k.t()?.contiguous()?;
+        let attn_weights = q_contig
+            .matmul(&k_t)?
             .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
 
         // Apply causal mask for prefill (seq_len > 1)
@@ -308,7 +606,8 @@ impl LlamaAttention {
         };
 
         let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
-        let attn_output = attn_weights.matmul(&v)?;
+        let v_contig = v.contiguous()?;
+        let attn_output = attn_weights.matmul(&v_contig)?;
 
         // Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden_size]
         let attn_output =
@@ -317,20 +616,6 @@ impl LlamaAttention {
         self.o_proj.forward(&attn_output)
     }
 
-    /// Paged attention forward pass.
-    ///
-    /// Computes Q/K/V projections and RoPE, then writes K/V into the global
-    /// GPU KV cache and computes attention using PagedAttention kernels.
-    ///
-    /// This replaces the native Candle matmul-based attention with block-addressed
-    /// attention for efficient KV cache reuse across requests.
-    ///
-    /// # Arguments
-    /// * `hidden_states` - Input hidden states [batch, seq_len, hidden_size]
-    /// * `positions` - Token positions for RoPE
-    /// * `gpu_kv_cache` - Global GPU KV cache with block-addressed storage
-    /// * `attn_meta` - Attention metadata (block tables, slot mappings, seq lens)
-    /// * `layer_idx` - Layer index for KV cache addressing
     pub fn forward_paged(
         &self,
         hidden_states: &Tensor,
@@ -468,10 +753,38 @@ impl LlamaAttention {
             self.o_proj.forward(&attn_output)
         }
     }
+
+    pub fn q_proj(&self) -> &Linear {
+        &self.q_proj
+    }
+
+    pub fn k_proj(&self) -> &Linear {
+        &self.k_proj
+    }
+
+    pub fn v_proj(&self) -> &Linear {
+        &self.v_proj
+    }
+
+    pub fn o_proj(&self) -> &Linear {
+        &self.o_proj
+    }
+
+    pub fn num_heads(&self) -> usize {
+        self.num_heads
+    }
+
+    pub fn num_kv_heads(&self) -> usize {
+        self.num_kv_heads
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
 }
 
 #[cfg(feature = "candle-backend")]
-fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
+pub(crate) fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {
         return Ok(x);
     }
@@ -487,7 +800,7 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
 }
 
 #[cfg(feature = "candle-backend")]
-fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
+pub(crate) fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
     // Upper triangular mask with -inf for positions that should be masked
     let mask: Vec<f32> = (0..seq_len)
         .flat_map(|i| (0..seq_len).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0 }))
@@ -860,7 +1173,6 @@ impl LlamaDecoderLayer {
         residual + hidden_states
     }
 
-    /// Paged forward pass using PagedAttention kernels.
     pub fn forward_paged(
         &self,
         hidden_states: &Tensor,
@@ -888,6 +1200,22 @@ impl LlamaDecoderLayer {
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
         let hidden_states = self.mlp.forward(&hidden_states)?;
         residual + hidden_states
+    }
+
+    pub fn self_attn(&self) -> &LlamaAttention {
+        &self.self_attn
+    }
+
+    pub fn mlp(&self) -> &LlamaMLP {
+        &self.mlp
+    }
+
+    pub fn input_layernorm(&self) -> &RmsNorm {
+        &self.input_layernorm
+    }
+
+    pub fn post_attention_layernorm(&self) -> &RmsNorm {
+        &self.post_attention_layernorm
     }
 }
 
@@ -926,9 +1254,9 @@ mod tests {
         let intermediate = 128;
 
         let mlp = LlamaMLP::new(
-            Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (hidden, intermediate), &device)?,
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (intermediate, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (hidden, intermediate), &device)?),
         );
 
         let x = Tensor::randn(0.0f32, 1.0f32, (1, 5, hidden), &device)?;
@@ -946,10 +1274,10 @@ mod tests {
         let head_dim = hidden / num_heads;
 
         let attn = LlamaAttention::new(
-            Tensor::randn(0.0f32, 1.0f32, (num_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?,
-            Tensor::randn(0.0f32, 1.0f32, (hidden, num_heads * head_dim), &device)?,
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (num_kv_heads * head_dim, hidden), &device)?),
+            Linear::new(Tensor::randn(0.0f32, 1.0f32, (hidden, num_heads * head_dim), &device)?),
             num_heads,
             num_kv_heads,
             head_dim,
@@ -988,25 +1316,141 @@ mod tests {
     }
 
     #[test]
-    fn weight_quantization_simulation() -> Result<()> {
+    #[allow(clippy::needless_range_loop)]
+    fn gptq_dequantization_correctness() -> Result<()> {
         let device = Device::Cpu;
-        let weight = Tensor::randn(0.0f32, 1.0f32, (128, 64), &device)?;
 
-        // MXFP8 test
-        let plan_mxfp8 = QuantizationPlan::mxfp8();
-        let q_mxfp8 = simulate_weight_quantization(&weight, &plan_mxfp8)?;
-        assert_eq!(q_mxfp8.dims(), weight.dims());
+        // Shape: (1, 8)
+        let qweight_data = vec![
+            1985229328i32,  // Col 0: 0x76543210
+            -19088744i32,   // Col 1: 0xFEDCBA98
+            -324508640i32,  // Col 2: 0xECA86420
+            -1985229329i32, // Col 3: 0x89ABCDEF
+            0i32,
+            0i32,
+            0i32,
+            0i32, // Col 4-7
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
 
-        // INT4 test
-        let plan_int4 = QuantizationPlan::int4();
-        let q_int4 = simulate_weight_quantization(&weight, &plan_int4)?;
-        assert_eq!(q_int4.dims(), weight.dims());
+        // Shape: (1, 1)
+        // Zero points packed: 7 for all 8 cols -> 0x77777777
+        let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
 
-        // NVFP4 test
-        let plan_nvfp4 = QuantizationPlan::nvfp4();
-        let q_nvfp4 = simulate_weight_quantization(&weight, &plan_nvfp4)?;
-        assert_eq!(q_nvfp4.dims(), weight.dims());
+        // Shape: (1, 8)
+        let scales = Tensor::from_vec(
+            vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32],
+            (1, 8),
+            &device,
+        )?;
+
+        // Shape: (8,)
+        let g_idx = Tensor::from_vec(vec![0u32; 8], (8,), &device)?;
+
+        let w_dequant = dequantize_gptq(&qweight, &qzeros, &scales, &g_idx, 4, 8)?;
+        // Expected shape: (8, 8)
+        assert_eq!(w_dequant.dims(), &[8, 8]);
+
+        let w_vals = w_dequant.to_vec2::<f32>()?;
+
+        // Verify Col 0: expected [r - 8]
+        for r in 0..8 {
+            assert_eq!(w_vals[0][r], (r as f32) - 8.0);
+        }
+
+        // Verify Col 1: expected [2.0 * r]
+        for r in 0..8 {
+            assert_eq!(w_vals[1][r], 2.0 * (r as f32));
+        }
+
+        // Verify Col 2: expected [(2 * r - 8) * 3.0]
+        for r in 0..8 {
+            assert_eq!(w_vals[2][r], ((2 * r) as f32 - 8.0) * 3.0);
+        }
+
+        // Verify Col 3: expected [(7 - r) * 4.0]
+        for r in 0..8 {
+            assert_eq!(w_vals[3][r], (7.0 - (r as f32)) * 4.0);
+        }
 
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn gptq_cuda_linear_forward_correctness() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+
+        // Setup same weights as CPU test but on CUDA device
+        let qweight_data = vec![
+            1985229328i32,  // Col 0: 0x76543210
+            -19088744i32,   // Col 1: 0xFEDCBA98
+            -324508640i32,  // Col 2: 0xECA86420
+            -1985229329i32, // Col 3: 0x89ABCDEF
+            0i32,
+            0i32,
+            0i32,
+            0i32, // Col 4-7
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (1, 8), &device)?;
+
+        // Shape: (1, 1)
+        let qzeros = Tensor::from_vec(vec![2004318071i32], (1, 1), &device)?;
+
+        // Shape: (1, 8)
+        let scales_f32 = Tensor::from_vec(
+            vec![1.0f32, 2.0f32, 3.0f32, 4.0f32, 5.0f32, 6.0f32, 7.0f32, 8.0f32],
+            (1, 8),
+            &device,
+        )?;
+        let scales = scales_f32.to_dtype(DType::F16)?;
+
+        // Shape: (8,)
+        let g_idx = Tensor::from_vec(vec![0u32; 8], (8,), &device)?;
+
+        let linear = Linear::new_gptq(qweight, qzeros, scales, g_idx, 4, 8);
+
+        // Input x (shape [1, 8], dtype F16)
+        let x_data = vec![1.0f32, -1.0, 0.5, 2.0, 0.25, -0.5, 1.5, -2.0];
+        let x = Tensor::from_vec(x_data, (1, 8), &device)?.to_dtype(DType::F16)?;
+
+        let out = linear.forward(&x)?;
+        assert_eq!(out.dims(), &[1, 8]);
+
+        let out_f32 = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+
+        // Let's compute the expected outputs using the CPU baseline
+        let expected_out = x
+            .to_device(&Device::Cpu)?
+            .reshape((1, 8))?
+            .matmul(&linear.weight()?.to_device(&Device::Cpu)?.t()?)?;
+        let expected_vals = expected_out.to_dtype(DType::F32)?.to_vec2::<f32>()?[0].clone();
+
+        for col in 0..8 {
+            let expected = expected_vals[col];
+            let actual = out_f32[0][col];
+            assert!(
+                (actual - expected).abs() < 0.2,
+                "col {col}: expected {expected:.4}, got {actual:.4}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "candle-backend", feature = "cuda"))]
+fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType + 'static>(t: &Tensor) -> Result<*const T> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    let (storage, layout) = t.storage_and_layout();
+    match &*storage {
+        candle_core::Storage::Cuda(cuda_storage) => {
+            let slice = cuda_storage.as_cuda_slice::<T>()?;
+            let stream = cuda_storage.device.cuda_stream();
+            let (raw_ptr_u64, _guard) = slice.device_ptr(&stream);
+            let offset = layout.start_offset();
+            let raw_device_ptr = raw_ptr_u64 as *const T;
+            unsafe { Ok(raw_device_ptr.add(offset)) }
+        }
+        _ => Err(candle_core::Error::Msg("Not a CUDA tensor".to_string())),
     }
 }
