@@ -406,16 +406,23 @@ fn files_to_download(
         return Ok(safetensors);
     }
 
-    // GGUF repos – download every .gguf file (there is usually only one).
-    let gguf: Vec<String> = info
+    // GGUF repos – pick a single .gguf file rather than downloading every
+    // variant.  Prefer Q4_K_M (best quality/size trade-off), then fall back
+    // through common quantisation levels, then the first file.
+    let gguf: Vec<&str> = info
         .siblings
         .iter()
-        .map(|s| s.rfilename.clone())
+        .map(|s| s.rfilename.as_str())
         .filter(|name| name.ends_with(".gguf"))
         .collect();
     if !gguf.is_empty() {
-        tracing::debug!(files = gguf.len(), "planned GGUF download from repo listing");
-        return Ok(gguf);
+        let preferred = ["Q4_K_M", "Q4_0", "Q5_K_M", "Q3_K_M", "Q6_K", "Q8_0", "Q2_K"];
+        let chosen = preferred
+            .iter()
+            .find_map(|pat| gguf.iter().find(|n| n.contains(pat)))
+            .unwrap_or(&gguf[0]);
+        tracing::debug!(file = %chosen, "planned single GGUF download");
+        return Ok(vec![chosen.to_string()]);
     }
 
     anyhow::bail!("no SafeTensors or GGUF files found in Hugging Face repo listing");

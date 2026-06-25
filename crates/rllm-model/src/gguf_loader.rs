@@ -149,7 +149,7 @@ pub fn load_gguf_weights(path: &Path, device: &Device) -> Result<WeightMap> {
         );
 
         let should_keep_quantized =
-            is_quantized && (hf_name.ends_with(".proj.weight") || hf_name == "lm_head.weight");
+            is_quantized && (hf_name.ends_with("_proj.weight") || hf_name == "lm_head.weight");
 
         if should_keep_quantized {
             gguf_weights.insert(hf_name, Arc::new(qtensor));
