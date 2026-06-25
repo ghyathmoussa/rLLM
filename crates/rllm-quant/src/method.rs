@@ -39,8 +39,10 @@ pub trait QuantMethodFactory: Send + Sync {
 }
 
 pub struct WeightSource<'a> {
-    weights: &'a mut HashMap<String, Tensor>,
-    quantized: &'a mut HashMap<String, QuantTensor>,
+    pub weights: &'a mut HashMap<String, Tensor>,
+    pub quantized: &'a mut HashMap<String, QuantTensor>,
+    pub gguf_weights:
+        Option<&'a mut HashMap<String, std::sync::Arc<candle_core::quantized::QTensor>>>,
 }
 
 impl<'a> WeightSource<'a> {
@@ -48,7 +50,15 @@ impl<'a> WeightSource<'a> {
         weights: &'a mut HashMap<String, Tensor>,
         quantized: &'a mut HashMap<String, QuantTensor>,
     ) -> Self {
-        Self { weights, quantized }
+        Self { weights, quantized, gguf_weights: None }
+    }
+
+    pub fn with_gguf(
+        mut self,
+        gguf_weights: &'a mut HashMap<String, std::sync::Arc<candle_core::quantized::QTensor>>,
+    ) -> Self {
+        self.gguf_weights = Some(gguf_weights);
+        self
     }
 
     pub fn remove_tensor(&mut self, name: &str) -> Result<Tensor> {
@@ -61,6 +71,20 @@ impl<'a> WeightSource<'a> {
 
     pub fn has_quant_tensor(&self, name: &str) -> bool {
         self.quantized.contains_key(name)
+    }
+
+    pub fn remove_gguf_tensor(
+        &mut self,
+        name: &str,
+    ) -> Result<std::sync::Arc<candle_core::quantized::QTensor>> {
+        self.gguf_weights
+            .as_mut()
+            .and_then(|w| w.remove(name))
+            .ok_or_else(|| anyhow::anyhow!("missing GGUF tensor {name}"))
+    }
+
+    pub fn has_gguf_tensor(&self, name: &str) -> bool {
+        self.gguf_weights.as_ref().is_some_and(|w| w.contains_key(name))
     }
 }
 
@@ -88,6 +112,7 @@ pub fn factory_from_config(
         QuantizationKind::Int8 | QuantizationKind::CompressedTensors => {
             Ok(Box::new(Int8WeightOnlyFactory::new(Vec::new(), false)))
         }
+        QuantizationKind::Gguf => Ok(Box::new(crate::gguf::GgufMethodFactory)),
         other => bail!("quantization kind {other:?} is not implemented by rllm-quant yet"),
     }
 }

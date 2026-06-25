@@ -18,6 +18,7 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, SafeTensors, TensorView};
 pub struct WeightMap {
     pub weights: HashMap<String, candle_core::Tensor>,
     pub quantized: HashMap<String, QuantTensor>,
+    pub gguf_weights: HashMap<String, std::sync::Arc<candle_core::quantized::QTensor>>,
     pub quant_schema: Option<QuantSchema>,
     pub device: Device,
 }
@@ -26,19 +27,21 @@ pub struct WeightMap {
 impl WeightMap {
     /// Returns true when all weights have been consumed.
     pub fn is_empty(&self) -> bool {
-        self.weights.is_empty() && self.quantized.is_empty()
+        self.weights.is_empty() && self.quantized.is_empty() && self.gguf_weights.is_empty()
     }
 
     /// Shrink HashMap capacity to match length, releasing excess allocation.
     pub fn shrink_to_fit(&mut self) {
         self.weights.shrink_to_fit();
         self.quantized.shrink_to_fit();
+        self.gguf_weights.shrink_to_fit();
     }
 
     /// Drain and return any unconsumed tensor names (for diagnostic logging).
     pub fn unconsumed_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.weights.keys().cloned().collect();
         names.extend(self.quantized.keys().cloned());
+        names.extend(self.gguf_weights.keys().cloned());
         names.sort();
         names
     }
@@ -87,7 +90,13 @@ pub fn load_weights_from_dir(
         shard_paths.len()
     );
 
-    Ok(WeightMap { weights, quantized, quant_schema, device: serve_device.clone() })
+    Ok(WeightMap {
+        weights,
+        quantized,
+        gguf_weights: HashMap::new(),
+        quant_schema,
+        device: serve_device.clone(),
+    })
 }
 
 #[cfg(feature = "candle-backend")]
@@ -245,13 +254,13 @@ fn download_model_from_hub_with_token(model_id: &str, token: Option<String>) -> 
         "Hugging Face repo info fetched"
     );
 
-    let config_path = repo
-        .get("config.json")
-        .with_context(|| format!("downloading config.json for {model_id}"))?;
-    let model_dir =
-        config_path.parent().context("HF cache path for config.json has no parent")?.to_path_buf();
-
     let files = files_to_download(&repo, &info)?;
+
+    // Determine the cache directory.  Prefer config.json (present in most
+    // repos), but fall back to the first file-to-download when it is absent
+    // (e.g. some GGUF-only repos).
+    let model_dir = resolve_hf_cache_dir(&repo, &info, &files, model_id)?;
+
     tracing::info!(
         model = %model_id,
         files = files.len(),
@@ -329,6 +338,39 @@ fn hf_download_concurrency() -> usize {
         .unwrap_or(4)
 }
 
+/// Resolve the Hugging Face cache directory for a model.
+///
+/// Tries `config.json` first (present in most repos, including GGUF).  When
+/// that file is absent we download the first entry from `files` so that
+/// `hf-hub` materialises the snapshot path, then return its parent.
+#[cfg(feature = "candle-backend")]
+fn resolve_hf_cache_dir(
+    repo: &hf_hub::api::sync::ApiRepo,
+    info: &hf_hub::api::RepoInfo,
+    files: &[String],
+    model_id: &str,
+) -> Result<PathBuf> {
+    let has_config = info.siblings.iter().any(|s| s.rfilename == "config.json");
+    if has_config {
+        let config_path = repo
+            .get("config.json")
+            .with_context(|| format!("downloading config.json for {model_id}"))?;
+        return config_path
+            .parent()
+            .context("HF cache path for config.json has no parent")
+            .map(ToOwned::to_owned);
+    }
+
+    // GGUF-only repos may omit config.json; download one file to materialise
+    // the snapshot directory.
+    let fallback =
+        files.first().ok_or_else(|| anyhow::anyhow!("no files to download for {model_id}"))?;
+    let path = repo
+        .get(fallback)
+        .with_context(|| format!("determining HF cache directory for {model_id}"))?;
+    path.parent().context("HF cache path has no parent").map(ToOwned::to_owned)
+}
+
 #[cfg(feature = "candle-backend")]
 fn files_to_download(
     repo: &hf_hub::api::sync::ApiRepo,
@@ -350,19 +392,33 @@ fn files_to_download(
         return Ok(vec!["model.safetensors".to_string()]);
     }
 
-    let mut files = info
+    let safetensors: Vec<String> = info
         .siblings
         .iter()
         .map(|s| s.rfilename.clone())
         .filter(|name| name.ends_with(".safetensors"))
-        .collect::<Vec<_>>();
-    files.sort();
-    if !files.is_empty() {
-        tracing::debug!(files = files.len(), "planned SafeTensors download from repo listing");
-        return Ok(files);
+        .collect();
+    if !safetensors.is_empty() {
+        tracing::debug!(
+            files = safetensors.len(),
+            "planned SafeTensors download from repo listing"
+        );
+        return Ok(safetensors);
     }
 
-    anyhow::bail!("no SafeTensors files found in Hugging Face repo listing");
+    // GGUF repos – download every .gguf file (there is usually only one).
+    let gguf: Vec<String> = info
+        .siblings
+        .iter()
+        .map(|s| s.rfilename.clone())
+        .filter(|name| name.ends_with(".gguf"))
+        .collect();
+    if !gguf.is_empty() {
+        tracing::debug!(files = gguf.len(), "planned GGUF download from repo listing");
+        return Ok(gguf);
+    }
+
+    anyhow::bail!("no SafeTensors or GGUF files found in Hugging Face repo listing");
 }
 
 #[cfg(feature = "candle-backend")]
@@ -410,8 +466,10 @@ pub fn load_weights_with_tied_detection(
     load_device: Option<&Device>,
 ) -> Result<(WeightMap, bool)> {
     let weight_map = load_weights_from_dir(model_dir, serve_device, load_device)?;
-    let has_lm_head = weight_map.weights.contains_key("lm_head.weight");
-    let has_embed = weight_map.weights.contains_key("model.embed_tokens.weight");
+    let has_lm_head = weight_map.weights.contains_key("lm_head.weight")
+        || weight_map.gguf_weights.contains_key("lm_head.weight");
+    let has_embed = weight_map.weights.contains_key("model.embed_tokens.weight")
+        || weight_map.gguf_weights.contains_key("model.embed_tokens.weight");
     let tied = !has_lm_head && has_embed;
     Ok((weight_map, tied))
 }

@@ -222,7 +222,8 @@ fn load_linear(
     } else {
         let quant_factory =
             factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())?;
-        let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized);
+        let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized)
+            .with_gguf(&mut weights.gguf_weights);
         let method = quant_factory.build_linear(prefix, &mut source)?;
         Ok(Linear::from_method(method))
     }
@@ -744,7 +745,13 @@ mod tests {
             );
         }
 
-        WeightMap { weights, quantized: HashMap::new(), quant_schema: None, device: device.clone() }
+        WeightMap {
+            weights,
+            quantized: HashMap::new(),
+            gguf_weights: HashMap::new(),
+            quant_schema: None,
+            device: device.clone(),
+        }
     }
 
     fn build_toy_model(config: &ModelConfig) -> LlamaForCausalLM {

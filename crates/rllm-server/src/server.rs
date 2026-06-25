@@ -194,8 +194,33 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
 
     let model_dir = loader::resolve_model_dir(model_ref)
         .with_context(|| format!("resolving model reference {model_ref}"))?;
-    let mut model_config = hf_config::parse_hf_config(&model_dir.join("config.json"))
-        .with_context(|| format!("parsing model config from {}", model_dir.display()))?;
+
+    let is_gguf = model_dir.is_file() && model_dir.extension().is_some_and(|ext| ext == "gguf");
+    let gguf_file_path = if is_gguf {
+        Some(model_dir.clone())
+    } else if model_dir.is_dir() {
+        let mut gguf_path = None;
+        if let Ok(entries) = std::fs::read_dir(&model_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "gguf") {
+                    gguf_path = Some(path);
+                    break;
+                }
+            }
+        }
+        gguf_path
+    } else {
+        None
+    };
+
+    let mut model_config = if let Some(ref path) = gguf_file_path {
+        rllm_model::gguf_loader::parse_gguf_config(path)
+            .with_context(|| format!("parsing GGUF config from {}", path.display()))?
+    } else {
+        hf_config::parse_hf_config(&model_dir.join("config.json"))
+            .with_context(|| format!("parsing model config from {}", model_dir.display()))?
+    };
     model_config.model_id = model_dir.to_string_lossy().to_string();
     if let Some(max_len) = args.max_model_len {
         model_config.max_model_len = max_len;

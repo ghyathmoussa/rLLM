@@ -176,7 +176,6 @@ fn find_cuda_lib_dir(cuda_home: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-
 fn cuda_arch_flags() -> Vec<String> {
     if let Ok(archs) = env::var("CUDA_ARCH") {
         return archs
