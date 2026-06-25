@@ -176,17 +176,6 @@ fn find_cuda_lib_dir(cuda_home: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-fn has_cuda_headers(path: &Path) -> bool {
-    path.join("include").join("cuda_runtime.h").exists()
-}
-
-fn cuda_lib_dirs(cuda_home: &Path) -> Vec<PathBuf> {
-    ["lib64", "lib", "lib/x86_64-linux-gnu"]
-        .iter()
-        .map(|dir| cuda_home.join(dir))
-        .filter(|dir| dir.exists())
-        .collect()
-}
 
 fn cuda_arch_flags() -> Vec<String> {
     if let Ok(archs) = env::var("CUDA_ARCH") {

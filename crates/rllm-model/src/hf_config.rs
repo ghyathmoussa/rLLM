@@ -29,7 +29,7 @@ struct HfConfigJson {
     head_dim: Option<usize>,
     hidden_act: Option<String>,
     rms_norm_eps: Option<f64>,
-    quantization_config: Option<HfQuantizationConfigJson>,
+    quantization_config: Option<serde_json::Value>,
 }
 
 pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
@@ -62,14 +62,26 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
         _ => DType::F16,
     };
 
-    let quantization = hf.quantization_config.and_then(|q| {
-        let quant_method = q.quant_method?;
-        let kind = match quant_method.to_lowercase().as_str() {
-            "gptq" => rllm_core::config::QuantizationKind::GPTQ,
-            "awq" => rllm_core::config::QuantizationKind::AWQ,
-            _ => return None,
-        };
-        Some(rllm_core::config::QuantizationConfig { kind, group_size: q.group_size, bits: q.bits })
+    let quantization = hf.quantization_config.as_ref().and_then(|q_val| {
+        // 1. Try parsing using the new GPTQ / AWQ logic
+        if let Ok(q) = serde_json::from_value::<HfQuantizationConfigJson>(q_val.clone()) {
+            if let Some(ref quant_method) = q.quant_method {
+                let kind = match quant_method.to_lowercase().as_str() {
+                    "gptq" => Some(rllm_core::config::QuantizationKind::GPTQ),
+                    "awq" => Some(rllm_core::config::QuantizationKind::AWQ),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    return Some(rllm_core::config::QuantizationConfig {
+                        kind,
+                        group_size: q.group_size,
+                        bits: q.bits,
+                    });
+                }
+            }
+        }
+        // 2. Fall back to QuantSchema::from_hf_value (e.g. for compressed-tensors / int-quantized / INT8)
+        QuantSchema::from_hf_value(q_val).and_then(|schema| schema.to_core_config())
     });
 
     Ok(ModelConfig {

@@ -59,6 +59,7 @@ impl GptqCalibration {
         Ok(())
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn observe_sample(&mut self, sample: &[f32]) -> Result<()> {
         if sample.len() != self.in_features {
             bail!(

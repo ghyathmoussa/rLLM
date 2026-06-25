@@ -185,7 +185,6 @@ pub struct LlamaModel {
 }
 
 #[cfg(feature = "candle-backend")]
-#[cfg(feature = "candle-backend")]
 fn load_linear(
     prefix: &str,
     weights: &mut WeightMap,
@@ -221,12 +220,11 @@ fn load_linear(
 
         Ok(Linear::new_gptq(qweight, qzeros, scales, g_idx, bits, group_size))
     } else {
-        let weight_name = format!("{prefix}.weight");
-        let weight = weights
-            .weights
-            .remove(&weight_name)
-            .ok_or_else(|| anyhow::anyhow!("missing {weight_name}"))?;
-        Ok(Linear::new(weight))
+        let quant_factory =
+            factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())?;
+        let mut source = WeightSource::new(&mut weights.weights, &mut weights.quantized);
+        let method = quant_factory.build_linear(prefix, &mut source)?;
+        Ok(Linear::from_method(method))
     }
 }
 
@@ -238,7 +236,7 @@ impl LlamaModel {
         let head_dim = config.head_dim;
         let hidden_size = config.hidden_size;
 
-        let quant_factory =
+        let _quant_factory =
             factory_from_config(config.quantization.as_ref(), weights.quant_schema.as_ref())
                 .context("building quantization method factory")?;
 
@@ -302,6 +300,23 @@ impl LlamaModel {
             let down_proj =
                 load_linear(&format!("{prefix}.mlp.down_proj"), &mut weights, config, device)?;
             let mlp = LlamaMLP::new(gate_proj, up_proj, down_proj);
+
+            let linears = [
+                attn.q_proj(),
+                attn.k_proj(),
+                attn.v_proj(),
+                attn.o_proj(),
+                mlp.gate_proj(),
+                mlp.up_proj(),
+                mlp.down_proj(),
+            ];
+            for lin in linears {
+                if lin.is_quantized() {
+                    quantized_linears += 1;
+                } else {
+                    unquantized_linears += 1;
+                }
+            }
 
             let input_ln_w = weights
                 .weights

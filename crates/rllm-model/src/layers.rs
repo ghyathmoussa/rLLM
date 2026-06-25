@@ -3,7 +3,7 @@ use candle_core::{D, DType, Device, Result, Tensor};
 #[cfg(feature = "candle-backend")]
 use rllm_core::optimizations::QuantizationPlan;
 #[cfg(feature = "candle-backend")]
-use rllm_quant::{LinearMethod, UnquantizedLinear};
+use rllm_quant::LinearMethod;
 
 #[cfg(feature = "candle-backend")]
 use crate::rope::RotaryEmbedding;
@@ -151,6 +151,7 @@ pub enum LinearWeight {
         group_size: usize,
         dequantized: std::sync::OnceLock<Tensor>,
     },
+    Method(Box<dyn LinearMethod>),
 }
 
 #[cfg(feature = "candle-backend")]
@@ -278,6 +279,10 @@ impl Linear {
         Self { weight: LinearWeight::Fp(weight) }
     }
 
+    pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
+        Self { weight: LinearWeight::Method(method) }
+    }
+
     pub fn new_gptq(
         qweight: Tensor,
         qzeros: Tensor,
@@ -302,6 +307,7 @@ impl Linear {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match &self.weight {
             LinearWeight::Fp(weight) => self.forward_fp(x, weight),
+            LinearWeight::Method(method) => method.apply(x),
             LinearWeight::Gptq {
                 qweight,
                 qzeros,
@@ -339,6 +345,9 @@ impl Linear {
     pub fn weight(&self) -> Result<&Tensor> {
         match &self.weight {
             LinearWeight::Fp(w) => Ok(w),
+            LinearWeight::Method(method) => method
+                .weight()
+                .ok_or_else(|| candle_core::Error::Msg("method weight not available".to_string())),
             LinearWeight::Gptq {
                 qweight,
                 qzeros,
@@ -360,7 +369,11 @@ impl Linear {
     }
 
     pub fn is_quantized(&self) -> bool {
-        matches!(self.weight, LinearWeight::Gptq { .. })
+        match &self.weight {
+            LinearWeight::Gptq { .. } => true,
+            LinearWeight::Method(method) => method.is_quantized(),
+            LinearWeight::Fp(_) => false,
+        }
     }
 
     fn forward_fp(&self, x: &Tensor, weight: &Tensor) -> Result<Tensor> {
@@ -601,6 +614,144 @@ impl LlamaAttention {
             attn_output.transpose(1, 2)?.reshape((bsz, seq_len, self.num_heads * self.head_dim))?;
 
         self.o_proj.forward(&attn_output)
+    }
+
+    pub fn forward_paged(
+        &self,
+        hidden_states: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+        layer_idx: usize,
+        rope: &RotaryEmbedding,
+    ) -> Result<Tensor> {
+        let (bsz, seq_len, _) = hidden_states.dims3()?;
+
+        let q = self.q_proj.forward(hidden_states)?;
+        let k = self.k_proj.forward(hidden_states)?;
+        let v = self.v_proj.forward(hidden_states)?;
+
+        // Reshape to [batch, seq_len, num_heads, head_dim] then transpose
+        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
+        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+
+        // Apply RoPE
+        let (q, k) = rope.apply(&q, &k, positions)?;
+
+        // Write K/V into the global GPU cache at slot-mapped positions.
+        //
+        // When CUDA is available, we call cache_write_f16 to scatter-write
+        // the new K/V data into the physical cache blocks. Without CUDA,
+        // we fall back to the native Candle attention path (this branch
+        // should not be reached in production paged mode).
+        #[cfg(has_cuda)]
+        {
+            let _ = (rope, positions);
+
+            // Opt-in gate. The paged path must be validated against the eager
+            // forward on the GPU box before it becomes the default; until then,
+            // without the env flag we signal the caller to use the proven legacy
+            // per-request forward (`execute_model_step` in rllm-executor), which is
+            // numerically correct. Set `RLLM_PAGED_ATTENTION=1` to exercise this
+            // path. See docs/quantization-int8-kvcache-plan.md (Layer 0).
+            if !paged_attention_enabled() {
+                let _ = (gpu_kv_cache, attn_meta, layer_idx, &q, &k, &v);
+                return Err(candle_core::Error::Msg(
+                    "paged-attention disabled (set RLLM_PAGED_ATTENTION=1 to enable); \
+                     using legacy forward"
+                        .to_string(),
+                ));
+            }
+
+            let num_tokens = bsz * seq_len;
+
+            // The kernels expect token-major, contiguous f16 tensors:
+            // q [num_tokens, num_heads, head_dim], k/v [num_tokens, num_kv_heads, head_dim].
+            let q_tok = q
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+            let k_tok = k
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_kv_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+            let v_tok = v
+                .transpose(1, 2)?
+                .reshape((num_tokens, self.num_kv_heads, self.head_dim))?
+                .contiguous()?
+                .to_dtype(DType::F16)?;
+
+            let op = PagedAttentionOp {
+                key_cache: gpu_kv_cache.key_ptr(layer_idx) as usize,
+                value_cache: gpu_kv_cache.value_ptr(layer_idx) as usize,
+                cache_dtype: gpu_kv_cache.dtype(),
+                k_scale: gpu_kv_cache.k_scale(layer_idx),
+                v_scale: gpu_kv_cache.v_scale(layer_idx),
+                num_blocks: gpu_kv_cache.num_blocks() as i64,
+                block_size: gpu_kv_cache.block_size() as i64,
+                num_q_heads: self.num_heads as i64,
+                num_kv_heads: self.num_kv_heads as i64,
+                head_dim: self.head_dim as i64,
+                num_tokens: num_tokens as i64,
+                num_seqs: attn_meta.num_seqs() as i64,
+                max_num_blocks_per_seq: attn_meta.max_num_blocks_per_seq as i64,
+                scale: 1.0f32 / (self.head_dim as f32).sqrt(),
+                is_prefill: seq_len > 1,
+                slot_mapping: attn_meta.slot_mapping.clone(),
+                block_tables_flat: attn_meta.flatten_block_tables(),
+                seq_lens: attn_meta.seq_lens.iter().map(|&s| s as i32).collect(),
+                query_start_loc: attn_meta.query_start_loc.iter().map(|&s| s as i32).collect(),
+            };
+
+            // Custom op writes K/V into the paged cache then runs PagedAttention,
+            // returning [num_tokens, num_heads, head_dim].
+            let attn_output = q_tok.apply_op3_no_bwd(&k_tok, &v_tok, &op)?;
+            let attn_output = attn_output.to_dtype(hidden_states.dtype())?.reshape((
+                bsz,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?;
+            return self.o_proj.forward(&attn_output);
+        }
+
+        // Non-CUDA fallback: use native attention
+        #[cfg(not(has_cuda))]
+        {
+            let _ = (gpu_kv_cache, attn_meta, layer_idx);
+
+            // GQA: repeat K, V to match num_heads if needed
+            let (k, v) = if self.num_kv_heads < self.num_heads {
+                let n_rep = self.num_heads / self.num_kv_heads;
+                (repeat_kv(k, n_rep)?, repeat_kv(v, n_rep)?)
+            } else {
+                (k, v)
+            };
+
+            let scale = 1.0f32 / (self.head_dim as f32).sqrt();
+            let attn_weights = q
+                .matmul(&k.t()?)?
+                .broadcast_mul(&Tensor::new(scale, q.device())?.to_dtype(q.dtype())?)?;
+
+            let attn_weights = if seq_len > 1 {
+                let mask = causal_mask(seq_len, q.device())?.to_dtype(q.dtype())?;
+                attn_weights.broadcast_add(&mask)?
+            } else {
+                attn_weights
+            };
+
+            let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+            let attn_output = attn_weights.matmul(&v)?;
+            let attn_output = attn_output.transpose(1, 2)?.reshape((
+                bsz,
+                seq_len,
+                self.num_heads * self.head_dim,
+            ))?;
+
+            self.o_proj.forward(&attn_output)
+        }
     }
 
     pub fn q_proj(&self) -> &Linear {
@@ -1022,6 +1173,35 @@ impl LlamaDecoderLayer {
         residual + hidden_states
     }
 
+    pub fn forward_paged(
+        &self,
+        hidden_states: &Tensor,
+        positions: &[usize],
+        gpu_kv_cache: &rllm_kernels::cache_ops::GpuKVCache,
+        attn_meta: &rllm_kernels::AttentionMetadata,
+        layer_idx: usize,
+        rope: &RotaryEmbedding,
+    ) -> Result<Tensor> {
+        // Self attention with residual (paged)
+        let residual = hidden_states.clone();
+        let hidden_states = self.input_layernorm.forward(hidden_states)?;
+        let hidden_states = self.self_attn.forward_paged(
+            &hidden_states,
+            positions,
+            gpu_kv_cache,
+            attn_meta,
+            layer_idx,
+            rope,
+        )?;
+        let hidden_states = (residual + hidden_states)?;
+
+        // MLP with residual (unchanged)
+        let residual = hidden_states.clone();
+        let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
+        let hidden_states = self.mlp.forward(&hidden_states)?;
+        residual + hidden_states
+    }
+
     pub fn self_attn(&self) -> &LlamaAttention {
         &self.self_attn
     }
@@ -1136,6 +1316,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn gptq_dequantization_correctness() -> Result<()> {
         let device = Device::Cpu;
 
