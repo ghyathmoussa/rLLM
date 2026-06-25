@@ -11,6 +11,7 @@
   <a href="https://crates.io/crates/rllm"><img src="https://img.shields.io/crates/v/rllm?style=flat-square" alt="crates.io"></a>
   <a href="https://github.com/ghyathmoussa/rLLM/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
   <a href="https://rust-lang.github.io/rustup/"><img src="https://img.shields.io/badge/MSRV-1.85-orange?style=flat-square" alt="MSRV"></a>
+  <a href="https://github.com/sponsors/ghyathmoussa"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ea4aaa?style=flat-square" alt="Sponsor"></a>
 </p>
 
 ---
@@ -364,3 +365,15 @@ rLLM is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) f
 - [Candle](https://github.com/huggingface/candle) – Rust ML framework with CUDA support
 - [Axum](https://github.com/tokio-rs/axum) – ergonomic HTTP framework
 - [Hugging Face](https://huggingface.co/) – model hub and tokenizers library
+
+---
+
+## Sponsors
+
+If rLLM is useful to you or your team, please consider sponsoring its development. Your support helps fund GPU hardware testing, kernel optimization, and new model/quantization support.
+
+<p align="center">
+  <a href="https://github.com/sponsors/ghyathmoussa">
+    <img src="https://img.shields.io/badge/Sponsor%20on%20GitHub-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=githubsponsors" alt="Sponsor on GitHub">
+  </a>
+</p>
