@@ -39,8 +39,7 @@ impl QuantSchema {
     pub fn is_int8_weight_only(&self) -> bool {
         self.is_compressed_tensors_int8()
             && self.weight_num_bits.unwrap_or(8) == 8
-            && self.weight_strategy.as_deref().map(|strategy| strategy == "channel").unwrap_or(true)
-            && self.weight_symmetric.unwrap_or(true)
+            && self.weight_strategy.as_deref().map(|strategy| strategy == "channel" || strategy == "tensor").unwrap_or(true)
     }
 
     pub fn is_compressed_tensors_int8(&self) -> bool {
@@ -54,7 +53,7 @@ impl QuantSchema {
         if !self.is_compressed_tensors_int8() || self.weight_num_bits.unwrap_or(8) != 8 {
             return None;
         }
-        self.weight_strategy.as_deref().filter(|strategy| *strategy != "channel")
+        self.weight_strategy.as_deref().filter(|strategy| *strategy != "channel" && *strategy != "tensor")
     }
 
     pub fn to_core_config(&self) -> Option<QuantizationConfig> {
@@ -104,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_asymmetric_int8_for_now() {
+    fn accepts_asymmetric_int8() {
         let value = serde_json::json!({
             "quant_method": "compressed-tensors",
             "format": "int-quantized",
@@ -115,11 +114,11 @@ mod tests {
             }
         });
         let schema = QuantSchema::from_hf_value(&value).unwrap();
-        assert!(!schema.is_int8_weight_only());
+        assert!(schema.is_int8_weight_only());
     }
 
     #[test]
-    fn rejects_tensor_strategy_int8_for_now() {
+    fn accepts_tensor_strategy_int8() {
         let value = serde_json::json!({
             "quant_method": "compressed-tensors",
             "format": "int-quantized",
@@ -130,6 +129,6 @@ mod tests {
             }
         });
         let schema = QuantSchema::from_hf_value(&value).unwrap();
-        assert!(!schema.is_int8_weight_only());
+        assert!(schema.is_int8_weight_only());
     }
 }

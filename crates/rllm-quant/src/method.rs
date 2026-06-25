@@ -39,8 +39,10 @@ pub trait QuantMethodFactory: Send + Sync {
 }
 
 pub struct WeightSource<'a> {
-    weights: &'a mut HashMap<String, Tensor>,
-    quantized: &'a mut HashMap<String, QuantTensor>,
+    pub weights: &'a mut HashMap<String, Tensor>,
+    pub quantized: &'a mut HashMap<String, QuantTensor>,
+    pub gguf_weights:
+        Option<&'a mut HashMap<String, std::sync::Arc<candle_core::quantized::QTensor>>>,
 }
 
 impl<'a> WeightSource<'a> {
@@ -48,7 +50,15 @@ impl<'a> WeightSource<'a> {
         weights: &'a mut HashMap<String, Tensor>,
         quantized: &'a mut HashMap<String, QuantTensor>,
     ) -> Self {
-        Self { weights, quantized }
+        Self { weights, quantized, gguf_weights: None }
+    }
+
+    pub fn with_gguf(
+        mut self,
+        gguf_weights: &'a mut HashMap<String, std::sync::Arc<candle_core::quantized::QTensor>>,
+    ) -> Self {
+        self.gguf_weights = Some(gguf_weights);
+        self
     }
 
     pub fn remove_tensor(&mut self, name: &str) -> Result<Tensor> {
@@ -62,6 +72,20 @@ impl<'a> WeightSource<'a> {
     pub fn has_quant_tensor(&self, name: &str) -> bool {
         self.quantized.contains_key(name)
     }
+
+    pub fn remove_gguf_tensor(
+        &mut self,
+        name: &str,
+    ) -> Result<std::sync::Arc<candle_core::quantized::QTensor>> {
+        self.gguf_weights
+            .as_mut()
+            .and_then(|w| w.remove(name))
+            .ok_or_else(|| anyhow::anyhow!("missing GGUF tensor {name}"))
+    }
+
+    pub fn has_gguf_tensor(&self, name: &str) -> bool {
+        self.gguf_weights.as_ref().is_some_and(|w| w.contains_key(name))
+    }
 }
 
 pub fn factory_from_config(
@@ -70,11 +94,18 @@ pub fn factory_from_config(
 ) -> Result<Box<dyn QuantMethodFactory>> {
     if let Some(schema) = checkpoint_schema {
         if schema.is_int8_weight_only() {
-            return Ok(Box::new(Int8WeightOnlyFactory::new(schema.ignore.clone(), true)));
+            let symmetric = schema.weight_symmetric.unwrap_or(true);
+            let strategy = schema.weight_strategy.clone().unwrap_or_else(|| "channel".to_string());
+            return Ok(Box::new(Int8WeightOnlyFactory::new(
+                schema.ignore.clone(),
+                true,
+                symmetric,
+                strategy,
+            )));
         }
         if let Some(strategy) = schema.unsupported_int8_strategy() {
             bail!(
-                "unsupported INT8 checkpoint weight strategy {strategy:?}; only per-channel INT8 weights are supported"
+                "unsupported INT8 checkpoint weight strategy {strategy:?}; only per-channel and per-tensor INT8 weights are supported"
             );
         }
     }
@@ -86,8 +117,14 @@ pub fn factory_from_config(
     match config.kind {
         QuantizationKind::None => Ok(Box::new(UnquantizedFactory)),
         QuantizationKind::Int8 | QuantizationKind::CompressedTensors => {
-            Ok(Box::new(Int8WeightOnlyFactory::new(Vec::new(), false)))
+            Ok(Box::new(Int8WeightOnlyFactory::new(
+                Vec::new(),
+                false,
+                true,
+                "channel".to_string(),
+            )))
         }
+        QuantizationKind::Gguf => Ok(Box::new(crate::gguf::GgufMethodFactory)),
         other => bail!("quantization kind {other:?} is not implemented by rllm-quant yet"),
     }
 }
@@ -99,6 +136,7 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
 
     use super::*;
+    use crate::method::WeightSource;
 
     #[test]
     fn schema_factory_uses_unquantized_for_ignored_linear() -> Result<()> {
@@ -128,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_factory_rejects_tensor_strategy_int8() {
+    fn schema_factory_accepts_tensor_strategy_int8() -> Result<()> {
         let schema = QuantSchema {
             quant_method: Some("compressed-tensors".into()),
             format: Some("int-quantized".into()),
@@ -138,13 +176,8 @@ mod tests {
             ignore: Vec::new(),
         };
 
-        let err = match factory_from_config(None, Some(&schema)) {
-            Ok(_) => panic!("expected tensor-strategy INT8 schema to be rejected"),
-            Err(err) => err.to_string(),
-        };
-
-        assert!(err.contains("unsupported INT8 checkpoint weight strategy"));
-        assert!(err.contains("tensor"));
-        assert!(err.contains("per-channel"));
+        let factory = factory_from_config(None, Some(&schema))?;
+        assert!(factory.kv_cache_dtype() == rllm_core::dtype::DType::INT8);
+        Ok(())
     }
 }
