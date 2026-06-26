@@ -121,12 +121,7 @@ pub fn factory_from_config(
     match config.kind {
         QuantizationKind::None => Ok(Box::new(UnquantizedFactory)),
         QuantizationKind::Int8 | QuantizationKind::CompressedTensors => {
-            Ok(Box::new(Int8WeightOnlyFactory::new(
-                Vec::new(),
-                false,
-                true,
-                "channel".to_string(),
-            )))
+            Ok(Box::new(Int8WeightOnlyFactory::new(Vec::new(), false, true, "channel".to_string())))
         }
         QuantizationKind::MXFP8 | QuantizationKind::MXFP4 => {
             let bits = if config.kind == QuantizationKind::MXFP8 { 8 } else { 4 };

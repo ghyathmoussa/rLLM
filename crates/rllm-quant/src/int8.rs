@@ -16,18 +16,8 @@ pub struct Int8WeightOnlyFactory {
 }
 
 impl Int8WeightOnlyFactory {
-    pub fn new(
-        ignore: Vec<String>,
-        strict: bool,
-        symmetric: bool,
-        strategy: String,
-    ) -> Self {
-        Self {
-            ignore,
-            strict,
-            symmetric,
-            strategy,
-        }
+    pub fn new(ignore: Vec<String>, strict: bool, symmetric: bool, strategy: String) -> Self {
+        Self { ignore, strict, symmetric, strategy }
     }
 
     fn is_ignored(&self, prefix: &str) -> bool {
@@ -58,7 +48,8 @@ impl QuantMethodFactory for Int8WeightOnlyFactory {
             format!("{prefix}.scale")
         };
 
-        let zero_point_name = if source.weights.contains_key(&format!("{prefix}.weight_zero_point")) {
+        let zero_point_name = if source.weights.contains_key(&format!("{prefix}.weight_zero_point"))
+        {
             format!("{prefix}.weight_zero_point")
         } else {
             format!("{prefix}.zero_point")
@@ -254,12 +245,17 @@ fn quantize_weight_per_channel(weight: &Tensor) -> Result<(QuantTensor, Tensor)>
 impl LinearMethod for Int8Linear {
     fn apply(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         #[cfg(feature = "cuda")]
-        if matches!(x.device(), candle_core::Device::Cuda(_)) && self.symmetric && self.strategy == "channel" {
+        if matches!(x.device(), candle_core::Device::Cuda(_))
+            && self.symmetric
+            && self.strategy == "channel"
+        {
             return self.apply_cuda(x);
         }
 
         let weight = self.dequantized_weight.get_or_init(|| {
-            self.qweight.dequantize(&self.scale, self.zero_point.as_ref(), x.dtype()).expect("dequantize failed")
+            self.qweight
+                .dequantize(&self.scale, self.zero_point.as_ref(), x.dtype())
+                .expect("dequantize failed")
         });
 
         let x_shape = x.dims();

@@ -3,10 +3,8 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::method::{LinearMethod, QuantMethodFactory, WeightSource};
 
-const FP4_VALUES: [f32; 16] = [
-    0.0,  0.5,  1.0,  1.5,  2.0,  3.0,  4.0,  6.0,
-   -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
-];
+const FP4_VALUES: [f32; 16] =
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0];
 
 pub struct MxfpWeightOnlyFactory {
     bits: u8,
@@ -53,7 +51,12 @@ impl QuantMethodFactory for MxfpWeightOnlyFactory {
             let device = qweight.device().clone();
             let data = qweight.data().iter().map(|&x| x as u8).collect::<Vec<u8>>();
             let qweight_tensor = Tensor::from_vec(data, qweight.shape().to_vec(), &device)?;
-            return Ok(Box::new(MxfpLinear::new(qweight_tensor, scales, self.bits, self.group_size)?));
+            return Ok(Box::new(MxfpLinear::new(
+                qweight_tensor,
+                scales,
+                self.bits,
+                self.group_size,
+            )?));
         }
 
         anyhow::bail!("missing weight tensor for {prefix}")
@@ -165,7 +168,9 @@ impl LinearMethod for MxfpLinear {
             return self.apply_cuda(x);
         }
 
-        let weight = self.get_or_dequantize(x.device(), x.dtype()).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        let weight = self
+            .get_or_dequantize(x.device(), x.dtype())
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         let x_shape = x.dims();
         let trailing = x_shape.len().saturating_sub(1);
         let batch: usize = x_shape[..trailing].iter().product();
@@ -346,12 +351,16 @@ impl MxfpLinear {
 
         let mut out_shape = x_shape[..trailing].to_vec();
         out_shape.push(self.out_features);
-        out.reshape(out_shape).map(|t| t.to_dtype(x.dtype())).unwrap_or(Err(candle_core::Error::Msg("reshape failed".to_string())))
+        out.reshape(out_shape)
+            .map(|t| t.to_dtype(x.dtype()))
+            .unwrap_or(Err(candle_core::Error::Msg("reshape failed".to_string())))
     }
 }
 
 #[cfg(feature = "cuda")]
-fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType>(t: &Tensor) -> candle_core::Result<*const T> {
+fn get_cuda_ptr<T: candle_core::cuda_backend::CudaDType>(
+    t: &Tensor,
+) -> candle_core::Result<*const T> {
     use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
     let (storage, _) = t.storage_and_layout();
@@ -375,10 +384,9 @@ mod tests {
         let device = Device::Cpu;
         let weight = Tensor::from_vec(
             vec![
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0,
+                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0,
+                7.0, -8.0, 1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 1.0f32, -2.0, 3.0, -4.0,
+                5.0, -6.0, 7.0, -8.0,
             ],
             (1, 32),
             &device,
@@ -392,7 +400,7 @@ mod tests {
         let x = Tensor::ones((1, 32), DType::F32, &device)?;
         let out = linear.apply(&x)?;
         assert_eq!(out.dims(), &[1, 1]);
-        
+
         let out_val = out.flatten_all()?.to_vec1::<f32>()?[0];
         println!("test_mxfp8_quantize_and_apply_cpu out_val: {}", out_val);
         assert!((out_val - (-16.0)).abs() < 0.2);
@@ -404,10 +412,9 @@ mod tests {
         let device = Device::Cpu;
         let weight = Tensor::from_vec(
             vec![
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0,
-                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0,
+                1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0, 1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0,
+                1.0, -2.0, 1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0, 1.0f32, -2.0, 3.0, -4.0,
+                5.0, -6.0, 1.0, -2.0,
             ],
             (1, 32),
             &device,
@@ -421,7 +428,7 @@ mod tests {
         let x = Tensor::ones((1, 32), DType::F32, &device)?;
         let out = linear.apply(&x)?;
         assert_eq!(out.dims(), &[1, 1]);
-        
+
         let out_val = out.flatten_all()?.to_vec1::<f32>()?[0];
         println!("test_mxfp4_quantize_and_apply_cpu out_val: {}", out_val);
         assert!((out_val - (-20.0)).abs() < 1e-4);
