@@ -201,7 +201,7 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 | `--host` | `0.0.0.0` | Host to bind to |
 | `--port` | `8000` | Port to bind to |
 | `--dtype` | `auto` | Data type (`auto`, `fp16`, `bf16`, `fp32`) |
-| `--quantization` | `auto` | Quantization format (`auto`, `none`, `int8`, `int4`, `compressed-tensors`, etc.) |
+| `--quantization` | `auto` | Quantization format (`auto`, `none`, `fp8`, `mxfp8`, `mxfp4`, `nvfp4`, `int8`, `int4`, `gguf`, `gptq`, `awq`, `compressed-tensors`, `modelopt`, `torchao`) |
 | `--quant-bits` | (none) | Quantization bit width, such as `8` for INT8 |
 | `--quant-group-size` | (none) | Quantization group size for formats that use grouped weights |
 | `--max-model-len` | (auto) | Maximum model context length |
