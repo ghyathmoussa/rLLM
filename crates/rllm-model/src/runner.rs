@@ -47,48 +47,83 @@ impl ModelRunner {
         model_dir: &std::path::Path,
         config: Option<ModelConfig>,
     ) -> Result<Self> {
-        let config = match config {
-            Some(config) => config,
-            None => {
-                let config_path = model_dir.join("config.json");
-                hf_config::parse_hf_config(&config_path).context("parsing model config")?
+        let is_gguf = model_dir.is_file() && model_dir.extension().is_some_and(|ext| ext == "gguf");
+        let gguf_file_path = if is_gguf {
+            Some(model_dir.to_path_buf())
+        } else if model_dir.is_dir() {
+            let mut gguf_path = None;
+            if let Ok(entries) = std::fs::read_dir(model_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().is_some_and(|ext| ext == "gguf") {
+                        gguf_path = Some(path);
+                        break;
+                    }
+                }
             }
+            gguf_path
+        } else {
+            None
         };
 
         let device =
             Device::cuda_if_available(0).map_err(|e| anyhow::anyhow!("device init: {e}"))?;
 
-        // When INT8 quantization is active, load weights to CPU first to avoid
-        // allocating full-size BF16 tensors on GPU.  The INT8 quantization
-        // factory will keep quantized weights on the host (Vec<i8>) and upload
-        // them to GPU lazily on the first forward pass via OnceLock.
-        let is_int8 =
-            config.quantization.as_ref().is_some_and(|q| q.kind == QuantizationKind::Int8);
-        let load_device = if is_int8 && matches!(device, Device::Cuda(_)) {
+        let (config, weight_map) = if let Some(ref path) = gguf_file_path {
+            let config = match config {
+                Some(config) => config,
+                None => crate::gguf_loader::parse_gguf_config(path)
+                    .context("parsing GGUF model config")?,
+            };
+            tracing::info!(
+                model_path = %path.display(),
+                architecture = %config.architecture,
+                device = ?device,
+                "loading GGUF model"
+            );
+            let weight_map = crate::gguf_loader::load_gguf_weights(path, &device)
+                .context("loading GGUF weights")?;
+            (config, weight_map)
+        } else {
+            let config = match config {
+                Some(config) => config,
+                None => {
+                    let config_path = model_dir.join("config.json");
+                    hf_config::parse_hf_config(&config_path).context("parsing model config")?
+                }
+            };
+
+            let is_int8 =
+                config.quantization.as_ref().is_some_and(|q| q.kind == QuantizationKind::Int8);
+            let load_device = if is_int8 && matches!(device, Device::Cuda(_)) {
+                tracing::info!(
+                    model_dir = %model_dir.display(),
+                    "INT8 quantization active — loading weights to CPU first to save GPU memory"
+                );
+                Some(&Device::Cpu)
+            } else {
+                None
+            };
+
             tracing::info!(
                 model_dir = %model_dir.display(),
-                "INT8 quantization active — loading weights to CPU first to save GPU memory"
+                architecture = %config.architecture,
+                device = ?device,
+                load_to_cpu = load_device.is_some(),
+                "loading model"
             );
-            Some(&Device::Cpu)
-        } else {
-            None
+
+            let (weight_map, _tied) =
+                loader::load_weights_with_tied_detection(model_dir, &device, load_device)
+                    .context("loading weights")?;
+            (config, weight_map)
         };
 
-        tracing::info!(
-            model_dir = %model_dir.display(),
-            architecture = %config.architecture,
-            device = ?device,
-            load_to_cpu = load_device.is_some(),
-            "loading model"
-        );
-
-        let (weight_map, _tied) =
-            loader::load_weights_with_tied_detection(model_dir, &device, load_device)
-                .context("loading weights")?;
         tracing::debug!(
             model_dir = %model_dir.display(),
             tensors = weight_map.weights.len(),
             quantized_tensors = weight_map.quantized.len(),
+            gguf_tensors = weight_map.gguf_weights.len(),
             "model weights loaded into memory"
         );
 

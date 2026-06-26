@@ -1,6 +1,8 @@
 pub mod schema;
 
 #[cfg(feature = "candle-backend")]
+pub mod gguf;
+#[cfg(feature = "candle-backend")]
 pub mod int8;
 #[cfg(feature = "candle-backend")]
 pub mod method;
@@ -11,6 +13,8 @@ pub mod mxfp;
 #[cfg(feature = "candle-backend")]
 pub mod unquant;
 
+#[cfg(feature = "candle-backend")]
+pub use gguf::{GgufLinear, GgufMethodFactory};
 #[cfg(feature = "candle-backend")]
 pub use int8::{Int8Linear, Int8WeightOnlyFactory};
 #[cfg(feature = "candle-backend")]

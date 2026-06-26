@@ -30,6 +30,7 @@ What rLLM provides:
 - Prometheus metrics for monitoring
 - Full sampling options (top-k, top-p, min-p, temperature, penalties)
 - Llama-family model support
+- GGUF Quantization support for single-file model loading and CPU/GPU execution
 
 ---
 
@@ -44,6 +45,7 @@ What rLLM provides:
 - **Prometheus metrics** – Built-in monitoring: TTFT, TPOT, request rate, token throughput
 - **Rich sampling** – Temperature, top-k, top-p, min-p, frequency/presence penalties, logit bias
 - **Llama support** – Optimized for Llama-family architectures (Llama 2/3, Mistral, etc.)
+- **GGUF support** – Direct single-file loading of pre-quantized GGUF models on CPU and GPU
 
 ---
 
@@ -69,6 +71,9 @@ cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
   --gpu-memory-utilization 0.55 \
   --max-model-len 4096 \
   --max-num-seqs 1
+
+# Option D: Serve a pre-quantized GGUF model directly (CPU or GPU)
+cargo run --release --features cuda -- serve /path/to/llama-3.2-1b.gguf
 
 # In another terminal, send a request
 curl http://localhost:8000/v1/chat/completions \

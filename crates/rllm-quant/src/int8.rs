@@ -11,11 +11,23 @@ use crate::{
 pub struct Int8WeightOnlyFactory {
     ignore: Vec<String>,
     strict: bool,
+    symmetric: bool,
+    strategy: String,
 }
 
 impl Int8WeightOnlyFactory {
-    pub fn new(ignore: Vec<String>, strict: bool) -> Self {
-        Self { ignore, strict }
+    pub fn new(
+        ignore: Vec<String>,
+        strict: bool,
+        symmetric: bool,
+        strategy: String,
+    ) -> Self {
+        Self {
+            ignore,
+            strict,
+            symmetric,
+            strategy,
+        }
     }
 
     fn is_ignored(&self, prefix: &str) -> bool {
@@ -39,7 +51,19 @@ impl QuantMethodFactory for Int8WeightOnlyFactory {
         }
 
         let weight_name = format!("{prefix}.weight");
-        let scale_name = format!("{prefix}.weight_scale");
+
+        let scale_name = if source.weights.contains_key(&format!("{prefix}.weight_scale")) {
+            format!("{prefix}.weight_scale")
+        } else {
+            format!("{prefix}.scale")
+        };
+
+        let zero_point_name = if source.weights.contains_key(&format!("{prefix}.weight_zero_point")) {
+            format!("{prefix}.weight_zero_point")
+        } else {
+            format!("{prefix}.zero_point")
+        };
+
         if !source.has_quant_tensor(&weight_name) {
             if self.strict {
                 anyhow::bail!(
@@ -48,18 +72,46 @@ impl QuantMethodFactory for Int8WeightOnlyFactory {
             }
             let weight = source.remove_tensor(&weight_name)?;
             let (qweight, scale) = quantize_weight_per_channel(&weight)?;
-            return Ok(Box::new(Int8Linear::new(qweight, scale)?));
+            return Ok(Box::new(Int8Linear::new(
+                qweight,
+                scale,
+                None,
+                true,
+                "channel".to_string(),
+            )?));
         }
 
         let qweight = source.remove_quant_tensor(&weight_name)?;
         let scale = source.remove_tensor(&scale_name)?;
-        Ok(Box::new(Int8Linear::new(qweight, scale)?))
+        let zero_point = if !self.symmetric {
+            if source.weights.contains_key(&zero_point_name) {
+                Some(source.remove_tensor(&zero_point_name)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Box::new(Int8Linear::new(
+            qweight,
+            scale,
+            zero_point,
+            self.symmetric,
+            self.strategy.clone(),
+        )?))
     }
 }
 
 pub struct Int8Linear {
     qweight: QuantTensor,
     scale: Tensor,
+    zero_point: Option<Tensor>,
+    #[allow(dead_code)]
+    symmetric: bool,
+    #[allow(dead_code)]
+    strategy: String,
+    dequantized_weight: std::sync::OnceLock<Tensor>,
     #[cfg(feature = "cuda")]
     scale_values: Vec<f32>,
     /// Device-resident int8 weights + scale, uploaded once on the first CUDA
@@ -72,7 +124,13 @@ pub struct Int8Linear {
 }
 
 impl Int8Linear {
-    pub fn new(qweight: QuantTensor, scale: Tensor) -> Result<Self> {
+    pub fn new(
+        qweight: QuantTensor,
+        scale: Tensor,
+        zero_point: Option<Tensor>,
+        symmetric: bool,
+        strategy: String,
+    ) -> Result<Self> {
         let dims = qweight.shape();
         if dims.len() != 2 {
             anyhow::bail!("INT8 linear weight must be rank 2, got shape {dims:?}");
@@ -80,15 +138,41 @@ impl Int8Linear {
         let out_features = dims[0];
         let in_features = dims[1];
         let scale_values = scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-        if scale_values.len() != out_features {
+
+        if strategy == "channel" && scale_values.len() != out_features {
             anyhow::bail!(
-                "INT8 scale must have one value per output channel, got {} for {out_features} outputs",
+                "INT8 per-channel scale must have one value per output channel, got {} for {out_features} outputs",
+                scale_values.len()
+            );
+        } else if strategy == "tensor" && scale_values.len() != 1 {
+            anyhow::bail!(
+                "INT8 per-tensor scale must have exactly 1 value, got {}",
                 scale_values.len()
             );
         }
+
+        if let Some(zp) = &zero_point {
+            let zp_values = zp.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            if strategy == "channel" && zp_values.len() != out_features {
+                anyhow::bail!(
+                    "INT8 per-channel zero_point must have one value per output channel, got {} for {out_features} outputs",
+                    zp_values.len()
+                );
+            } else if strategy == "tensor" && zp_values.len() != 1 {
+                anyhow::bail!(
+                    "INT8 per-tensor zero_point must have exactly 1 value, got {}",
+                    zp_values.len()
+                );
+            }
+        }
+
         Ok(Self {
             qweight,
             scale,
+            zero_point,
+            symmetric,
+            strategy,
+            dequantized_weight: std::sync::OnceLock::new(),
             #[cfg(feature = "cuda")]
             scale_values,
             #[cfg(feature = "cuda")]
@@ -170,11 +254,14 @@ fn quantize_weight_per_channel(weight: &Tensor) -> Result<(QuantTensor, Tensor)>
 impl LinearMethod for Int8Linear {
     fn apply(&self, x: &Tensor) -> candle_core::Result<Tensor> {
         #[cfg(feature = "cuda")]
-        if matches!(x.device(), candle_core::Device::Cuda(_)) {
+        if matches!(x.device(), candle_core::Device::Cuda(_)) && self.symmetric && self.strategy == "channel" {
             return self.apply_cuda(x);
         }
 
-        let weight = self.qweight.dequantize(&self.scale, x.dtype())?;
+        let weight = self.dequantized_weight.get_or_init(|| {
+            self.qweight.dequantize(&self.scale, self.zero_point.as_ref(), x.dtype()).expect("dequantize failed")
+        });
+
         let x_shape = x.dims();
         let trailing = x_shape.len().saturating_sub(1);
         let batch: usize = x_shape[..trailing].iter().product();
@@ -212,12 +299,35 @@ mod tests {
         let device = Device::Cpu;
         let qweight = QuantTensor::new(vec![2, -4, 8, 3], vec![2, 2], device.clone())?;
         let scale = Tensor::from_vec(vec![0.5f32, 0.25], (2,), &device)?;
-        let linear = Int8Linear::new(qweight, scale)?;
+        let linear = Int8Linear::new(qweight, scale, None, true, "channel".to_string())?;
         let x = Tensor::from_vec(vec![2.0f32, 3.0, -1.0, 4.0], (2, 2), &device)?;
 
         let out = linear.apply(&x)?.to_vec2::<f32>()?;
 
         assert_eq!(out, vec![vec![-4.0, 6.25], vec![-9.0, 1.0]]);
+        Ok(())
+    }
+
+    #[test]
+    fn int8_linear_applies_asymmetric_dequantized_weight_on_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let qweight = QuantTensor::new(vec![10, 20, 30, 40], vec![2, 2], device.clone())?;
+        let scale = Tensor::from_vec(vec![0.5f32], (1,), &device)?;
+        let zp = Tensor::from_vec(vec![2.0f32], (1,), &device)?;
+        let linear = Int8Linear::new(qweight, scale, Some(zp), false, "tensor".to_string())?;
+        let x = Tensor::from_vec(vec![2.0f32, 3.0, -1.0, 4.0], (2, 2), &device)?;
+
+        // weight = (q - zp) * scale
+        // [ (10-2)*0.5, (20-2)*0.5 ] = [4.0, 9.0]
+        // [ (30-2)*0.5, (40-2)*0.5 ] = [14.0, 19.0]
+        // x = [2, 3], [-1, 4]
+        // out[0][0] = 2*4 + 3*9 = 8 + 27 = 35
+        // out[0][1] = 2*14 + 3*19 = 28 + 57 = 85
+        // out[1][0] = -1*4 + 4*9 = -4 + 36 = 32
+        // out[1][1] = -1*14 + 4*19 = -14 + 76 = 62
+        let out = linear.apply(&x)?.to_vec2::<f32>()?;
+
+        assert_eq!(out, vec![vec![35.0, 85.0], vec![32.0, 62.0]]);
         Ok(())
     }
 
@@ -230,7 +340,7 @@ mod tests {
         )]);
         let mut quantized = HashMap::new();
         let mut source = WeightSource::new(&mut weights, &mut quantized);
-        let factory = Int8WeightOnlyFactory::new(Vec::new(), false);
+        let factory = Int8WeightOnlyFactory::new(Vec::new(), false, true, "channel".to_string());
 
         let linear = factory.build_linear("linear", &mut source)?;
         let x = Tensor::from_vec(vec![2.0f32, -1.0], (1, 2), &device)?;
@@ -268,7 +378,7 @@ mod tests {
         let qweight =
             QuantTensor::new(vec![10, -20, 30, -40, 50, -60], vec![2, 3], device.clone())?;
         let scale = Tensor::from_vec(vec![0.1f32, 0.2], (2,), &device)?;
-        let linear = Int8Linear::new(qweight, scale)?;
+        let linear = Int8Linear::new(qweight, scale, None, true, "channel".to_string())?;
 
         let x_vals = vec![0.7f32, -1.3, 2.1];
         let x = Tensor::from_vec(x_vals.clone(), (1, 3), &device)?;
@@ -291,12 +401,12 @@ mod tests {
         let qweight = QuantTensor::new(vec![1, 2, 3, 4], vec![2, 2], device.clone())?;
         let scale = Tensor::from_vec(vec![0.5f32], (1,), &device)?;
 
-        let err = match Int8Linear::new(qweight, scale) {
+        let err = match Int8Linear::new(qweight, scale, None, true, "channel".to_string()) {
             Ok(_) => anyhow::bail!("expected invalid INT8 scale length to fail"),
             Err(err) => err.to_string(),
         };
 
-        assert!(err.contains("INT8 scale must have one value per output channel"));
+        assert!(err.contains("INT8 per-channel scale must have one value per output channel"));
         Ok(())
     }
 }
@@ -476,7 +586,7 @@ mod cuda_tests {
         let qweight =
             QuantTensor::new(qdata.clone(), vec![out_features, in_features], device.clone())?;
         let scale = Tensor::from_vec(scale_vals.clone(), (out_features,), &device)?;
-        let linear = Int8Linear::new(qweight, scale)?;
+        let linear = Int8Linear::new(qweight, scale, None, true, "channel".to_string())?;
 
         let x_vals: Vec<f32> = (0..rows * in_features).map(|i| (i as f32 * 0.03).sin()).collect();
         let x = Tensor::from_vec(x_vals.clone(), (rows, in_features), &device)?;

@@ -5,6 +5,8 @@ pub mod quantize;
 pub mod registry;
 
 #[cfg(feature = "candle-backend")]
+pub mod gguf_loader;
+#[cfg(feature = "candle-backend")]
 pub mod layers;
 #[cfg(feature = "candle-backend")]
 pub mod llama;

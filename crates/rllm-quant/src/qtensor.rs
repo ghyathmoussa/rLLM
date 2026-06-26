@@ -41,11 +41,36 @@ impl QuantTensor {
         self.data.len()
     }
 
-    pub fn dequantize(&self, scale: &Tensor, out_dtype: DType) -> candle_core::Result<Tensor> {
+    pub fn dequantize(
+        &self,
+        scale: &Tensor,
+        zero_point: Option<&Tensor>,
+        out_dtype: DType,
+    ) -> candle_core::Result<Tensor> {
         let q = self.data.iter().map(|value| *value as f32).collect::<Vec<_>>();
-        let q = Tensor::from_vec(q, self.shape.as_slice(), &self.device)?;
+        let mut q = Tensor::from_vec(q, self.shape.as_slice(), &self.device)?;
+
+        if let Some(zp) = zero_point {
+            let zp = zp.to_dtype(DType::F32)?;
+            let zp = match zp.dims() {
+                [] | [1] => zp,
+                [1, 1] if self.shape.len() == 2 => zp,
+                [out] if self.shape.len() == 2 && *out == self.shape[0] => zp.reshape((*out, 1))?,
+                [out, 1] if self.shape.len() == 2 && *out == self.shape[0] => zp,
+                dims => {
+                    return Err(candle_core::Error::Msg(format!(
+                        "unsupported INT8 zero_point shape {dims:?} for weight shape {:?}",
+                        self.shape
+                    )));
+                }
+            };
+            q = q.broadcast_sub(&zp)?;
+        }
+
         let scale = scale.to_dtype(DType::F32)?;
         let scale = match scale.dims() {
+            [] | [1] => scale,
+            [1, 1] if self.shape.len() == 2 => scale,
             [out] if self.shape.len() == 2 && *out == self.shape[0] => scale.reshape((*out, 1))?,
             [out, 1] if self.shape.len() == 2 && *out == self.shape[0] => scale,
             dims => {
@@ -68,7 +93,7 @@ mod tests {
         let device = Device::Cpu;
         let q = QuantTensor::new(vec![-2, -1, 0, 1, 2, 3], vec![2, 3], device.clone()).unwrap();
         let scale = Tensor::from_vec(vec![0.5f32, 0.25], (2,), &device)?;
-        let deq = q.dequantize(&scale, DType::F32)?;
+        let deq = q.dequantize(&scale, None, DType::F32)?;
         let vals = deq.to_vec2::<f32>()?;
         assert_eq!(vals, vec![vec![-1.0, -0.5, 0.0], vec![0.25, 0.5, 0.75]]);
         Ok(())
@@ -79,8 +104,19 @@ mod tests {
         let device = Device::Cpu;
         let q = QuantTensor::new(vec![1, 2, 3, 4], vec![2, 2], device.clone()).unwrap();
         let scale = Tensor::from_vec(vec![2.0f32, 4.0], (2, 1), &device)?;
-        let vals = q.dequantize(&scale, DType::F32)?.to_vec2::<f32>()?;
+        let vals = q.dequantize(&scale, None, DType::F32)?.to_vec2::<f32>()?;
         assert_eq!(vals, vec![vec![2.0, 4.0], vec![12.0, 16.0]]);
+        Ok(())
+    }
+
+    #[test]
+    fn dequantizes_i8_asymmetric_and_tensor_scale() -> candle_core::Result<()> {
+        let device = Device::Cpu;
+        let q = QuantTensor::new(vec![10, 20, 30, 40], vec![2, 2], device.clone()).unwrap();
+        let scale = Tensor::from_vec(vec![0.5f32], (1,), &device)?;
+        let zp = Tensor::from_vec(vec![2.0f32], (1,), &device)?;
+        let vals = q.dequantize(&scale, Some(&zp), DType::F32)?.to_vec2::<f32>()?;
+        assert_eq!(vals, vec![vec![4.0, 9.0], vec![14.0, 19.0]]);
         Ok(())
     }
 
