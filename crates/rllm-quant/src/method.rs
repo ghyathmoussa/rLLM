@@ -62,6 +62,10 @@ impl<'a> WeightSource<'a> {
     pub fn has_quant_tensor(&self, name: &str) -> bool {
         self.quantized.contains_key(name)
     }
+
+    pub fn has_tensor(&self, name: &str) -> bool {
+        self.weights.contains_key(name)
+    }
 }
 
 pub fn factory_from_config(
@@ -87,6 +91,11 @@ pub fn factory_from_config(
         QuantizationKind::None => Ok(Box::new(UnquantizedFactory)),
         QuantizationKind::Int8 | QuantizationKind::CompressedTensors => {
             Ok(Box::new(Int8WeightOnlyFactory::new(Vec::new(), false)))
+        }
+        QuantizationKind::MXFP8 | QuantizationKind::MXFP4 => {
+            let bits = if config.kind == QuantizationKind::MXFP8 { 8 } else { 4 };
+            let group_size = config.group_size.unwrap_or(32);
+            Ok(Box::new(crate::mxfp::MxfpWeightOnlyFactory::new(bits, group_size)))
         }
         other => bail!("quantization kind {other:?} is not implemented by rllm-quant yet"),
     }
