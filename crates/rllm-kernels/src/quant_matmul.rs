@@ -250,6 +250,9 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    /// # Safety
+    /// Stub for non-CUDA builds: returns `NotAvailable` and never dereferences
+    /// any pointer. Signature mirrors the CUDA build for source compatibility.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn mxfp8_matmul_w8a16_f16(
         _x: *const u16,
@@ -265,6 +268,9 @@ mod stubs {
         Err(CudaKernelError::NotAvailable)
     }
 
+    /// # Safety
+    /// Stub for non-CUDA builds: returns `NotAvailable` and never dereferences
+    /// any pointer. Signature mirrors the CUDA build for source compatibility.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn mxfp4_matmul_w4a16_f16(
         _x: *const u16,
