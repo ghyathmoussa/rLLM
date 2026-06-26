@@ -29,6 +29,10 @@ impl QuantTensor {
         &self.shape
     }
 
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn data(&self) -> &[i8] {
         &self.data
     }

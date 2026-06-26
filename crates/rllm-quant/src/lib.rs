@@ -7,6 +7,8 @@ pub mod int8;
 #[cfg(feature = "candle-backend")]
 pub mod method;
 #[cfg(feature = "candle-backend")]
+pub mod mxfp;
+#[cfg(feature = "candle-backend")]
 pub mod qtensor;
 #[cfg(feature = "candle-backend")]
 pub mod unquant;
@@ -17,6 +19,8 @@ pub use gguf::{GgufLinear, GgufMethodFactory};
 pub use int8::{Int8Linear, Int8WeightOnlyFactory};
 #[cfg(feature = "candle-backend")]
 pub use method::{LinearMethod, QuantMethodFactory, WeightSource, factory_from_config};
+#[cfg(feature = "candle-backend")]
+pub use mxfp::{MxfpLinear, MxfpWeightOnlyFactory};
 #[cfg(feature = "candle-backend")]
 pub use qtensor::QuantTensor;
 pub use schema::QuantSchema;
