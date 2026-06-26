@@ -76,6 +76,20 @@ impl<'a> WeightSource<'a> {
     pub fn has_tensor(&self, name: &str) -> bool {
         self.weights.contains_key(name)
     }
+
+    pub fn remove_gguf_tensor(
+        &mut self,
+        name: &str,
+    ) -> Result<std::sync::Arc<candle_core::quantized::QTensor>> {
+        self.gguf_weights
+            .as_mut()
+            .and_then(|w| w.remove(name))
+            .ok_or_else(|| anyhow::anyhow!("missing GGUF tensor {name}"))
+    }
+
+    pub fn has_gguf_tensor(&self, name: &str) -> bool {
+        self.gguf_weights.as_ref().is_some_and(|w| w.contains_key(name))
+    }
 }
 
 pub fn factory_from_config(
@@ -119,6 +133,7 @@ pub fn factory_from_config(
             let group_size = config.group_size.unwrap_or(32);
             Ok(Box::new(crate::mxfp::MxfpWeightOnlyFactory::new(bits, group_size)))
         }
+        QuantizationKind::Gguf => Ok(Box::new(crate::gguf::GgufMethodFactory)),
         other => bail!("quantization kind {other:?} is not implemented by rllm-quant yet"),
     }
 }
