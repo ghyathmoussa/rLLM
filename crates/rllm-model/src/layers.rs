@@ -151,6 +151,14 @@ pub enum LinearWeight {
         group_size: usize,
         dequantized: std::sync::OnceLock<Tensor>,
     },
+    Awq {
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        bits: usize,
+        group_size: usize,
+        dequantized: std::sync::OnceLock<Tensor>,
+    },
     Method(Box<dyn LinearMethod>),
 }
 
@@ -269,6 +277,122 @@ fn dequantize_gptq_impl(
 }
 
 #[cfg(feature = "candle-backend")]
+pub fn dequantize_awq(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    bits: usize,
+    group_size: usize,
+) -> Result<Tensor> {
+    let device = qweight.device();
+    if let Device::Cuda(_) = device {
+        let cpu = Device::Cpu;
+        let out = dequantize_awq_impl(
+            &qweight.to_device(&cpu)?,
+            &qzeros.to_device(&cpu)?,
+            &scales.to_device(&cpu)?,
+            bits,
+            group_size,
+            &cpu,
+        )?;
+        return out.to_device(device);
+    }
+    dequantize_awq_impl(qweight, qzeros, scales, bits, group_size, device)
+}
+
+#[cfg(feature = "candle-backend")]
+fn dequantize_awq_impl(
+    qweight: &Tensor,
+    qzeros: &Tensor,
+    scales: &Tensor,
+    bits: usize,
+    group_size: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    if bits != 4 {
+        return Err(candle_core::Error::Msg(format!("Only 4-bit AWQ is supported, got {bits}")));
+    }
+
+    let (in_features, packed_out_features) = qweight.dims2()?;
+    let out_features = packed_out_features * 8;
+    let num_groups = in_features / group_size;
+
+    // Convert qweight from signed I32 to unsigned F64 to avoid sign-extension bugs.
+    // If it's negative, add 2^32.
+    let qweight_f64 = qweight.to_dtype(DType::F64)?;
+    let zero_w = Tensor::new(0.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let is_neg = qweight_f64.lt(&zero_w)?;
+    let offset_w = Tensor::new(4294967296.0f64, device)?.broadcast_as(qweight_f64.shape())?;
+    let qweight_u64 = qweight_f64.add(&is_neg.to_dtype(DType::F64)?.mul(&offset_w)?)?;
+
+    // Unpack qweight (bits = 4, 8 values per i32/f64 word)
+    let mut w_unpacked = Vec::with_capacity(8);
+    let c16_w = Tensor::new(16.0f64, device)?.broadcast_as(qweight_u64.shape())?;
+    for i in 0..8 {
+        let divisor = (1i64 << (4 * i)) as f64;
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qweight_u64.shape())?;
+        let shifted = qweight_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_w)?.floor()?.mul(&c16_w)?;
+        let masked = shifted.sub(&temp)?;
+        w_unpacked.push(masked);
+    }
+
+    let awq_reverse_order = [0, 4, 1, 5, 2, 6, 3, 7];
+    let mut w_unpacked_reordered = Vec::with_capacity(8);
+    for &idx in &awq_reverse_order {
+        w_unpacked_reordered.push(w_unpacked[idx].clone());
+    }
+    // Stack along dimension 2 (shape: [in_features, packed_out_features, 8])
+    let w_stacked = Tensor::stack(&w_unpacked_reordered, 2)?;
+    // Reshape to [in_features, out_features]
+    let w_raw = w_stacked.reshape((in_features, out_features))?.to_dtype(scales.dtype())?;
+
+    // Convert qzeros from signed I32 to unsigned F64.
+    let qzeros_f64 = qzeros.to_dtype(DType::F64)?;
+    let zero_z = Tensor::new(0.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let is_neg_z = qzeros_f64.lt(&zero_z)?;
+    let offset_z = Tensor::new(4294967296.0f64, device)?.broadcast_as(qzeros_f64.shape())?;
+    let qzeros_u64 = qzeros_f64.add(&is_neg_z.to_dtype(DType::F64)?.mul(&offset_z)?)?;
+
+    // Unpack qzeros
+    let mut z_unpacked = Vec::with_capacity(8);
+    let c16_z = Tensor::new(16.0f64, device)?.broadcast_as(qzeros_u64.shape())?;
+    for i in 0..8 {
+        let divisor = (1i64 << (4 * i)) as f64;
+        let divisor_t = Tensor::new(divisor, device)?.broadcast_as(qzeros_u64.shape())?;
+        let shifted = qzeros_u64.div(&divisor_t)?.floor()?;
+        let temp = shifted.div(&c16_z)?.floor()?.mul(&c16_z)?;
+        let masked = shifted.sub(&temp)?;
+        z_unpacked.push(masked);
+    }
+
+    let mut z_unpacked_reordered = Vec::with_capacity(8);
+    for &idx in &awq_reverse_order {
+        z_unpacked_reordered.push(z_unpacked[idx].clone());
+    }
+    // Stack along dimension 2 (shape: [num_groups, packed_out_features, 8])
+    let z_stacked = Tensor::stack(&z_unpacked_reordered, 2)?;
+    // Reshape to [num_groups, out_features]
+    let z_raw = z_stacked.reshape((num_groups, out_features))?.to_dtype(scales.dtype())?;
+
+    // Expand scales and zeros to shape [in_features, out_features]
+    let scales_expanded = scales
+        .unsqueeze(1)?
+        .expand((num_groups, group_size, out_features))?
+        .reshape((in_features, out_features))?;
+    let z_expanded = z_raw
+        .unsqueeze(1)?
+        .expand((num_groups, group_size, out_features))?
+        .reshape((in_features, out_features))?;
+
+    // Apply dequantization formula: (W_q - ZP) * Scale
+    let w_dequant = w_raw.sub(&z_expanded)?.mul(&scales_expanded)?;
+
+    // Transpose back to match [out_features, in_features] shape
+    w_dequant.t()
+}
+
+#[cfg(feature = "candle-backend")]
 pub struct Linear {
     weight: LinearWeight,
 }
@@ -281,6 +405,25 @@ impl Linear {
 
     pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
         Self { weight: LinearWeight::Method(method) }
+    }
+
+    pub fn new_awq(
+        qweight: Tensor,
+        qzeros: Tensor,
+        scales: Tensor,
+        bits: usize,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            weight: LinearWeight::Awq {
+                qweight,
+                qzeros,
+                scales,
+                bits,
+                group_size,
+                dequantized: std::sync::OnceLock::new(),
+            },
+        }
     }
 
     pub fn new_gptq(
@@ -339,6 +482,35 @@ impl Linear {
                 };
                 self.forward_fp(x, weight)
             }
+            LinearWeight::Awq {
+                qweight,
+                qzeros,
+                scales,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                #[cfg(feature = "cuda")]
+                if let Some(out) = self.try_forward_awq_cuda(
+                    x,
+                    qweight,
+                    qzeros,
+                    scales,
+                    *bits,
+                    *group_size,
+                )? {
+                    return Ok(out);
+                }
+
+                let weight = if let Some(w) = dequantized.get() {
+                    w
+                } else {
+                    let w = dequantize_awq(qweight, qzeros, scales, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    dequantized.get().unwrap()
+                };
+                self.forward_fp(x, weight)
+            }
         }
     }
 
@@ -365,12 +537,29 @@ impl Linear {
                     Ok(dequantized.get().unwrap())
                 }
             }
+            LinearWeight::Awq {
+                qweight,
+                qzeros,
+                scales,
+                bits,
+                group_size,
+                dequantized,
+            } => {
+                if let Some(w) = dequantized.get() {
+                    Ok(w)
+                } else {
+                    let w = dequantize_awq(qweight, qzeros, scales, *bits, *group_size)?;
+                    let _ = dequantized.set(w);
+                    Ok(dequantized.get().unwrap())
+                }
+            }
         }
     }
 
     pub fn is_quantized(&self) -> bool {
         match &self.weight {
             LinearWeight::Gptq { .. } => true,
+            LinearWeight::Awq { .. } => true,
             LinearWeight::Method(method) => method.is_quantized(),
             LinearWeight::Fp(_) => false,
         }
@@ -451,6 +640,79 @@ impl Linear {
                 p_qzeros,
                 p_scales as *const u16,
                 p_gidx,
+                p_out as *mut u16,
+                batch as i64,
+                in_features as i64,
+                out_features as i64,
+                num_groups,
+                group_size as i64,
+            )
+            .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        }
+
+        let mut out_shape = x_shape[..trailing].to_vec();
+        out_shape.push(out_features);
+        out.reshape(out_shape).map(Some)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn try_forward_awq_cuda(
+        &self,
+        x: &Tensor,
+        qweight: &Tensor,
+        qzeros: &Tensor,
+        scales: &Tensor,
+        bits: usize,
+        group_size: usize,
+    ) -> Result<Option<Tensor>> {
+        if bits != 4
+            || x.dtype() != DType::F16
+            || scales.dtype() != DType::F16
+            || !matches!(x.device(), Device::Cuda(_))
+            || !matches!(qweight.device(), Device::Cuda(_))
+            || !matches!(qzeros.device(), Device::Cuda(_))
+            || !matches!(scales.device(), Device::Cuda(_))
+        {
+            return Ok(None);
+        }
+
+        let (in_features, packed_out_features) = qweight.dims2()?;
+        let out_features = packed_out_features * 8;
+        if out_features % 8 != 0 {
+            return Ok(None);
+        }
+
+        let x_shape = x.dims();
+        let trailing = x_shape.len().saturating_sub(1);
+        let batch: usize = x_shape[..trailing].iter().product();
+        let x_in_features = x.dim(D::Minus1)?;
+        if x_in_features != in_features || in_features % 8 != 0 {
+            return Ok(None);
+        }
+
+        // Ensure all tensors are contiguous to pass safely to raw CUDA kernel
+        let x_contig = x.contiguous()?;
+        let qweight_contig = qweight.contiguous()?;
+        let qzeros_contig = qzeros.contiguous()?;
+        let scales_contig = scales.contiguous()?;
+
+        let out = Tensor::zeros((batch, out_features), DType::F16, x.device())?;
+
+        let p_x = get_cuda_ptr::<half::f16>(&x_contig)?;
+        let p_qweight = get_cuda_ptr::<i32>(&qweight_contig)?;
+        let p_qzeros = get_cuda_ptr::<i32>(&qzeros_contig)?;
+        let p_scales = get_cuda_ptr::<half::f16>(&scales_contig)?;
+        let p_out = get_cuda_ptr::<half::f16>(&out)?;
+
+        let num_groups = (in_features / group_size) as i64;
+
+        unsafe {
+            rllm_kernels::cuda::awq_gemm_f16_sync(
+                p_x as *const u16,
+                p_qweight,
+                p_qzeros,
+                p_scales as *const u16,
                 p_out as *mut u16,
                 batch as i64,
                 in_features as i64,
@@ -1420,6 +1682,95 @@ mod tests {
         let out_f32 = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
 
         // Let's compute the expected outputs using the CPU baseline
+        let expected_out = x
+            .to_device(&Device::Cpu)?
+            .reshape((1, 8))?
+            .matmul(&linear.weight()?.to_device(&Device::Cpu)?.t()?)?;
+        let expected_vals = expected_out.to_dtype(DType::F32)?.to_vec2::<f32>()?[0].clone();
+
+        for col in 0..8 {
+            let expected = expected_vals[col];
+            let actual = out_f32[0][col];
+            assert!(
+                (actual - expected).abs() < 0.2,
+                "col {col}: expected {expected:.4}, got {actual:.4}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn awq_dequantization_correctness() -> Result<()> {
+        let device = Device::Cpu;
+
+        // Shape: (8, 1) — 8 rows (in_features = 8), 1 packed col (out_features = 8)
+        let qweight_data = vec![
+            1985229328i32, // Row 0: 0x76543210 -> unpacked: [0, 4, 1, 5, 2, 6, 3, 7]
+            1985229328i32, // Row 1
+            1985229328i32, // Row 2
+            1985229328i32, // Row 3
+            1985229328i32, // Row 4
+            1985229328i32, // Row 5
+            1985229328i32, // Row 6
+            1985229328i32, // Row 7
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (8, 1), &device)?;
+
+        // Shape: (1, 1) — 1 group, 1 packed col. Zeros = 3 -> 0x33333333 = 858993459
+        let qzeros = Tensor::from_vec(vec![858993459i32], (1, 1), &device)?;
+
+        // Shape: (1, 8) — 1 group, 8 cols. Scales = 1.0
+        let scales = Tensor::from_vec(vec![1.0f32; 8], (1, 8), &device)?;
+
+        let w_dequant = dequantize_awq(&qweight, &qzeros, &scales, 4, 8)?;
+        // Expected shape: (8, 8) — out_features, in_features
+        assert_eq!(w_dequant.dims(), &[8, 8]);
+
+        let w_vals = w_dequant.to_vec2::<f32>()?;
+        let expected_row = vec![-3.0, 1.0, -2.0, 2.0, -1.0, 3.0, 0.0, 4.0];
+
+        // w_dequant has shape [out_features, in_features]
+        // so w_vals[col][row] should be expected_row[col] (since all rows are identical)
+        for col in 0..8 {
+            for row in 0..8 {
+                assert_eq!(w_vals[col][row], expected_row[col]);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn awq_cuda_linear_forward_correctness() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+
+        let qweight_data = vec![
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+            1985229328i32,
+        ];
+        let qweight = Tensor::from_vec(qweight_data, (8, 1), &device)?;
+        let qzeros = Tensor::from_vec(vec![858993459i32], (1, 1), &device)?;
+        let scales = Tensor::from_vec(vec![1.0f32; 8], (1, 8), &device)?.to_dtype(DType::F16)?;
+
+        let linear = Linear::new_awq(qweight, qzeros, scales, 4, 8);
+
+        // Input x (shape [1, 8], dtype F16)
+        let x_data = vec![1.0f32, -1.0, 0.5, 2.0, 0.25, -0.5, 1.5, -2.0];
+        let x = Tensor::from_vec(x_data, (1, 8), &device)?.to_dtype(DType::F16)?;
+
+        let out = linear.forward(&x)?;
+        assert_eq!(out.dims(), &[1, 8]);
+
+        let out_f32 = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+
+        // Compute expected outputs using CPU baseline
         let expected_out = x
             .to_device(&Device::Cpu)?
             .reshape((1, 8))?
