@@ -25,3 +25,4 @@ target
 
 .vscode/
 .cuda_home
+*.md
