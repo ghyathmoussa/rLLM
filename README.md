@@ -31,6 +31,7 @@ What rLLM provides:
 - Full sampling options (top-k, top-p, min-p, temperature, penalties)
 - Llama-family model support
 - GGUF Quantization support for single-file model loading and CPU/GPU execution
+- AWQ & GPTQ 4-bit weight quantization support (optimized GPU CUDA kernels & CPU fallback)
 
 ---
 
@@ -46,6 +47,7 @@ What rLLM provides:
 - **Rich sampling** – Temperature, top-k, top-p, min-p, frequency/presence penalties, logit bias
 - **Llama support** – Optimized for Llama-family architectures (Llama 2/3, Mistral, etc.)
 - **GGUF support** – Direct single-file loading of pre-quantized GGUF models on CPU and GPU
+- **AWQ & GPTQ support** – High-performance 4-bit quantized inference via optimized fused CUDA kernels and CPU fallbacks
 
 ---
 
@@ -75,11 +77,14 @@ cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
 # Option D: Serve a pre-quantized GGUF model directly (CPU or GPU)
 cargo run --release --features cuda -- serve /path/to/llama-3.2-1b.gguf
 
+# Option E: Serve a pre-quantized AWQ model from Hugging Face on GPU
+cargo run --release --features cuda -- serve TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ --gpu-memory-utilization 0.3
+
 # In another terminal, send a request
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"meta-llama/Llama-3.2-1B-Instruct",
+    "model":"TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "messages":[{"role":"user","content":"Say hello"}],
     "max_tokens":16,
     "temperature":0

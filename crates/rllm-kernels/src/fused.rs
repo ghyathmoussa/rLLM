@@ -457,15 +457,15 @@ mod tests {
 
         unsafe fn upload(data: &[u16]) -> *mut u16 {
             let nbytes = data.len() * 2;
-            let ptr = gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16;
-            gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap();
+            let ptr = unsafe { gpu_alloc(nbytes).expect("gpu_alloc failed") as *mut u16 };
+            unsafe { gpu_memcpy_h2d(ptr as *mut u8, data.as_ptr() as *const u8, nbytes).unwrap(); }
             ptr
         }
 
         unsafe fn download(ptr: *mut u16, len: usize) -> Vec<u16> {
             let mut host = vec![0u16; len];
             let nbytes = len * 2;
-            gpu_memcpy_d2h(host.as_mut_ptr() as *mut u8, ptr as *const u8, nbytes).unwrap();
+            unsafe { gpu_memcpy_d2h(host.as_mut_ptr() as *mut u8, ptr as *const u8, nbytes).unwrap(); }
             host
         }
 

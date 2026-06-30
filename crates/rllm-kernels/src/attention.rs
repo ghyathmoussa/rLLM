@@ -1675,7 +1675,7 @@ mod tests {
     #[cfg(has_cuda)]
     mod with_cuda {
         use super::*;
-        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_to_device, gpu_memcpy_to_host};
+        use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_d2h, gpu_memcpy_h2d};
 
         #[test]
         fn decode_i8_matches_cpu_reference() {
@@ -1725,27 +1725,27 @@ mod tests {
             let out_dev = unsafe { gpu_alloc(head_dim * 2).unwrap() } as *mut u16;
 
             unsafe {
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     key_cache as *mut u8,
                     key_cache_host.as_ptr() as *const u8,
                     cache_elems,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     value_cache as *mut u8,
                     val_cache_host.as_ptr() as *const u8,
                     cache_elems,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(query as *mut u8, q_u16.as_ptr() as *const u8, head_dim * 2)
+                gpu_memcpy_h2d(query as *mut u8, q_u16.as_ptr() as *const u8, head_dim * 2)
                     .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     bt_dev as *mut u8,
                     block_tables.as_ptr() as *const u8,
                     block_tables.len() * 4,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     sl_dev as *mut u8,
                     seq_lens.as_ptr() as *const u8,
                     seq_lens.len() * 4,
@@ -1774,7 +1774,7 @@ mod tests {
 
             let mut out_u16 = vec![0u16; head_dim];
             unsafe {
-                gpu_memcpy_to_host(
+                gpu_memcpy_d2h(
                     out_u16.as_mut_ptr() as *mut u8,
                     out_dev as *const u8,
                     head_dim * 2,
@@ -1860,37 +1860,37 @@ mod tests {
             let out_dev = unsafe { gpu_alloc(num_tokens * head_dim * 2).unwrap() } as *mut u16;
 
             unsafe {
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     key_cache as *mut u8,
                     key_cache_host.as_ptr() as *const u8,
                     cache_elems,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     value_cache as *mut u8,
                     val_cache_host.as_ptr() as *const u8,
                     cache_elems,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     query as *mut u8,
                     q_u16.as_ptr() as *const u8,
                     num_tokens * head_dim * 2,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     bt_dev as *mut u8,
                     block_tables.as_ptr() as *const u8,
                     block_tables.len() * 4,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     sl_dev as *mut u8,
                     seq_lens.as_ptr() as *const u8,
                     seq_lens.len() * 4,
                 )
                 .unwrap();
-                gpu_memcpy_to_device(
+                gpu_memcpy_h2d(
                     qsl_dev as *mut u8,
                     query_start_loc.as_ptr() as *const u8,
                     query_start_loc.len() * 4,
@@ -1921,7 +1921,7 @@ mod tests {
 
             let mut out_u16 = vec![0u16; num_tokens * head_dim];
             unsafe {
-                gpu_memcpy_to_host(
+                gpu_memcpy_d2h(
                     out_u16.as_mut_ptr() as *mut u8,
                     out_dev as *const u8,
                     num_tokens * head_dim * 2,
