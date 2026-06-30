@@ -1727,13 +1727,13 @@ mod tests {
         assert_eq!(w_dequant.dims(), &[8, 8]);
 
         let w_vals = w_dequant.to_vec2::<f32>()?;
-        let expected_row = vec![-3.0, 1.0, -2.0, 2.0, -1.0, 3.0, 0.0, 4.0];
+        let expected_row = [-3.0, 1.0, -2.0, 2.0, -1.0, 3.0, 0.0, 4.0];
 
         // w_dequant has shape [out_features, in_features]
         // so w_vals[col][row] should be expected_row[col] (since all rows are identical)
         for col in 0..8 {
-            for row in 0..8 {
-                assert_eq!(w_vals[col][row], expected_row[col]);
+            for &val in &w_vals[col] {
+                assert_eq!(val, expected_row[col]);
             }
         }
 
