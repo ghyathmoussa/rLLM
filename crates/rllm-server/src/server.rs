@@ -481,7 +481,7 @@ async fn docs_handler() -> Html<&'static str> {
 }
 
 async fn openapi_handler() -> impl axum::response::IntoResponse {
-    ([(axum::http::header::CONTENT_TYPE, "text/yaml")], include_str!("../../../openapi.yaml"))
+    ([(axum::http::header::CONTENT_TYPE, "text/yaml")], include_str!("../openapi.yaml"))
 }
 
 async fn health_handler() -> Json<HealthResponse> {

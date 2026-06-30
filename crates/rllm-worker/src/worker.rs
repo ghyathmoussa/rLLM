@@ -166,32 +166,25 @@ impl Worker {
     }
 
     /// Execute one stateful forward step on the model for a single request.
+    #[cfg(feature = "candle-backend")]
     pub fn execute_model_step(
         &mut self,
         request_id: &rllm_core::ids::RequestId,
         input_tokens: &[u32],
         positions: &[usize],
     ) -> Result<Option<candle_core::Tensor>> {
-        #[cfg(feature = "candle-backend")]
-        {
-            let Some(model) = &self.candle_model else {
-                return Ok(None);
-            };
-            let kv_cache = self
-                .model_runner
-                .get_kv_cache_mut(request_id)
-                .ok_or_else(|| anyhow::anyhow!("request state not found for {:?}", request_id))?;
-            let device = model.device();
-            let input_ids =
-                candle_core::Tensor::new(input_tokens, device)?.reshape((1, input_tokens.len()))?;
-            let logits = model.forward(&input_ids, positions, kv_cache)?;
-            Ok(Some(logits))
-        }
-        #[cfg(not(feature = "candle-backend"))]
-        {
-            let _ = (request_id, input_tokens, positions);
-            Ok(None)
-        }
+        let Some(model) = &self.candle_model else {
+            return Ok(None);
+        };
+        let kv_cache = self
+            .model_runner
+            .get_kv_cache_mut(request_id)
+            .ok_or_else(|| anyhow::anyhow!("request state not found for {:?}", request_id))?;
+        let device = model.device();
+        let input_ids =
+            candle_core::Tensor::new(input_tokens, device)?.reshape((1, input_tokens.len()))?;
+        let logits = model.forward(&input_ids, positions, kv_cache)?;
+        Ok(Some(logits))
     }
 
     /// Determine free GPU memory (bytes) available right now.

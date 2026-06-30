@@ -1,10 +1,14 @@
 [package]
-name = "rllm"
+name = "rllm-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "rLLM: A Rust LLM inference engine inspired by vLLM"
+
+[[bin]]
+name = "rllm"
+path = "src/main.rs"
 
 [dependencies]
 rllm-core.workspace = true
@@ -52,7 +56,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -140,18 +144,18 @@ ciborium = "0.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Internal crates
-rllm-core = { path = "crates/rllm-core", version = "0.1.0" }
-rllm-quant = { path = "crates/rllm-quant", version = "0.1.0", default-features = false }
-rllm-tokenizer = { path = "crates/rllm-tokenizer", version = "0.1.0" }
-rllm-model = { path = "crates/rllm-model", version = "0.1.0" }
-rllm-kernels = { path = "crates/rllm-kernels", version = "0.1.0" }
-rllm-tensor = { path = "crates/rllm-tensor", version = "0.1.0" }
-rllm-cache = { path = "crates/rllm-cache", version = "0.1.0" }
-rllm-scheduler = { path = "crates/rllm-scheduler", version = "0.1.0" }
-rllm-sampling = { path = "crates/rllm-sampling", version = "0.1.0" }
-rllm-worker = { path = "crates/rllm-worker", version = "0.1.0" }
-rllm-executor = { path = "crates/rllm-executor", version = "0.1.0" }
-rllm-engine = { path = "crates/rllm-engine", version = "0.1.0" }
-rllm-server = { path = "crates/rllm-server", version = "0.1.0" }
-rllm-bench = { path = "crates/rllm-bench", version = "0.1.0" }
-rllm-metrics = { path = "crates/rllm-metrics", version = "0.1.0" }
+rllm-core = { path = "crates/rllm-core", version = "0.1.2" }
+rllm-quant = { path = "crates/rllm-quant", version = "0.1.2", default-features = false }
+rllm-tokenizer = { path = "crates/rllm-tokenizer", version = "0.1.2" }
+rllm-model = { path = "crates/rllm-model", version = "0.1.2" }
+rllm-kernels = { path = "crates/rllm-kernels", version = "0.1.2" }
+rllm-tensor = { path = "crates/rllm-tensor", version = "0.1.2" }
+rllm-cache = { path = "crates/rllm-cache", version = "0.1.2" }
+rllm-scheduler = { path = "crates/rllm-scheduler", version = "0.1.2" }
+rllm-sampling = { path = "crates/rllm-sampling", version = "0.1.2" }
+rllm-worker = { path = "crates/rllm-worker", version = "0.1.2" }
+rllm-executor = { path = "crates/rllm-executor", version = "0.1.2" }
+rllm-engine = { path = "crates/rllm-engine", version = "0.1.2" }
+rllm-server = { path = "crates/rllm-server", version = "0.1.2" }
+rllm-bench = { path = "crates/rllm-bench", version = "0.1.2" }
+rllm-metrics = { path = "crates/rllm-metrics", version = "0.1.2" }
