@@ -1774,12 +1774,8 @@ mod tests {
 
             let mut out_u16 = vec![0u16; head_dim];
             unsafe {
-                gpu_memcpy_d2h(
-                    out_u16.as_mut_ptr() as *mut u8,
-                    out_dev as *const u8,
-                    head_dim * 2,
-                )
-                .unwrap();
+                gpu_memcpy_d2h(out_u16.as_mut_ptr() as *mut u8, out_dev as *const u8, head_dim * 2)
+                    .unwrap();
             }
             let out_gpu: Vec<f32> =
                 out_u16.iter().map(|&b| half::f16::from_bits(b).to_f32()).collect();

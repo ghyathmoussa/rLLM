@@ -1152,16 +1152,11 @@ mod tests {
             unsafe {
                 cache_zero_sync(key_cache as *mut u8, cache_elems as i64).unwrap();
                 cache_zero_sync(value_cache as *mut u8, cache_elems as i64).unwrap();
-                gpu_memcpy_h2d(new_key as *mut u8, k_u16.as_ptr() as *const u8, elems * 2)
-                    .unwrap();
+                gpu_memcpy_h2d(new_key as *mut u8, k_u16.as_ptr() as *const u8, elems * 2).unwrap();
                 gpu_memcpy_h2d(new_value as *mut u8, v_u16.as_ptr() as *const u8, elems * 2)
                     .unwrap();
-                gpu_memcpy_h2d(
-                    slot_dev as *mut u8,
-                    slots.as_ptr() as *const u8,
-                    slots.len() * 8,
-                )
-                .unwrap();
+                gpu_memcpy_h2d(slot_dev as *mut u8, slots.as_ptr() as *const u8, slots.len() * 8)
+                    .unwrap();
 
                 cache_write_i8_sync(
                     key_cache,
