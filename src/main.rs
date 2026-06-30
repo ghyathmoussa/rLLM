@@ -5,11 +5,40 @@ use rllm_model::quantize::{GptqExportOptions, quantize_model_to_gptq};
 use rllm_server::cli::ServeArgs;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "rllm", version, about = "rLLM: Rust LLM inference engine")]
+#[command(
+    name = "rllm",
+    version,
+    about = "rLLM: A high-performance Rust LLM inference engine inspired by vLLM",
+    long_about = "rLLM is a high-performance Rust LLM inference engine designed for low-latency, \
+                  high-concurrency serving of decoder-only causal language models (Llama family). \
+                  It features PagedAttention, continuous batching, prefix caching, and CUDA \
+                  acceleration via Candle.\n\n\
+                  EXAMPLES:\n  \
+                    # Serve Llama model on GPU (CUDA)\n  \
+                    rllm serve meta-llama/Llama-3.2-1B-Instruct --dtype bf16\n\n  \
+                    # Serve Llama model with INT8 quantization\n  \
+                    rllm serve meta-llama/Llama-3.2-1B-Instruct --quantization int8 --quant-bits 8\n\n  \
+                    # Quantize a model to 4-bit GPTQ format\n  \
+                    rllm quantize meta-llama/Llama-3.2-1B-Instruct --output-dir ./quant-output --calibration-file calibration.txt"
+)]
 enum Cli {
     /// Serve a model via OpenAI-compatible HTTP API
+    ///
+    /// Starts an HTTP server hosting the specified Hugging Face model or local checkpoint.
+    /// The server exposes standard OpenAI-compatible endpoints like `/v1/chat/completions` and `/v1/models`,
+    /// as well as `/health` and Prometheus `/metrics`.
+    ///
+    /// EXAMPLE:
+    ///   rllm serve meta-llama/Llama-3.2-1B-Instruct --host 0.0.0.0 --port 8000
     Serve(ServeArgs),
+
     /// Quantize a model checkpoint to GPTQ format
+    ///
+    /// Runs post-training quantization (PTQ) on a model using calibration prompts to generate
+    /// a compressed checkpoint (e.g. 4-bit or 8-bit weights).
+    ///
+    /// EXAMPLE:
+    ///   rllm quantize meta-llama/Llama-3.2-1B-Instruct --output-dir ./quantized --calibration-file calibration.txt
     Quantize(QuantizeArgs),
 }
 
