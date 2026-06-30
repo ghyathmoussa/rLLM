@@ -2667,22 +2667,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rllm"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "clap",
- "rllm-core",
- "rllm-engine",
- "rllm-model",
- "rllm-server",
- "rllm-tokenizer",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rllm-bench"
 version = "0.1.1"
 dependencies = [
@@ -2726,6 +2710,22 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "rllm-cli"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rllm-core",
+ "rllm-engine",
+ "rllm-model",
+ "rllm-server",
+ "rllm-tokenizer",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
