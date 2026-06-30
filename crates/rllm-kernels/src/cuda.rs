@@ -63,6 +63,33 @@ mod ffi {
             num_groups: i64,
             group_size: i64,
         ) -> c_int;
+
+        pub fn rllm_awq_gemm_f16(
+            x: *const u16,
+            qweight: *const i32,
+            qzeros: *const i32,
+            scales: *const u16,
+            out: *mut u16,
+            m: i64,
+            in_features: i64,
+            out_features: i64,
+            num_groups: i64,
+            group_size: i64,
+            stream: usize,
+        ) -> c_int;
+
+        pub fn rllm_awq_gemm_f16_sync(
+            x: *const u16,
+            qweight: *const i32,
+            qzeros: *const i32,
+            scales: *const u16,
+            out: *mut u16,
+            m: i64,
+            in_features: i64,
+            out_features: i64,
+            num_groups: i64,
+            group_size: i64,
+        ) -> c_int;
     }
 }
 
@@ -228,6 +255,82 @@ pub unsafe fn gptq_gemm_f16_sync(
     check(rc)
 }
 
+// ── AWQ GEMM ────────────────────────────────────────────────────────────
+
+/// Launch async AWQ GEMM with FP16 activations/output and packed INT4 weights.
+///
+/// # Safety
+/// - All pointers must be valid CUDA device pointers.
+/// - `x` must contain `m * in_features` FP16 elements.
+/// - `qweight` must contain `in_features * (out_features / 8)` packed i32 words.
+/// - `qzeros` must contain `num_groups * (out_features / 8)` packed i32 words.
+/// - `scales` must contain `num_groups * out_features` FP16 elements.
+/// - `out` must contain `m * out_features` FP16 elements.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn awq_gemm_f16(
+    x: *const u16,
+    qweight: *const i32,
+    qzeros: *const i32,
+    scales: *const u16,
+    out: *mut u16,
+    m: i64,
+    in_features: i64,
+    out_features: i64,
+    num_groups: i64,
+    group_size: i64,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_awq_gemm_f16(
+            x,
+            qweight,
+            qzeros,
+            scales,
+            out,
+            m,
+            in_features,
+            out_features,
+            num_groups,
+            group_size,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Synchronous AWQ GEMM for testing/debugging.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn awq_gemm_f16_sync(
+    x: *const u16,
+    qweight: *const i32,
+    qzeros: *const i32,
+    scales: *const u16,
+    out: *mut u16,
+    m: i64,
+    in_features: i64,
+    out_features: i64,
+    num_groups: i64,
+    group_size: i64,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_awq_gemm_f16_sync(
+            x,
+            qweight,
+            qzeros,
+            scales,
+            out,
+            m,
+            in_features,
+            out_features,
+            num_groups,
+            group_size,
+        )
+    };
+    check(rc)
+}
+
 // ── Non-CUDA stubs ──────────────────────────────────────────────────────
 
 #[cfg(not(has_cuda))]
@@ -299,6 +402,39 @@ mod stubs {
         _qzeros: *const i32,
         _scales: *const u16,
         _g_idx: *const u32,
+        _out: *mut u16,
+        _m: i64,
+        _in_features: i64,
+        _out_features: i64,
+        _num_groups: i64,
+        _group_size: i64,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn awq_gemm_f16(
+        _x: *const u16,
+        _qweight: *const i32,
+        _qzeros: *const i32,
+        _scales: *const u16,
+        _out: *mut u16,
+        _m: i64,
+        _in_features: i64,
+        _out_features: i64,
+        _num_groups: i64,
+        _group_size: i64,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn awq_gemm_f16_sync(
+        _x: *const u16,
+        _qweight: *const i32,
+        _qzeros: *const i32,
+        _scales: *const u16,
         _out: *mut u16,
         _m: i64,
         _in_features: i64,
