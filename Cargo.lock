@@ -2780,6 +2780,7 @@ name = "rllm-kernels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "half",
  "libc",
  "rllm-core",
  "rllm-tensor",
