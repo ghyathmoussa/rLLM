@@ -211,13 +211,16 @@ fn load_linear(
 
         let in_features = qweight.dim(0)? * 8;
 
-        if let Some(rllm_core::config::QuantizationKind::AWQ) = config.quantization.as_ref().map(|q| q.kind) {
+        if let Some(rllm_core::config::QuantizationKind::AWQ) =
+            config.quantization.as_ref().map(|q| q.kind)
+        {
             Ok(Linear::new_awq(qweight, qzeros, scales, bits, group_size))
         } else {
             let g_idx = if let Some(g) = weights.weights.remove(&format!("{prefix}.g_idx")) {
                 g
             } else {
-                let g_idx_vec: Vec<u32> = (0..in_features).map(|r| (r / group_size) as u32).collect();
+                let g_idx_vec: Vec<u32> =
+                    (0..in_features).map(|r| (r / group_size) as u32).collect();
                 Tensor::from_vec(g_idx_vec, (in_features,), device)?
             };
             Ok(Linear::new_gptq(qweight, qzeros, scales, g_idx, bits, group_size))

@@ -482,23 +482,11 @@ impl Linear {
                 };
                 self.forward_fp(x, weight)
             }
-            LinearWeight::Awq {
-                qweight,
-                qzeros,
-                scales,
-                bits,
-                group_size,
-                dequantized,
-            } => {
+            LinearWeight::Awq { qweight, qzeros, scales, bits, group_size, dequantized } => {
                 #[cfg(feature = "cuda")]
-                if let Some(out) = self.try_forward_awq_cuda(
-                    x,
-                    qweight,
-                    qzeros,
-                    scales,
-                    *bits,
-                    *group_size,
-                )? {
+                if let Some(out) =
+                    self.try_forward_awq_cuda(x, qweight, qzeros, scales, *bits, *group_size)?
+                {
                     return Ok(out);
                 }
 
@@ -537,14 +525,7 @@ impl Linear {
                     Ok(dequantized.get().unwrap())
                 }
             }
-            LinearWeight::Awq {
-                qweight,
-                qzeros,
-                scales,
-                bits,
-                group_size,
-                dequantized,
-            } => {
+            LinearWeight::Awq { qweight, qzeros, scales, bits, group_size, dequantized } => {
                 if let Some(w) = dequantized.get() {
                     Ok(w)
                 } else {
