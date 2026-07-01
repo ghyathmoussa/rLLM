@@ -55,6 +55,17 @@ mod ffi {
             group_size: i64,
             stream: usize,
         ) -> c_int;
+
+        pub fn rllm_nvfp4_matmul_w4a16_f16(
+            x: *const u16,
+            qweight: *const u8,
+            scales: *const u16,
+            output: *mut u16,
+            rows: i64,
+            out_features: i64,
+            in_features: i64,
+            stream: usize,
+        ) -> c_int;
     }
 }
 
@@ -76,6 +87,7 @@ fn check(rc: i32) -> Result<(), CudaKernelError> {
 /// - `weight_scale` must have `out_features` f32 values.
 /// - `output` must have `rows * out_features` FP16 values.
 #[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn int8_matmul_w8a8_f16(
     x: *const u16,
     qweight: *const i8,
@@ -134,6 +146,7 @@ pub unsafe fn int8_matmul_w8a8_f16_sync(
 /// # Safety
 /// - All pointers must be valid CUDA device pointers.
 #[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn mxfp8_matmul_w8a16_f16(
     x: *const u16,
     qweight: *const i8,
@@ -166,6 +179,7 @@ pub unsafe fn mxfp8_matmul_w8a16_f16(
 /// # Safety
 /// - All pointers must be valid CUDA device pointers.
 #[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn mxfp4_matmul_w4a16_f16(
     x: *const u16,
     qweight: *const u8,
@@ -187,6 +201,37 @@ pub unsafe fn mxfp4_matmul_w4a16_f16(
             out_features,
             in_features,
             group_size,
+            stream,
+        )
+    };
+    check(rc)
+}
+
+/// Launch async NVFP4 matmul.
+///
+/// # Safety
+/// - All pointers must be valid CUDA device pointers.
+#[cfg(has_cuda)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn nvfp4_matmul_w4a16_f16(
+    x: *const u16,
+    qweight: *const u8,
+    scales: *const u16,
+    output: *mut u16,
+    rows: i64,
+    out_features: i64,
+    in_features: i64,
+    stream: usize,
+) -> Result<(), CudaKernelError> {
+    let rc = unsafe {
+        ffi::rllm_nvfp4_matmul_w4a16_f16(
+            x,
+            qweight,
+            scales,
+            output,
+            rows,
+            out_features,
+            in_features,
             stream,
         )
     };
@@ -281,6 +326,23 @@ mod stubs {
         _out_features: i64,
         _in_features: i64,
         _group_size: i64,
+        _stream: usize,
+    ) -> Result<(), CudaKernelError> {
+        Err(CudaKernelError::NotAvailable)
+    }
+
+    /// # Safety
+    /// Stub for non-CUDA builds: returns `NotAvailable` and never dereferences
+    /// any pointer. Signature mirrors the CUDA build for source compatibility.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn nvfp4_matmul_w4a16_f16(
+        _x: *const u16,
+        _qweight: *const u8,
+        _scales: *const u16,
+        _output: *mut u16,
+        _rows: i64,
+        _out_features: i64,
+        _in_features: i64,
         _stream: usize,
     ) -> Result<(), CudaKernelError> {
         Err(CudaKernelError::NotAvailable)

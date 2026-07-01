@@ -222,4 +222,61 @@ int32_t rllm_mxfp4_matmul_w4a16_f16(
     return 0;
 }
 
+__global__ void nvfp4_matmul_w4a16_f16_kernel(
+    const __half* __restrict__ x,
+    const uint8_t* __restrict__ qweight,
+    const __half* __restrict__ scales,
+    __half* __restrict__ output,
+    int64_t rows,
+    int64_t out_features,
+    int64_t in_features) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = rows * out_features;
+    if (idx >= total) return;
+
+    int64_t row = idx / out_features;
+    int64_t out = idx % out_features;
+    const __half* x_row = x + row * in_features;
+    const uint8_t* w_row = qweight + out * (in_features / 2);
+    int64_t num_groups = in_features / 16;
+    const __half* scale_row = scales + out * num_groups;
+
+    float acc = 0.0f;
+    for (int64_t g = 0; g < num_groups; ++g) {
+        float scale = __half2float(scale_row[g]);
+        #pragma unroll
+        for (int64_t k = 0; k < 16; ++k) {
+            int64_t col = g * 16 + k;
+            uint8_t byte = w_row[col / 2];
+            uint8_t code = (col % 2 == 0) ? (byte & 0x0F) : (byte >> 4);
+            float w_val = fp4_e2m1_to_float(code) * scale;
+            acc += __half2float(x_row[col]) * w_val;
+        }
+    }
+
+    output[idx] = __float2half_rn(acc);
+}
+
+int32_t rllm_nvfp4_matmul_w4a16_f16(
+    const __half* x,
+    const uint8_t* qweight,
+    const __half* scales,
+    __half* output,
+    int64_t rows,
+    int64_t out_features,
+    int64_t in_features,
+    cudaStream_t stream) {
+
+    if (rows <= 0 || out_features <= 0 || in_features <= 0) return 0;
+    int64_t total = rows * out_features;
+    int threads = 256;
+    int64_t blocks = (total + threads - 1) / threads;
+    nvfp4_matmul_w4a16_f16_kernel<<<blocks, threads, 0, stream>>>(
+        x, qweight, scales, output, rows, out_features, in_features);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
 } // extern "C"
