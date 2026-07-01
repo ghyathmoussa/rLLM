@@ -27,7 +27,10 @@ pub fn simulate_weight_quantization(weight: &Tensor, plan: &QuantizationPlan) ->
             let group_size = plan.group_size.unwrap_or(32);
             simulate_group_quant(&w_f32, group_size, 8)?
         }
-        QuantizedWeightFormat::Nvfp4 => simulate_uniform_quant(&w_f32, 4, true)?,
+        QuantizedWeightFormat::Nvfp4 => {
+            let group_size = plan.group_size.unwrap_or(16);
+            simulate_group_quant(&w_f32, group_size, 4)?
+        }
         QuantizedWeightFormat::Int8
         | QuantizedWeightFormat::Gptq
         | QuantizedWeightFormat::Awq
@@ -52,6 +55,7 @@ pub fn simulate_weight_quantization(weight: &Tensor, plan: &QuantizationPlan) ->
 }
 
 #[cfg(feature = "candle-backend")]
+#[allow(dead_code)]
 fn simulate_uniform_quant(weight: &Tensor, bits: u32, symmetric: bool) -> Result<Tensor> {
     let max_val = weight.flatten_all()?.max(0)?.to_scalar::<f32>()? as f64;
     let min_val = weight.flatten_all()?.min(0)?.to_scalar::<f32>()? as f64;
@@ -957,7 +961,7 @@ impl LlamaAttention {
                 seq_len,
                 self.num_heads * self.head_dim,
             ))?;
-            return self.o_proj.forward(&attn_output);
+            self.o_proj.forward(&attn_output)
         }
 
         // Non-CUDA fallback: use native attention

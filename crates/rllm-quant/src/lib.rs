@@ -9,6 +9,8 @@ pub mod method;
 #[cfg(feature = "candle-backend")]
 pub mod mxfp;
 #[cfg(feature = "candle-backend")]
+pub mod nvfp;
+#[cfg(feature = "candle-backend")]
 pub mod qtensor;
 #[cfg(feature = "candle-backend")]
 pub mod unquant;
@@ -21,6 +23,8 @@ pub use int8::{Int8Linear, Int8WeightOnlyFactory};
 pub use method::{LinearMethod, QuantMethodFactory, WeightSource, factory_from_config};
 #[cfg(feature = "candle-backend")]
 pub use mxfp::{MxfpLinear, MxfpWeightOnlyFactory};
+#[cfg(feature = "candle-backend")]
+pub use nvfp::{NvfpLinear, NvfpWeightOnlyFactory};
 #[cfg(feature = "candle-backend")]
 pub use qtensor::QuantTensor;
 pub use schema::QuantSchema;

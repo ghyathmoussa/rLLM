@@ -130,6 +130,10 @@ pub fn factory_from_config(
             let group_size = config.group_size.unwrap_or(32);
             Ok(Box::new(crate::mxfp::MxfpWeightOnlyFactory::new(bits, group_size)))
         }
+        QuantizationKind::NVFP4 => {
+            let group_size = config.group_size.unwrap_or(16);
+            Ok(Box::new(crate::nvfp::NvfpWeightOnlyFactory::new(group_size)))
+        }
         QuantizationKind::Gguf => Ok(Box::new(crate::gguf::GgufMethodFactory)),
         other => bail!("quantization kind {other:?} is not implemented by rllm-quant yet"),
     }
