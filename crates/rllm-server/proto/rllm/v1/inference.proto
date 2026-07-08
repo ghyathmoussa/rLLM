@@ -1,0 +1,140 @@
+syntax = "proto3";
+
+package rllm.v1;
+
+service InferenceService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc ListModels(ListModelsRequest) returns (ModelListResponse);
+  rpc ChatCompletion(ChatCompletionRequest) returns (ChatCompletionResponse);
+  rpc StreamChatCompletion(ChatCompletionRequest) returns (stream ChatCompletionChunk);
+  rpc Completion(CompletionRequest) returns (CompletionResponse);
+  rpc StreamCompletion(CompletionRequest) returns (stream CompletionChunk);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+}
+
+message ListModelsRequest {}
+
+message ModelListResponse {
+  string object = 1;
+  repeated ModelInfo data = 2;
+}
+
+message ModelInfo {
+  string id = 1;
+  string object = 2;
+  uint64 created = 3;
+  string owned_by = 4;
+}
+
+message ChatMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message ChatCompletionRequest {
+  string model = 1;
+  repeated ChatMessage messages = 2;
+  optional float temperature = 3;
+  optional float top_p = 4;
+  optional uint32 max_tokens = 5;
+  repeated string stop = 6;
+  optional uint32 n = 7;
+  optional bool logprobs = 8;
+  optional uint32 top_logprobs = 9;
+  optional float presence_penalty = 10;
+  optional float frequency_penalty = 11;
+  optional uint64 seed = 12;
+}
+
+message ChatCompletionResponse {
+  string id = 1;
+  string object = 2;
+  uint64 created = 3;
+  string model = 4;
+  repeated ChatChoice choices = 5;
+  UsageInfo usage = 6;
+  optional double generation_time = 7;
+}
+
+message ChatChoice {
+  uint32 index = 1;
+  ChatResponseMessage message = 2;
+  optional string finish_reason = 3;
+}
+
+message ChatResponseMessage {
+  string role = 1;
+  string content = 2;
+}
+
+message ChatCompletionChunk {
+  string id = 1;
+  string object = 2;
+  uint64 created = 3;
+  string model = 4;
+  repeated ChunkChoice choices = 5;
+  optional double generation_time = 6;
+}
+
+message ChunkChoice {
+  uint32 index = 1;
+  ChunkDelta delta = 2;
+  optional string finish_reason = 3;
+}
+
+message ChunkDelta {
+  optional string role = 1;
+  optional string content = 2;
+}
+
+message CompletionRequest {
+  string model = 1;
+  string prompt = 2;
+  optional float temperature = 3;
+  optional float top_p = 4;
+  optional uint32 max_tokens = 5;
+  repeated string stop = 6;
+  optional uint32 n = 7;
+  optional uint32 logprobs = 8;
+  optional float presence_penalty = 9;
+  optional float frequency_penalty = 10;
+  optional uint64 seed = 11;
+}
+
+message CompletionResponse {
+  string id = 1;
+  string object = 2;
+  uint64 created = 3;
+  string model = 4;
+  repeated CompletionChoice choices = 5;
+  UsageInfo usage = 6;
+  optional double generation_time = 7;
+}
+
+message CompletionChoice {
+  uint32 index = 1;
+  string text = 2;
+  optional string finish_reason = 3;
+}
+
+message CompletionChunk {
+  string id = 1;
+  string object = 2;
+  uint64 created = 3;
+  string model = 4;
+  repeated CompletionChoice choices = 5;
+  UsageInfo usage = 6;
+  bool finished = 7;
+  optional double generation_time = 8;
+}
+
+message UsageInfo {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+}

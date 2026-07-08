@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cli;
+pub mod grpc;
 pub mod openai;
 pub mod server;
 

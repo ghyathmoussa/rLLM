@@ -27,6 +27,9 @@ tracing-subscriber.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 async-stream.workspace = true
 tokio-stream.workspace = true
 clap.workspace = true
@@ -51,3 +54,7 @@ cuda = [
 [dev-dependencies]
 rllm-metrics.workspace = true
 tower.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
+protoc-bin-vendored.workspace = true

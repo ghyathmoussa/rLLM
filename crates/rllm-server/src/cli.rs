@@ -95,6 +95,18 @@ pub struct ServeArgs {
     /// KV Cache data type (auto, f16, bf16, fp8_e4m3, fp8_e5m2, int8)
     #[arg(long, default_value = "auto")]
     pub kv_cache_dtype: String,
+
+    /// Enable gRPC inference API alongside HTTP
+    #[arg(long, default_value_t = false)]
+    pub enable_grpc: bool,
+
+    /// gRPC host to bind to (defaults to --host)
+    #[arg(long)]
+    pub grpc_host: Option<String>,
+
+    /// gRPC port to bind to
+    #[arg(long, default_value_t = 50051)]
+    pub grpc_port: u16,
 }
 
 fn parse_gpu_utilization(s: &str) -> Result<f32, String> {
