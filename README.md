@@ -22,10 +22,11 @@ rLLM is an LLM inference engine built in Rust. It leverages Rust's memory safety
 
 What rLLM provides:
 - OpenAI-compatible HTTP API (drop-in replacement for OpenAI clients)
+- Optional gRPC inference API on a separate port
 - PagedAttention for efficient KV cache management
 - Continuous batching for high throughput
 - Prefix caching for shared prompt prefixes
-- Token streaming via Server-Sent Events
+- Token streaming via Server-Sent Events and gRPC server streaming
 - CUDA-accelerated inference via Candle framework
 - Prometheus metrics for monitoring
 - Full sampling options (top-k, top-p, min-p, temperature, penalties)
@@ -38,10 +39,11 @@ What rLLM provides:
 ## Key Features
 
 - **OpenAI-compatible API** – Drop-in replacement for existing OpenAI client code
+- **gRPC API** – Optional tonic/protobuf inference service for low-overhead service-to-service calls
 - **PagedAttention** – Efficient memory management for KV cache, enabling larger batch sizes
 - **Continuous batching** – Dynamically add/remove requests between iterations
 - **Prefix caching** – Automatic caching and reuse of common prompt prefixes
-- **Streaming** – Token-by-token streaming via Server-Sent Events (SSE)
+- **Streaming** – Token-by-token streaming via Server-Sent Events (SSE) and gRPC server streams
 - **CUDA acceleration** – GPU-accelerated inference via the Candle ML framework
 - **Prometheus metrics** – Built-in monitoring: TTFT, TPOT, request rate, token throughput
 - **Rich sampling** – Temperature, top-k, top-p, min-p, frequency/presence penalties, logit bias
@@ -80,7 +82,16 @@ cargo run --release --features cuda -- serve /path/to/llama-3.2-1b.gguf
 # Option E: Serve a pre-quantized AWQ model from Hugging Face on GPU
 cargo run --release --features cuda -- serve TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ --gpu-memory-utilization 0.3
 
-# In another terminal, send a request
+# Option F: Serve REST and gRPC at the same time on different ports
+cargo run --release --features cuda -- serve meta-llama/Llama-3.2-1B-Instruct \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --enable-grpc \
+  --grpc-host 127.0.0.1 \
+  --grpc-port 50051 \
+  --dtype bf16
+
+# In another terminal, send a REST request
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -89,6 +100,12 @@ curl http://localhost:8000/v1/chat/completions \
     "max_tokens":16,
     "temperature":0
   }'
+
+# In another terminal, send a gRPC request using the generated tonic client example
+cargo run --release --features cuda -p rllm-server --example grpc_client -- \
+  --addr http://127.0.0.1:50051 \
+  --concurrency 4 \
+  --prompt 'Say hello from gRPC'
 ```
 
 ---
@@ -209,7 +226,10 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 |----------|---------|-------------|
 | `model` | (required) | Hugging Face model ID or local path |
 | `--host` | `0.0.0.0` | Host to bind to |
-| `--port` | `8000` | Port to bind to |
+| `--port` | `8000` | HTTP REST port to bind to |
+| `--enable-grpc` | `false` | Enable the gRPC inference API alongside REST |
+| `--grpc-host` | (same as `--host`) | gRPC host to bind to |
+| `--grpc-port` | `50051` | gRPC port to bind to |
 | `--dtype` | `auto` | Data type (`auto`, `fp16`, `bf16`, `fp32`) |
 | `--quantization` | `auto` | Quantization format (`auto`, `none`, `fp8`, `mxfp8`, `mxfp4`, `nvfp4`, `int8`, `int4`, `gguf`, `gptq`, `awq`, `compressed-tensors`, `modelopt`, `torchao`) |
 | `--quant-bits` | (none) | Quantization bit width, such as `8` for INT8 |
@@ -232,7 +252,7 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 
 ## API Reference
 
-### Endpoints
+### REST endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -242,7 +262,22 @@ We provide multi-stage, optimized Docker builds for CPU-only and GPU-accelerated
 | `POST` | `/v1/chat/completions` | Chat completions |
 | `POST` | `/v1/completions` | Text completions |
 
-### Streaming example
+### gRPC service
+
+Enable gRPC with `--enable-grpc`. REST and gRPC share the same loaded model and engine, but listen on separate ports.
+
+| RPC | Description |
+|-----|-------------|
+| `Health` | Health check |
+| `ListModels` | List available models |
+| `ChatCompletion` | Unary chat completion |
+| `StreamChatCompletion` | Streaming chat completion |
+| `Completion` | Unary text completion |
+| `StreamCompletion` | Streaming text completion |
+
+The protobuf definition lives at `crates/rllm-server/proto/rllm/v1/inference.proto`. If `--api-key` or `RLLM_API_KEY` is set, gRPC accepts either `authorization: Bearer <key>` or `x-api-key: <key>` metadata.
+
+### REST streaming example
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -253,6 +288,15 @@ curl http://localhost:8000/v1/chat/completions \
     "stream": true,
     "max_tokens": 32
   }'
+```
+
+### gRPC completion example
+
+```bash
+cargo run --release --features cuda -p rllm-server --example grpc_client -- \
+  --addr http://127.0.0.1:50051 \
+  --concurrency 4 \
+  --prompt 'Count to 5'
 ```
 
 ---
