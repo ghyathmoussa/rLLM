@@ -26,18 +26,19 @@ use rllm_tokenizer::{pool::AsyncTokenizerPool, tokenizer::Tokenizer};
 use rllm_worker::Worker;
 use serde::Serialize;
 use tokio::net::TcpListener;
+use tonic::transport::Server as GrpcServer;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{auth, cli::ServeArgs, openai::*};
+use crate::{auth, cli::ServeArgs, grpc, openai::*};
 
 const BLOCK_SIZE: usize = 16;
 
 #[derive(Clone)]
 #[allow(dead_code)]
-struct ModelRuntime {
-    engine: Arc<AsyncLLMEngine>,
-    tokenizer: Arc<AsyncTokenizerPool>,
+pub(crate) struct ModelRuntime {
+    pub(crate) engine: Arc<AsyncLLMEngine>,
+    pub(crate) tokenizer: Arc<AsyncTokenizerPool>,
     model_dir: String,
     architecture: String,
     device: String,
@@ -108,6 +109,22 @@ impl AppState {
             max_input_messages,
         }
     }
+
+    pub(crate) fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    pub(crate) fn runtime(&self) -> Option<ModelRuntime> {
+        self.runtime.clone()
+    }
+
+    pub(crate) fn max_input_messages(&self) -> usize {
+        self.max_input_messages
+    }
+
+    pub(crate) fn request_timeout_secs(&self) -> u64 {
+        self.request_timeout_secs
+    }
 }
 
 /// Build the router with all routes and middleware.
@@ -169,14 +186,30 @@ pub async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         args.request_timeout_secs,
         args.max_input_messages,
     );
-    let app = build_router(state);
+    let app = build_router(state.clone());
 
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("Listening on {}", addr);
     tracing::info!("OpenAI-compatible docs available at http://{}/docs", addr);
 
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    let http_server = axum::serve(listener, app);
+
+    if args.enable_grpc {
+        let grpc_host = args.grpc_host.as_deref().unwrap_or(&args.host);
+        let grpc_addr = format!("{}:{}", grpc_host, args.grpc_port).parse()?;
+        let grpc_service = grpc::pb::inference_service_server::InferenceServiceServer::new(
+            grpc::GrpcInferenceService::new(state),
+        );
+        tracing::info!("gRPC inference API listening on {}", grpc_addr);
+
+        tokio::select! {
+            result = http_server => result?,
+            result = GrpcServer::builder().add_service(grpc_service).serve(grpc_addr) => result?,
+        }
+    } else {
+        http_server.await?;
+    }
 
     Ok(())
 }
@@ -793,14 +826,14 @@ async fn completions_handler(
     }
 }
 
-struct EngineCompletion {
-    text: String,
-    usage: UsageInfo,
-    finish_reason: String,
-    generation_time: f64,
+pub(crate) struct EngineCompletion {
+    pub(crate) text: String,
+    pub(crate) usage: UsageInfo,
+    pub(crate) finish_reason: String,
+    pub(crate) generation_time: f64,
 }
 
-async fn run_text_completion(
+pub(crate) async fn run_text_completion(
     runtime: ModelRuntime,
     req: CompletionRequest,
     timeout: Duration,
@@ -820,7 +853,7 @@ async fn run_text_completion(
     submit_and_collect(runtime, Some(prompt), token_ids, sampling_params, timeout).await
 }
 
-async fn submit_and_collect(
+pub(crate) async fn submit_and_collect(
     runtime: ModelRuntime,
     prompt: Option<String>,
     token_ids: Vec<u32>,
@@ -905,7 +938,7 @@ fn serialize_sse<T: Serialize>(v: &T) -> String {
     })
 }
 
-fn finish_reason_to_openai(reason: FinishReason) -> String {
+pub(crate) fn finish_reason_to_openai(reason: FinishReason) -> String {
     match reason {
         FinishReason::Stop => "stop",
         FinishReason::Length => "length",
