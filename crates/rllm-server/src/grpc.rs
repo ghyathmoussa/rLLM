@@ -601,7 +601,7 @@ fn _finish_reason_to_proto(reason: FinishReason) -> String {
 mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
     use tokio_stream::StreamExt;
-    use tonic::Code;
+    use tonic::{Code, transport::Server};
 
     use super::*;
 
@@ -610,6 +610,58 @@ mod tests {
         let mut state = AppState::new("test-model".to_string(), recorder.handle());
         state.api_key = api_key.map(ToOwned::to_owned);
         state
+    }
+
+    async fn spawn_local_grpc_server()
+    -> (String, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = pb::inference_service_server::InferenceServiceServer::new(
+            GrpcInferenceService::new(test_state(None)),
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _addr)) => yield Ok::<_, std::io::Error>(stream),
+                    Err(error) => {
+                        yield Err(error);
+                        break;
+                    }
+                }
+            }
+        };
+
+        let handle = tokio::spawn(async move {
+            let result = Server::builder()
+                .add_service(service)
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+            if let Err(error) = result {
+                panic!("local gRPC server failed: {error}");
+            }
+        });
+
+        (format!("http://{addr}"), shutdown_tx, handle)
+    }
+
+    fn chat_request(content: impl Into<String>) -> pb::ChatCompletionRequest {
+        pb::ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![pb::ChatMessage { role: "user".to_string(), content: content.into() }],
+            temperature: None,
+            top_p: None,
+            max_tokens: Some(4),
+            stop: vec![],
+            n: None,
+            logprobs: None,
+            top_logprobs: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            seed: None,
+        }
     }
 
     #[tokio::test]
@@ -634,23 +686,7 @@ mod tests {
     async fn chat_completion_uses_placeholder_without_runtime() {
         let service = GrpcInferenceService::new(test_state(None));
         let response = service
-            .chat_completion(Request::new(pb::ChatCompletionRequest {
-                model: "test-model".to_string(),
-                messages: vec![pb::ChatMessage {
-                    role: "user".to_string(),
-                    content: "hello".to_string(),
-                }],
-                temperature: None,
-                top_p: None,
-                max_tokens: Some(4),
-                stop: vec![],
-                n: None,
-                logprobs: None,
-                top_logprobs: None,
-                presence_penalty: None,
-                frequency_penalty: None,
-                seed: None,
-            }))
+            .chat_completion(Request::new(chat_request("hello")))
             .await
             .unwrap()
             .into_inner();
@@ -686,5 +722,42 @@ mod tests {
         assert!(chunk.finished);
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn local_grpc_server_handles_concurrent_chat_requests() {
+        let (endpoint, shutdown, server_handle) = spawn_local_grpc_server().await;
+
+        let mut client =
+            pb::inference_service_client::InferenceServiceClient::connect(endpoint.clone())
+                .await
+                .unwrap();
+        let health = client.health(pb::HealthRequest {}).await.unwrap().into_inner();
+        assert_eq!(health.status, "ok");
+
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let endpoint = endpoint.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut client =
+                    pb::inference_service_client::InferenceServiceClient::connect(endpoint)
+                        .await
+                        .unwrap();
+                let response = client
+                    .chat_completion(chat_request(format!("hello {index}")))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                assert_eq!(response.object, "chat.completion");
+                assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let _ = shutdown.send(());
+        server_handle.await.unwrap();
     }
 }

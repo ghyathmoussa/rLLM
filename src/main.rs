@@ -30,7 +30,7 @@ enum Cli {
     ///
     /// EXAMPLE:
     ///   rllm serve meta-llama/Llama-3.2-1B-Instruct --host 0.0.0.0 --port 8000
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
 
     /// Quantize a model checkpoint to GPTQ format
     ///
@@ -39,7 +39,7 @@ enum Cli {
     ///
     /// EXAMPLE:
     ///   rllm quantize meta-llama/Llama-3.2-1B-Instruct --output-dir ./quantized --calibration-file calibration.txt
-    Quantize(QuantizeArgs),
+    Quantize(Box<QuantizeArgs>),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
                 port = %args.port,
                 "Starting rLLM server"
             );
-            rllm_server::server::serve(args).await?;
+            rllm_server::server::serve(*args).await?;
         }
         Cli::Quantize(args) => {
             let prompts = load_calibration_prompts(&args.calibration_file)?;
