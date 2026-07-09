@@ -29,6 +29,11 @@ struct HfConfigJson {
     head_dim: Option<usize>,
     hidden_act: Option<String>,
     rms_norm_eps: Option<f64>,
+    q_lora_rank: Option<usize>,
+    kv_lora_rank: Option<usize>,
+    n_routed_experts: Option<usize>,
+    n_shared_experts: Option<usize>,
+    num_experts_per_tok: Option<usize>,
     quantization_config: Option<serde_json::Value>,
 }
 
@@ -40,10 +45,14 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
 
     let architecture = hf
         .architectures
-        .and_then(|a| a.into_iter().next())
-        .or(hf.model_type)
+        .as_ref()
+        .and_then(|a| a.first())
+        .cloned()
+        .or_else(|| hf.model_type.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let architecture = normalize_architecture(&architecture);
+
+    reject_unsupported_deepseek_native_architecture(&architecture, &hf)?;
 
     let hidden_size = hf.hidden_size.unwrap_or(4096);
     let num_attention_heads = hf.num_attention_heads.unwrap_or(32);
@@ -138,7 +147,7 @@ fn validate_config(
         );
     }
     match architecture {
-        "LlamaForCausalLM" | "MistralForCausalLM" => Ok(()),
+        "LlamaForCausalLM" | "MistralForCausalLM" | "DeepseekForCausalLM" => Ok(()),
         _ => {
             tracing::warn!(
                 "unsupported architecture '{architecture}', attempting Llama-compatible loading"
@@ -152,8 +161,36 @@ fn normalize_architecture(architecture: &str) -> String {
     match architecture {
         "llama" | "LlamaModel" | "LLaMAForCausalLM" => "LlamaForCausalLM".to_string(),
         "mistral" | "MistralModel" => "MistralForCausalLM".to_string(),
+        "deepseek" | "deepseek_llm" | "DeepSeekForCausalLM" => "DeepseekForCausalLM".to_string(),
         other => other.to_string(),
     }
+}
+
+fn reject_unsupported_deepseek_native_architecture(
+    architecture: &str,
+    hf: &HfConfigJson,
+) -> Result<()> {
+    let arch_lower = architecture.to_ascii_lowercase();
+    let model_type = hf.model_type.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let has_mla = hf.q_lora_rank.is_some() || hf.kv_lora_rank.is_some();
+    let has_moe = hf.n_routed_experts.is_some()
+        || hf.n_shared_experts.is_some()
+        || hf.num_experts_per_tok.is_some();
+    let is_native_deepseek = arch_lower.contains("deepseekv2")
+        || arch_lower.contains("deepseekv3")
+        || model_type.contains("deepseek_v2")
+        || model_type.contains("deepseek_v3");
+
+    if is_native_deepseek || has_mla || has_moe {
+        anyhow::bail!(
+            "unsupported DeepSeek native MLA/MoE architecture '{architecture}': \
+             rLLM currently supports Llama-compatible dense DeepSeek checkpoints \
+             (DeepseekForCausalLM) only; native DeepSeek V2/V3/R1 checkpoints require \
+             MLA attention, MLA KV-cache metadata, and DeepSeekMoE execution support"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -267,6 +304,52 @@ mod tests {
         );
         let config = parse_hf_config(f.path()).unwrap();
         assert_eq!(config.architecture, "LlamaForCausalLM");
+    }
+
+    #[test]
+    fn accepts_dense_deepseek_as_llama_compatible() {
+        let f = write_config_json(
+            r#"{
+                "architectures": ["DeepseekForCausalLM"],
+                "vocab_size": 102400,
+                "hidden_size": 4096,
+                "intermediate_size": 11008,
+                "num_hidden_layers": 30,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 32,
+                "max_position_embeddings": 4096,
+                "rope_theta": 10000.0,
+                "torch_dtype": "bfloat16"
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        assert_eq!(config.architecture, "DeepseekForCausalLM");
+        assert_eq!(config.vocab_size, 102400);
+        assert_eq!(config.num_layers, 30);
+        assert_eq!(config.dtype, DType::BF16);
+    }
+
+    #[test]
+    fn rejects_native_deepseek_mla_moe_config() {
+        let f = write_config_json(
+            r#"{
+                "architectures": ["DeepseekV2ForCausalLM"],
+                "model_type": "deepseek_v2",
+                "vocab_size": 102400,
+                "hidden_size": 2048,
+                "intermediate_size": 10944,
+                "num_hidden_layers": 27,
+                "num_attention_heads": 16,
+                "q_lora_rank": 1536,
+                "kv_lora_rank": 512,
+                "n_routed_experts": 64,
+                "n_shared_experts": 2,
+                "num_experts_per_tok": 6,
+                "max_position_embeddings": 163840
+            }"#,
+        );
+        let err = parse_hf_config(f.path()).unwrap_err().to_string();
+        assert!(err.contains("unsupported DeepSeek native MLA/MoE architecture"));
     }
 
     #[test]

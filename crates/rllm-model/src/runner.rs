@@ -128,7 +128,7 @@ impl ModelRunner {
         );
 
         let model = match config.architecture.as_str() {
-            "LlamaForCausalLM" | "MistralForCausalLM" => {
+            "LlamaForCausalLM" | "MistralForCausalLM" | "DeepseekForCausalLM" => {
                 LlamaForCausalLM::from_weights(config, weight_map)?
             }
             arch => anyhow::bail!("unsupported architecture: {arch}"),
