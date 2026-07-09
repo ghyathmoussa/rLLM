@@ -31,18 +31,16 @@ impl GrpcInferenceService {
         Self { state }
     }
 
-    fn authorize<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        let Some(expected) = self.state.api_key.as_deref() else {
-            return Ok(());
-        };
+    fn auth_error<T>(&self, request: &Request<T>) -> Option<Status> {
+        let expected = self.state.api_key.as_deref()?;
 
         if metadata_value_matches(request.metadata(), "x-api-key", expected)
             || bearer_matches(request.metadata(), expected)
         {
-            return Ok(());
+            return None;
         }
 
-        Err(Status::unauthenticated("missing or invalid API key"))
+        Some(Status::unauthenticated("missing or invalid API key"))
     }
 }
 
@@ -64,7 +62,9 @@ impl InferenceService for GrpcInferenceService {
         &self,
         request: Request<pb::ListModelsRequest>,
     ) -> Result<Response<pb::ModelListResponse>, Status> {
-        self.authorize(&request)?;
+        if let Some(status) = self.auth_error(&request) {
+            return Err(status);
+        }
         let now = now_timestamp();
         Ok(Response::new(pb::ModelListResponse {
             object: "list".to_string(),
@@ -81,7 +81,9 @@ impl InferenceService for GrpcInferenceService {
         &self,
         request: Request<pb::ChatCompletionRequest>,
     ) -> Result<Response<pb::ChatCompletionResponse>, Status> {
-        self.authorize(&request)?;
+        if let Some(status) = self.auth_error(&request) {
+            return Err(status);
+        }
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
@@ -116,7 +118,9 @@ impl InferenceService for GrpcInferenceService {
         &self,
         request: Request<pb::ChatCompletionRequest>,
     ) -> Result<Response<Self::StreamChatCompletionStream>, Status> {
-        self.authorize(&request)?;
+        if let Some(status) = self.auth_error(&request) {
+            return Err(status);
+        }
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
@@ -224,7 +228,9 @@ impl InferenceService for GrpcInferenceService {
         &self,
         request: Request<pb::CompletionRequest>,
     ) -> Result<Response<pb::CompletionResponse>, Status> {
-        self.authorize(&request)?;
+        if let Some(status) = self.auth_error(&request) {
+            return Err(status);
+        }
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
@@ -250,7 +256,9 @@ impl InferenceService for GrpcInferenceService {
         &self,
         request: Request<pb::CompletionRequest>,
     ) -> Result<Response<Self::StreamCompletionStream>, Status> {
-        self.authorize(&request)?;
+        if let Some(status) = self.auth_error(&request) {
+            return Err(status);
+        }
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
