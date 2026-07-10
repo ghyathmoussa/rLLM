@@ -54,3 +54,6 @@ optional = true
 [dependencies.candle-transformers]
 workspace = true
 optional = true
+
+[dependencies.float8]
+workspace = true

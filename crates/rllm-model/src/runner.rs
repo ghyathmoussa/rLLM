@@ -6,6 +6,8 @@ use candle_core::Device;
 use rllm_core::config::{ModelConfig, QuantizationKind};
 
 #[cfg(feature = "candle-backend")]
+use crate::deepseek::DeepseekForCausalLM;
+#[cfg(feature = "candle-backend")]
 use crate::hf_config;
 #[cfg(feature = "candle-backend")]
 use crate::llama::LlamaForCausalLM;
@@ -127,14 +129,23 @@ impl ModelRunner {
             "model weights loaded into memory"
         );
 
-        let model = match config.architecture.as_str() {
+        let model: Box<dyn CausalLM> = match config.architecture.as_str() {
             "LlamaForCausalLM" | "MistralForCausalLM" | "DeepseekForCausalLM" => {
-                LlamaForCausalLM::from_weights(config, weight_map)?
+                Box::new(LlamaForCausalLM::from_weights(config, weight_map)?)
             }
+            "DeepseekV2ForCausalLM" => {
+                let deepseek_config =
+                    DeepseekForCausalLM::parse_config(&model_dir.join("config.json"))?;
+                Box::new(DeepseekForCausalLM::from_weights(config, deepseek_config, weight_map)?)
+            }
+            "DeepseekV3ForCausalLM" => anyhow::bail!(
+                "DeepSeek V3 GPU MoE is available, but full MLA decoder wiring and distributed \
+                 checkpoint sharding are not implemented yet"
+            ),
             arch => anyhow::bail!("unsupported architecture: {arch}"),
         };
 
-        Ok(Self { model: Box::new(model), device })
+        Ok(Self { model, device })
     }
 
     pub fn config(&self) -> &ModelConfig {

@@ -88,6 +88,7 @@ impl ModelRegistry {
             reg.register("LlamaForCausalLM", crate::llama::LlamaForCausalLM::factory);
             reg.register("MistralForCausalLM", crate::llama::LlamaForCausalLM::factory);
             reg.register("DeepseekForCausalLM", crate::llama::LlamaForCausalLM::factory);
+            reg.register("DeepseekV2ForCausalLM", crate::deepseek::DeepseekForCausalLM::factory);
         }
         reg
     }
