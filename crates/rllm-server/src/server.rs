@@ -263,8 +263,6 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.quantization =
             parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size)?;
     }
-    validate_deepseek_runtime(&model_config, args)?;
-
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
     let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);
@@ -466,35 +464,13 @@ fn kv_cache_config(model_config: &ModelConfig, args: &ServeArgs) -> KVCacheConfi
         num_blocks: num_cache_blocks(args, model_config.max_model_len),
         spec: KVCacheSpec {
             block_size: BLOCK_SIZE,
-            // Native DeepSeek V2 currently owns its sequential attention cache inside
-            // the model. Do not duplicate it as a dense paged K/V allocation.
-            num_layers: if model_config.architecture == "DeepseekV2ForCausalLM" {
-                0
-            } else {
-                model_config.num_layers
-            },
+            num_layers: model_config.num_layers,
             num_kv_heads: model_config.num_kv_heads,
             head_dim: model_config.head_dim,
             dtype: cache_dtype,
             sliding_window: None,
         },
     }
-}
-
-fn validate_deepseek_runtime(model_config: &ModelConfig, args: &ServeArgs) -> Result<()> {
-    if model_config.architecture != "DeepseekV2ForCausalLM" {
-        return Ok(());
-    }
-    if args.max_num_seqs != 1 {
-        anyhow::bail!(
-            "native DeepSeek V2 MLA/MoE currently requires --max-num-seqs 1; \
-             paged MLA cache batching is not implemented"
-        );
-    }
-    if args.enable_prefix_caching {
-        anyhow::bail!("native DeepSeek V2 MLA/MoE does not support --enable-prefix-caching yet");
-    }
-    Ok(())
 }
 
 fn num_cache_blocks(args: &ServeArgs, max_model_len: usize) -> usize {

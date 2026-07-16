@@ -133,15 +133,11 @@ impl ModelRunner {
             "LlamaForCausalLM" | "MistralForCausalLM" | "DeepseekForCausalLM" => {
                 Box::new(LlamaForCausalLM::from_weights(config, weight_map)?)
             }
-            "DeepseekV2ForCausalLM" => {
+            "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "DeepseekR1ForCausalLM" => {
                 let deepseek_config =
                     DeepseekForCausalLM::parse_config(&model_dir.join("config.json"))?;
                 Box::new(DeepseekForCausalLM::from_weights(config, deepseek_config, weight_map)?)
             }
-            "DeepseekV3ForCausalLM" => anyhow::bail!(
-                "DeepSeek V3 GPU MoE is available, but full MLA decoder wiring and distributed \
-                 checkpoint sharding are not implemented yet"
-            ),
             arch => anyhow::bail!("unsupported architecture: {arch}"),
         };
 

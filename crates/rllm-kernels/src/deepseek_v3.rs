@@ -34,6 +34,13 @@ mod ffi {
 
 #[cfg(has_cuda)]
 #[allow(clippy::too_many_arguments)]
+/// Launch selected-expert FP8 GEMM on a CUDA stream.
+///
+/// # Safety
+///
+/// All pointers must reference device allocations large enough for the shapes
+/// described by the dimension arguments and remain valid until the stream has
+/// completed the asynchronous kernel.
 pub unsafe fn fp8_selected_expert_matmul_f16(
     x: *const u16,
     expert_ids: *const u32,
@@ -71,6 +78,11 @@ pub unsafe fn fp8_selected_expert_matmul_f16(
 
 #[cfg(not(has_cuda))]
 #[allow(clippy::too_many_arguments)]
+/// Non-CUDA stub for selected-expert FP8 GEMM.
+///
+/// # Safety
+///
+/// The pointers are not dereferenced by this stub.
 pub unsafe fn fp8_selected_expert_matmul_f16(
     _x: *const u16,
     _expert_ids: *const u32,
@@ -91,6 +103,13 @@ pub unsafe fn fp8_selected_expert_matmul_f16(
 
 #[cfg(has_cuda)]
 #[allow(clippy::too_many_arguments)]
+/// Launch two-dimensional block-scaled FP8 GEMM on a CUDA stream.
+///
+/// # Safety
+///
+/// All pointers must reference device allocations large enough for the shapes
+/// described by the dimension arguments and remain valid until the stream has
+/// completed the asynchronous kernel.
 pub unsafe fn fp8_block_matmul_f16(
     x: *const u16,
     weight: *const u8,
@@ -120,6 +139,11 @@ pub unsafe fn fp8_block_matmul_f16(
 
 #[cfg(not(has_cuda))]
 #[allow(clippy::too_many_arguments)]
+/// Non-CUDA stub for block-scaled FP8 GEMM.
+///
+/// # Safety
+///
+/// The pointers are not dereferenced by this stub.
 pub unsafe fn fp8_block_matmul_f16(
     _x: *const u16,
     _weight: *const u8,

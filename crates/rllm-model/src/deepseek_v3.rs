@@ -35,6 +35,21 @@ pub struct DeepseekV3Config {
     pub rope_theta: f32,
     pub rope_scaling: Option<DeepSeekV2RopeScaling>,
     pub rms_norm_eps: f64,
+    #[serde(default)]
+    pub attention_bias: bool,
+    #[serde(default)]
+    pub tie_word_embeddings: bool,
+    #[serde(default = "default_topk_method")]
+    pub topk_method: String,
+    #[serde(default = "default_scoring_func")]
+    pub scoring_func: String,
+    #[serde(default)]
+    pub quantization_config: Option<DeepseekFp8Config>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeepseekFp8Config {
+    pub weight_block_size: Option<Vec<usize>>,
 }
 
 fn default_moe_frequency() -> usize {
@@ -43,6 +58,14 @@ fn default_moe_frequency() -> usize {
 
 fn default_routed_scale() -> f64 {
     1.0
+}
+
+fn default_topk_method() -> String {
+    "greedy".to_string()
+}
+
+fn default_scoring_func() -> String {
+    "softmax".to_string()
 }
 
 impl DeepseekV3Config {
@@ -56,6 +79,9 @@ impl DeepseekV3Config {
         if self.hidden_size == 0 || self.num_attention_heads == 0 {
             anyhow::bail!("DeepSeek V3 hidden size and attention heads must be non-zero");
         }
+        if self.moe_layer_freq == 0 {
+            anyhow::bail!("DeepSeek moe_layer_freq must be non-zero");
+        }
         if self.n_group == 0 || self.n_routed_experts % self.n_group != 0 {
             anyhow::bail!("DeepSeek V3 routed experts must be divisible by n_group");
         }
@@ -68,7 +94,25 @@ impl DeepseekV3Config {
         if self.qk_nope_head_dim + self.qk_rope_head_dim == 0 || self.v_head_dim == 0 {
             anyhow::bail!("DeepSeek V3 MLA head dimensions must be non-zero");
         }
+        if self.attention_bias {
+            anyhow::bail!("DeepSeek attention projection bias is not supported");
+        }
+        if self.scoring_func != "softmax" && self.scoring_func != "sigmoid" {
+            anyhow::bail!("unsupported DeepSeek scoring_func {}", self.scoring_func);
+        }
         Ok(())
+    }
+
+    pub fn fp8_block_size(&self) -> Result<usize> {
+        let Some(blocks) =
+            self.quantization_config.as_ref().and_then(|q| q.weight_block_size.as_ref())
+        else {
+            return Ok(128);
+        };
+        if blocks.len() != 2 || blocks[0] == 0 || blocks[0] != blocks[1] {
+            anyhow::bail!("DeepSeek FP8 weight_block_size must contain two equal non-zero values");
+        }
+        Ok(blocks[0])
     }
 }
 
@@ -418,9 +462,10 @@ impl DeepseekV3Moe {
             (&self.shared_gate, &self.shared_up, &self.shared_down)
         {
             let shared = gate.forward(&hidden)?.silu()?.broadcast_mul(&up.forward(&hidden)?)?;
-            output = (output + down.forward(&shared)?)?;
+            let shared = down.forward(&shared)?.to_dtype(output.dtype())?;
+            output = (output + shared)?;
         }
-        output.reshape(original_shape).map_err(Into::into)
+        output.reshape(original_shape)?.to_dtype(hidden_states.dtype()).map_err(Into::into)
     }
 }
 

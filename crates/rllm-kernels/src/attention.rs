@@ -1678,6 +1678,70 @@ mod tests {
         use crate::cache_ops::{gpu_alloc, gpu_free, gpu_memcpy_d2h, gpu_memcpy_h2d};
 
         #[test]
+        fn prefill_f16_attends_cached_prefix() {
+            // One new query token follows two cached tokens. With an all-zero
+            // query the attention weights are uniform, so values [2, 4, 6]
+            // must produce 4. The old kernel used query-chunk-relative length
+            // and returned only the first cached value.
+            let half_bits = |value: f32| half::f16::from_f32(value).to_bits();
+            let key_host = vec![half_bits(0.0); 4];
+            let value_host = vec![half_bits(2.0), half_bits(4.0), half_bits(6.0), half_bits(0.0)];
+            let query_host = [half_bits(0.0)];
+            let block_tables = [0i32];
+            let seq_lens = [3i32];
+            let query_start = [0i32, 1i32];
+
+            unsafe {
+                let key = gpu_alloc(8).unwrap() as *mut u16;
+                let value = gpu_alloc(8).unwrap() as *mut u16;
+                let query = gpu_alloc(2).unwrap() as *mut u16;
+                let block_table = gpu_alloc(4).unwrap() as *mut i32;
+                let seq_len = gpu_alloc(4).unwrap() as *mut i32;
+                let query_loc = gpu_alloc(8).unwrap() as *mut i32;
+                let output = gpu_alloc(2).unwrap() as *mut u16;
+                gpu_memcpy_h2d(key as *mut u8, key_host.as_ptr() as *const u8, 8).unwrap();
+                gpu_memcpy_h2d(value as *mut u8, value_host.as_ptr() as *const u8, 8).unwrap();
+                gpu_memcpy_h2d(query as *mut u8, query_host.as_ptr() as *const u8, 2).unwrap();
+                gpu_memcpy_h2d(block_table as *mut u8, block_tables.as_ptr() as *const u8, 4)
+                    .unwrap();
+                gpu_memcpy_h2d(seq_len as *mut u8, seq_lens.as_ptr() as *const u8, 4).unwrap();
+                gpu_memcpy_h2d(query_loc as *mut u8, query_start.as_ptr() as *const u8, 8).unwrap();
+                paged_attention_prefill_f16_sync(
+                    output,
+                    query,
+                    key,
+                    value,
+                    block_table,
+                    seq_len,
+                    query_loc,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    4,
+                    1,
+                    1.0,
+                )
+                .unwrap();
+                let mut result = [0u16];
+                gpu_memcpy_d2h(result.as_mut_ptr() as *mut u8, output as *const u8, 2).unwrap();
+                assert!((half::f16::from_bits(result[0]).to_f32() - 4.0).abs() < 0.01);
+                for pointer in [
+                    key as *mut u8,
+                    value as *mut u8,
+                    query as *mut u8,
+                    block_table as *mut u8,
+                    seq_len as *mut u8,
+                    query_loc as *mut u8,
+                    output as *mut u8,
+                ] {
+                    gpu_free(pointer).unwrap();
+                }
+            }
+        }
+
+        #[test]
         fn decode_i8_matches_cpu_reference() {
             // 1 seq, 1 q head, 1 kv head, head_dim 4, block_size 4, seq_len 2,
             // 1 physical block. Validates the int8 decode kernel against the CPU

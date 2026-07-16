@@ -139,6 +139,10 @@ impl RmsNorm {
         let out = x_norm.broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
         out.to_dtype(dtype)
     }
+
+    pub(crate) fn hidden_size(&self) -> Result<usize> {
+        self.weight.dim(D::Minus1)
+    }
 }
 
 // ── Linear (no bias, as in Llama) ────────────────────────────────────────
@@ -1078,7 +1082,7 @@ pub(crate) fn causal_mask(seq_len: usize, device: &Device) -> Result<Tensor> {
 
 /// Whether the opt-in paged-attention path is enabled (`RLLM_PAGED_ATTENTION=1`).
 #[cfg(has_cuda)]
-fn paged_attention_enabled() -> bool {
+pub(crate) fn paged_attention_enabled() -> bool {
     std::env::var("RLLM_PAGED_ATTENTION").map(|v| v == "1" || v == "true").unwrap_or(false)
 }
 
@@ -1086,29 +1090,29 @@ fn paged_attention_enabled() -> bool {
 /// (token-major, contiguous, f16). Output: `[num_tokens, num_q_heads, head_dim]`.
 /// The write+read kernels are selected at runtime by `cache_dtype`.
 #[cfg(has_cuda)]
-struct PagedAttentionOp {
+pub(crate) struct PagedAttentionOp {
     /// Per-layer cache device pointers (raw addresses; cast back in `cuda_fwd`).
-    key_cache: usize,
-    value_cache: usize,
+    pub(crate) key_cache: usize,
+    pub(crate) value_cache: usize,
     /// KV cache element dtype; selects the write+read kernel family.
-    cache_dtype: rllm_core::dtype::DType,
+    pub(crate) cache_dtype: rllm_core::dtype::DType,
     /// INT8 dequant scales (`x ~= q * scale`); ignored for non-INT8 dtypes.
-    k_scale: f32,
-    v_scale: f32,
-    num_blocks: i64,
-    block_size: i64,
-    num_q_heads: i64,
-    num_kv_heads: i64,
-    head_dim: i64,
-    num_tokens: i64,
-    num_seqs: i64,
-    max_num_blocks_per_seq: i64,
-    scale: f32,
-    is_prefill: bool,
-    slot_mapping: Vec<i64>,
-    block_tables_flat: Vec<i32>,
-    seq_lens: Vec<i32>,
-    query_start_loc: Vec<i32>,
+    pub(crate) k_scale: f32,
+    pub(crate) v_scale: f32,
+    pub(crate) num_blocks: i64,
+    pub(crate) block_size: i64,
+    pub(crate) num_q_heads: i64,
+    pub(crate) num_kv_heads: i64,
+    pub(crate) head_dim: i64,
+    pub(crate) num_tokens: i64,
+    pub(crate) num_seqs: i64,
+    pub(crate) max_num_blocks_per_seq: i64,
+    pub(crate) scale: f32,
+    pub(crate) is_prefill: bool,
+    pub(crate) slot_mapping: Vec<i64>,
+    pub(crate) block_tables_flat: Vec<i32>,
+    pub(crate) seq_lens: Vec<i32>,
+    pub(crate) query_start_loc: Vec<i32>,
 }
 
 #[cfg(has_cuda)]

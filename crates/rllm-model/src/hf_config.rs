@@ -57,8 +57,10 @@ pub fn parse_hf_config(path: &Path) -> Result<ModelConfig> {
 
     let hidden_size = hf.hidden_size.unwrap_or(4096);
     let num_attention_heads = hf.num_attention_heads.unwrap_or(32);
-    let native_deepseek =
-        matches!(architecture.as_str(), "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM");
+    let native_deepseek = matches!(
+        architecture.as_str(),
+        "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "DeepseekR1ForCausalLM"
+    );
     let num_kv_heads = if native_deepseek {
         num_attention_heads
     } else {
@@ -141,7 +143,10 @@ fn validate_config(
             "num_kv_heads must be > 0 and <= num_attention_heads ({num_attention_heads}), got {num_kv_heads}"
         );
     }
-    let native_deepseek = matches!(architecture, "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM");
+    let native_deepseek = matches!(
+        architecture,
+        "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "DeepseekR1ForCausalLM"
+    );
     if !native_deepseek && hidden_size % num_attention_heads != 0 {
         anyhow::bail!(
             "hidden_size ({hidden_size}) must be divisible by num_attention_heads ({num_attention_heads})"
@@ -163,7 +168,8 @@ fn validate_config(
         | "MistralForCausalLM"
         | "DeepseekForCausalLM"
         | "DeepseekV2ForCausalLM"
-        | "DeepseekV3ForCausalLM" => Ok(()),
+        | "DeepseekV3ForCausalLM"
+        | "DeepseekR1ForCausalLM" => Ok(()),
         _ => {
             tracing::warn!(
                 "unsupported architecture '{architecture}', attempting Llama-compatible loading"
@@ -180,6 +186,9 @@ fn normalize_architecture(architecture: &str) -> String {
         "deepseek" | "deepseek_llm" | "DeepSeekForCausalLM" => "DeepseekForCausalLM".to_string(),
         "deepseek_v2" | "DeepSeekV2ForCausalLM" => "DeepseekV2ForCausalLM".to_string(),
         "deepseek_v3" | "DeepSeekV3ForCausalLM" => "DeepseekV3ForCausalLM".to_string(),
+        "deepseek_r1" | "DeepSeekR1ForCausalLM" | "DeepseekR1ForCausalLM" => {
+            "DeepseekR1ForCausalLM".to_string()
+        }
         other => other.to_string(),
     }
 }
@@ -346,6 +355,12 @@ mod tests {
         assert_eq!(config.architecture, "DeepseekV2ForCausalLM");
         assert_eq!(config.num_kv_heads, 16);
         assert_eq!(config.head_dim, 192);
+    }
+
+    #[test]
+    fn normalizes_deepseek_r1_alias() {
+        assert_eq!(normalize_architecture("deepseek_r1"), "DeepseekR1ForCausalLM");
+        assert_eq!(normalize_architecture("DeepSeekR1ForCausalLM"), "DeepseekR1ForCausalLM");
     }
 
     #[test]
