@@ -281,9 +281,12 @@ __global__ void paged_attention_prefill_kernel(
         }
     }
 
-    // Position within the sequence (0-indexed, for causal masking)
+    // Position within this query chunk. seq_lens contains the total KV length,
+    // including blocks supplied by prefix caching or an earlier prefill chunk.
     int64_t position = token_idx - query_start_loc[seq_idx];
-    int64_t causal_len = position + 1; // attend to positions 0..position
+    int64_t query_len = query_start_loc[seq_idx + 1] - query_start_loc[seq_idx];
+    int64_t prefix_len = seq_lens[seq_idx] - query_len;
+    int64_t causal_len = prefix_len + position + 1;
 
     // GQA
     int64_t kv_head = q_head * num_kv_heads / num_q_heads;
@@ -534,9 +537,10 @@ __global__ void paged_attention_prefill_fp8_kernel(
         }
     }
 
-    // Position within the sequence (0-indexed, for causal masking)
     int64_t position = token_idx - query_start_loc[seq_idx];
-    int64_t causal_len = position + 1; // attend to positions 0..position
+    int64_t query_len = query_start_loc[seq_idx + 1] - query_start_loc[seq_idx];
+    int64_t prefix_len = seq_lens[seq_idx] - query_len;
+    int64_t causal_len = prefix_len + position + 1;
 
     // GQA
     int64_t kv_head = q_head * num_kv_heads / num_q_heads;
@@ -848,7 +852,9 @@ __global__ void paged_attention_prefill_i8_kernel(
     }
 
     int64_t position = token_idx - query_start_loc[seq_idx];
-    int64_t causal_len = position + 1;
+    int64_t query_len = query_start_loc[seq_idx + 1] - query_start_loc[seq_idx];
+    int64_t prefix_len = seq_lens[seq_idx] - query_len;
+    int64_t causal_len = prefix_len + position + 1;
 
     int64_t kv_head = q_head * num_kv_heads / num_q_heads;
 
@@ -1034,4 +1040,3 @@ int32_t rllm_paged_attention_prefill_i8_sync(
 }
 
 } // extern "C"
-

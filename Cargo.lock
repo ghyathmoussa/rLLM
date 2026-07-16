@@ -2987,6 +2987,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "float8 0.6.1",
  "half",
  "hf-hub",
  "rllm-core",

@@ -185,7 +185,7 @@ pub struct LlamaModel {
 }
 
 #[cfg(feature = "candle-backend")]
-fn load_linear(
+pub(crate) fn load_linear(
     prefix: &str,
     weights: &mut WeightMap,
     config: &ModelConfig,

@@ -263,7 +263,6 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
         model_config.quantization =
             parse_quantization(&args.quantization, args.quant_bits, args.quant_group_size)?;
     }
-
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
     let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);

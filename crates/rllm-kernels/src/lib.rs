@@ -4,6 +4,7 @@ pub mod fused;
 pub mod quant_matmul;
 
 pub mod cuda;
+pub mod deepseek_v3;
 
 pub use attention::{
     AttentionMetadata, AttentionParams, paged_attention_decode_f16,
