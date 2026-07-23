@@ -6,7 +6,7 @@ use rllm_core::{ids::RequestId, request::SamplingParams};
 use rllm_sampling::Sampler;
 use rllm_scheduler::SchedulerOutput;
 
-use crate::executor::{Executor, ExecutorOutput};
+use crate::executor::{Executor, ExecutorOutput, PerRequestOutput};
 
 /// Multi-process executor that coordinates multiple workers.
 ///
@@ -117,7 +117,7 @@ impl Executor for MultiProcExecutor {
             anyhow::bail!("MultiProcExecutor not initialized");
         }
         if scheduler_output.num_scheduled() == 0 {
-            return Ok(ExecutorOutput { sampled_token_ids: vec![], logprobs: vec![] });
+            return Ok(ExecutorOutput::empty());
         }
 
         // Collect scheduled request IDs in order.
@@ -135,8 +135,7 @@ impl Executor for MultiProcExecutor {
         // For now, use single-worker mode with rank 0's sampler.
         let sampler = &mut self.samplers[0];
 
-        let mut sampled_token_ids = Vec::with_capacity(scheduled_ids.len());
-        let mut logprobs = Vec::with_capacity(scheduled_ids.len());
+        let mut per_request_outputs = Vec::with_capacity(scheduled_ids.len());
 
         for request_id in &scheduled_ids {
             let state = match self.request_states.get(request_id) {
@@ -170,11 +169,14 @@ impl Executor for MultiProcExecutor {
                 s.generated_token_ids.push(token_id);
             }
 
-            sampled_token_ids.push(token_id);
-            logprobs.push(output.logprob);
+            per_request_outputs.push(PerRequestOutput {
+                request_id: *request_id,
+                token_ids: vec![token_id],
+                logprobs: vec![output.logprob],
+            });
         }
 
-        Ok(ExecutorOutput { sampled_token_ids, logprobs })
+        Ok(ExecutorOutput { per_request_outputs })
     }
 
     fn add_request(

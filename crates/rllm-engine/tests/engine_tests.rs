@@ -6,7 +6,7 @@ use rllm_core::{
     request::{InferenceRequest, SamplingParams},
 };
 use rllm_engine::{AsyncLLMEngine, EngineCore, LLMEngine};
-use rllm_executor::executor::{Executor, ExecutorOutput};
+use rllm_executor::executor::{Executor, ExecutorOutput, PerRequestOutput};
 use rllm_sampling::{Sampler, SamplingInput};
 use rllm_scheduler::Scheduler;
 
@@ -63,11 +63,10 @@ impl Executor for TestExecutor {
             .collect();
 
         if scheduled_ids.is_empty() {
-            return Ok(ExecutorOutput { sampled_token_ids: vec![], logprobs: vec![] });
+            return Ok(ExecutorOutput::empty());
         }
 
-        let mut sampled_token_ids = Vec::new();
-        let mut logprobs = Vec::new();
+        let mut per_request_outputs = Vec::new();
 
         for request_id in &scheduled_ids {
             let state = match self.requests.get(request_id) {
@@ -94,15 +93,19 @@ impl Executor for TestExecutor {
             };
 
             let output = self.sampler.sample(&input);
-            sampled_token_ids.push(output.token_id);
-            logprobs.push(output.logprob);
 
             if let Some(s) = self.requests.get_mut(request_id) {
                 s.generated_token_ids.push(output.token_id);
             }
+
+            per_request_outputs.push(PerRequestOutput {
+                request_id: *request_id,
+                token_ids: vec![output.token_id],
+                logprobs: vec![output.logprob],
+            });
         }
 
-        Ok(ExecutorOutput { sampled_token_ids, logprobs })
+        Ok(ExecutorOutput { per_request_outputs })
     }
 
     fn add_request(
