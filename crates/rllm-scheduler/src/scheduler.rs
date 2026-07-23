@@ -352,14 +352,23 @@ impl Scheduler {
                 continue;
             }
 
-            // Decode: schedule 1 token
-            // Check if we need a new block (at block boundary)
+            // Determine how many tokens to schedule for this decode step.
+            // With speculative decoding, schedule 1 + num_speculative_tokens
+            // to process draft tokens in a single forward pass.
+            let spec_config = sched_req.request.sampling_params.speculative_decoding.as_ref();
+            let spec_enabled =
+                spec_config.map(|c| c.enabled && c.num_speculative_tokens > 0).unwrap_or(false);
+            let spec_k = if spec_enabled { spec_config.unwrap().num_speculative_tokens } else { 0 };
+            let tokens_to_schedule = 1 + spec_k;
+
+            // Check if we need new blocks (at block boundaries)
             let current_blocks = sched_req.num_computed_tokens.div_ceil(self.block_size);
-            let needed_blocks = (sched_req.num_computed_tokens + 1).div_ceil(self.block_size);
+            let needed_blocks =
+                (sched_req.num_computed_tokens + tokens_to_schedule).div_ceil(self.block_size);
 
             if needed_blocks > current_blocks {
-                // Need to allocate a new block
-                let total_tokens = sched_req.num_computed_tokens + 1;
+                // Need to allocate new blocks
+                let total_tokens = sched_req.num_computed_tokens + tokens_to_schedule;
                 match self.kv_cache_manager.allocate_slots(
                     *request_id,
                     total_tokens,
@@ -374,12 +383,12 @@ impl Scheduler {
                 }
             }
 
-            sched_req.num_computed_tokens += 1;
-            *budget_used += 1;
-            total_decode += 1;
+            sched_req.num_computed_tokens += tokens_to_schedule;
+            *budget_used += tokens_to_schedule;
+            total_decode += tokens_to_schedule;
 
             output.scheduled_running.push(*request_id);
-            output.num_scheduled_tokens.insert(*request_id, 1);
+            output.num_scheduled_tokens.insert(*request_id, tokens_to_schedule);
 
             // Copy block table to output
             if let Some(blocks) = self.kv_cache_manager.get_block_ids(*request_id) {

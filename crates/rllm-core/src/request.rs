@@ -42,6 +42,31 @@ pub struct SamplingParams {
     pub bad_words: Vec<String>,
     pub structured_outputs: Option<StructuredOutputParams>,
     pub skip_reading_prefix_cache: bool,
+    pub speculative_decoding: Option<SpeculativeDecodingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeculativeDecodingConfig {
+    pub enabled: bool,
+    /// Proposer type: "ngram", "draft_model", "eagle"
+    pub proposer: String,
+    /// Number of speculative tokens to propose per step
+    pub num_speculative_tokens: usize,
+    /// N-gram range (used when proposer == "ngram")
+    pub min_ngram: usize,
+    pub max_ngram: usize,
+}
+
+impl Default for SpeculativeDecodingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            proposer: "ngram".to_string(),
+            num_speculative_tokens: 3,
+            min_ngram: 2,
+            max_ngram: 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +107,7 @@ impl Default for SamplingParams {
             bad_words: Vec::new(),
             structured_outputs: None,
             skip_reading_prefix_cache: false,
+            speculative_decoding: None,
         }
     }
 }

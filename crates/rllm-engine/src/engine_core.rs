@@ -122,71 +122,62 @@ impl EngineCore {
         };
 
         // Record token throughput metrics.
-        let n_sampled = exec_result.sampled_token_ids.len() as u64;
+        let n_sampled = exec_result.num_tokens() as u64;
         rllm_metrics::counter!("rllm_generated_tokens_total").increment(n_sampled);
 
         // 3. Process outputs.
         let mut outputs = Vec::new();
 
-        // Pair sampled tokens with their request IDs.
-        let scheduled_ids: Vec<RequestId> = scheduler_output
-            .scheduled_new
-            .iter()
-            .chain(scheduler_output.scheduled_running.iter())
-            .copied()
-            .collect();
+        for per_req in &exec_result.per_request_outputs {
+            let request_id = per_req.request_id;
+            let mut finished = None;
 
-        for (i, request_id) in scheduled_ids.iter().enumerate() {
-            let token_id = exec_result.sampled_token_ids.get(i).copied().unwrap_or(0);
+            for &token_id in &per_req.token_ids {
+                if let Some(req) = self.requests.get_mut(&request_id) {
+                    req.generated_token_ids.push(token_id);
 
-            let finished = if let Some(req) = self.requests.get_mut(request_id) {
-                req.generated_token_ids.push(token_id);
+                    // TTFT: record time from arrival to first generated token.
+                    if !req.first_token_generated {
+                        req.first_token_generated = true;
+                        let ttft = req.arrival_time.elapsed().as_secs_f64();
+                        rllm_metrics::histogram!("rllm_ttft_seconds").record(ttft);
+                    }
 
-                // TTFT: record time from arrival to first generated token.
-                if !req.first_token_generated {
-                    req.first_token_generated = true;
-                    let ttft = req.arrival_time.elapsed().as_secs_f64();
-                    rllm_metrics::histogram!("rllm_ttft_seconds").record(ttft);
+                    // Check stopping conditions.
+                    let reached_eos =
+                        token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
+                    let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
+                    let hit_stop_token = req.sampling_params.stop_token_ids.contains(&token_id);
+
+                    if reached_eos || hit_stop_token {
+                        finished = Some(FinishReason::Stop);
+                        break;
+                    } else if reached_length {
+                        finished = Some(FinishReason::Length);
+                        break;
+                    }
                 }
-
-                // Check stopping conditions.
-                let reached_eos = token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
-                let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
-                let hit_stop_token = req.sampling_params.stop_token_ids.contains(&token_id);
-
-                if reached_eos || hit_stop_token {
-                    Some(FinishReason::Stop)
-                } else if reached_length {
-                    Some(FinishReason::Length)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            }
 
             // Build output for this request.
-            let req = self.requests.get(request_id);
-            if let Some(req) = req {
+            if let Some(req) = self.requests.get(&request_id) {
                 let prompt_tokens = u32::try_from(req.prompt_token_ids.len()).unwrap_or(u32::MAX);
                 let completion_tokens =
                     u32::try_from(req.generated_token_ids.len()).unwrap_or(u32::MAX);
 
                 // Record prompt tokens on first output.
-                if completion_tokens == 1 {
+                if !req.first_token_generated {
                     rllm_metrics::counter!("rllm_prompt_tokens_total")
                         .increment(prompt_tokens as u64);
                 }
 
-                let finish_reason = finished;
-
                 outputs.push(RequestOutput {
-                    request_id: *request_id,
+                    request_id,
                     outputs: vec![CompletionOutput {
                         index: 0,
                         text: String::new(),
-                        token_ids: vec![token_id],
-                        finish_reason,
+                        token_ids: per_req.token_ids.clone(),
+                        finish_reason: finished,
                         logprobs: None,
                     }],
                     finished: finished.is_some(),

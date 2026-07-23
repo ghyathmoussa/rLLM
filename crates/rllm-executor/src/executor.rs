@@ -28,7 +28,41 @@ pub trait Executor: Send + Sync {
 
 #[derive(Debug)]
 pub struct ExecutorOutput {
-    pub sampled_token_ids: Vec<u32>,
-    /// Per-request logprobs, parallel array with sampled_token_ids.
+    /// Per-request outputs. In the base case (no speculative decoding),
+    /// each entry contains exactly 1 token. With speculative decoding,
+    /// a single forward pass can produce multiple accepted tokens.
+    pub per_request_outputs: Vec<PerRequestOutput>,
+}
+
+impl ExecutorOutput {
+    pub fn empty() -> Self {
+        Self { per_request_outputs: Vec::new() }
+    }
+
+    /// Returns true when no outputs were produced.
+    pub fn is_empty(&self) -> bool {
+        self.per_request_outputs.is_empty()
+    }
+
+    /// Total number of output tokens across all requests.
+    pub fn num_tokens(&self) -> usize {
+        self.per_request_outputs.iter().map(|o| o.token_ids.len()).sum()
+    }
+
+    /// Convenience: flat list of all sampled token IDs.
+    pub fn all_token_ids(&self) -> Vec<u32> {
+        self.per_request_outputs.iter().flat_map(|o| o.token_ids.iter().copied()).collect()
+    }
+
+    /// Convenience: flat list of all logprobs.
+    pub fn all_logprobs(&self) -> Vec<Option<f32>> {
+        self.per_request_outputs.iter().flat_map(|o| o.logprobs.iter().copied()).collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct PerRequestOutput {
+    pub request_id: RequestId,
+    pub token_ids: Vec<u32>,
     pub logprobs: Vec<Option<f32>>,
 }

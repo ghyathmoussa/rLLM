@@ -58,6 +58,8 @@ pub struct ModelRunner {
     request_sampling_params: HashMap<RequestId, rllm_core::request::SamplingParams>,
     /// EOS token ID for the loaded model.
     eos_token_id: u32,
+    /// Speculative draft tokens per request, set by executor before building tensors.
+    speculative_drafts: HashMap<RequestId, Vec<u32>>,
 }
 
 impl ModelRunner {
@@ -73,6 +75,7 @@ impl ModelRunner {
             cached_logits: HashMap::new(),
             request_sampling_params: HashMap::new(),
             eos_token_id: 0,
+            speculative_drafts: HashMap::new(),
         }
     }
 
@@ -83,11 +86,27 @@ impl ModelRunner {
             .insert(request_id, RunnerRequestState::new(prompt_token_ids, num_layers));
     }
 
+    /// Set speculative draft tokens for a request (used before building tensors).
+    pub fn set_speculative_drafts(&mut self, request_id: RequestId, drafts: Vec<u32>) {
+        self.speculative_drafts.insert(request_id, drafts);
+    }
+
+    /// Take and remove speculative draft tokens for a request.
+    pub fn take_speculative_drafts(&mut self, request_id: &RequestId) -> Option<Vec<u32>> {
+        self.speculative_drafts.remove(request_id)
+    }
+
+    /// Check if a request has speculative draft tokens set.
+    pub fn has_speculative_drafts(&self, request_id: &RequestId) -> bool {
+        self.speculative_drafts.contains_key(request_id)
+    }
+
     /// Remove a finished or preempted request.
     pub fn remove_request(&mut self, request_id: &RequestId) {
         self.request_states.remove(request_id);
         self.cached_logits.remove(request_id);
         self.request_sampling_params.remove(request_id);
+        self.speculative_drafts.remove(request_id);
     }
 
     #[cfg(feature = "candle-backend")]
@@ -187,7 +206,7 @@ impl ModelRunner {
             let computed = state.num_computed_tokens;
 
             // Determine tokens and positions for this request.
-            let req_tokens;
+            let mut req_tokens;
             let req_positions;
 
             if is_pref {
@@ -203,16 +222,33 @@ impl ModelRunner {
                     .collect::<Result<Vec<_>>>()?;
                 num_prefill_tokens += req_tokens.len();
             } else {
-                // Decode: single generated token at position = total_tokens - 1,
-                // but since we haven't stored the token yet, the position is computed
-                // (which equals prompt_len + generated_len so far).
-                let last_token = state.generated_token_ids.last().copied().unwrap_or_else(|| {
-                    // First decode step: use last prompt token.
-                    *state.prompt_token_ids.last().unwrap_or(&0)
-                });
+                // Decode: last generated token, possibly extended with speculative drafts.
+                let last_token = state
+                    .generated_token_ids
+                    .last()
+                    .copied()
+                    .unwrap_or_else(|| *state.prompt_token_ids.last().unwrap_or(&0));
                 req_tokens = vec![last_token];
-                req_positions = vec![u32::try_from(computed).context("position exceeds u32")?];
-                num_decode_tokens += 1;
+
+                // Check for speculative draft tokens to extend the decode input.
+                let draft_tokens = self.speculative_drafts.remove(rid);
+                if let Some(ref drafts) = draft_tokens {
+                    req_tokens.extend_from_slice(drafts);
+                }
+
+                let n_req = req_tokens.len();
+                req_positions = (0..n_req)
+                    .map(|j| u32::try_from(computed + j).context("position exceeds u32"))
+                    .collect::<Result<Vec<_>>>()?;
+                num_decode_tokens += n_req;
+
+                // If we used drafts, re-insert any unused portion
+                // (the executor will handle verification and store accepted drafts).
+                if let Some(drafts) = draft_tokens {
+                    if !drafts.is_empty() {
+                        self.speculative_drafts.insert(*rid, drafts);
+                    }
+                }
             }
 
             let n_tokens = req_tokens.len();

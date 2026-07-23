@@ -5,7 +5,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rllm_cache::spec::KVCacheConfig;
 use rllm_core::{ids::RequestId, request::SamplingParams};
-use rllm_executor::executor::{Executor, ExecutorOutput};
+use rllm_executor::executor::{Executor, ExecutorOutput, PerRequestOutput};
 use rllm_sampling::{Sampler, SamplingInput};
 use rllm_scheduler::SchedulerOutput;
 
@@ -127,7 +127,7 @@ impl Executor for MockExecutor {
 
     fn execute_model(&mut self, scheduler_output: &SchedulerOutput) -> Result<ExecutorOutput> {
         if scheduler_output.num_scheduled() == 0 {
-            return Ok(ExecutorOutput { sampled_token_ids: vec![], logprobs: vec![] });
+            return Ok(ExecutorOutput::empty());
         }
 
         let scheduled_ids: Vec<RequestId> = scheduler_output
@@ -138,8 +138,7 @@ impl Executor for MockExecutor {
             .copied()
             .collect();
 
-        let mut sampled_token_ids = Vec::with_capacity(scheduled_ids.len());
-        let mut logprobs = Vec::with_capacity(scheduled_ids.len());
+        let mut per_request_outputs = Vec::with_capacity(scheduled_ids.len());
 
         for request_id in &scheduled_ids {
             // Extract request state first to avoid holding immutable borrow across
@@ -172,17 +171,19 @@ impl Executor for MockExecutor {
             };
 
             let output = self.sampler.sample(&input);
-            let token_id = output.token_id;
 
             if let Some(state) = self.requests.get_mut(request_id) {
-                state.generated_token_ids.push(token_id);
+                state.generated_token_ids.push(output.token_id);
             }
 
-            sampled_token_ids.push(token_id);
-            logprobs.push(output.logprob);
+            per_request_outputs.push(PerRequestOutput {
+                request_id: *request_id,
+                token_ids: vec![output.token_id],
+                logprobs: vec![output.logprob],
+            });
         }
 
-        Ok(ExecutorOutput { sampled_token_ids, logprobs })
+        Ok(ExecutorOutput { per_request_outputs })
     }
 
     fn add_request(
