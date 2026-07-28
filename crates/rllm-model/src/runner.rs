@@ -14,6 +14,8 @@ use crate::llama::LlamaForCausalLM;
 #[cfg(feature = "candle-backend")]
 use crate::loader;
 #[cfg(feature = "candle-backend")]
+use crate::qwen::QwenForCausalLM;
+#[cfg(feature = "candle-backend")]
 use crate::registry::CausalLM;
 
 /// Simple model runner for single-prompt greedy decode.
@@ -137,6 +139,13 @@ impl ModelRunner {
                 let deepseek_config =
                     DeepseekForCausalLM::parse_config(&model_dir.join("config.json"))?;
                 Box::new(DeepseekForCausalLM::from_weights(config, deepseek_config, weight_map)?)
+            }
+            "Qwen2ForCausalLM"
+            | "Qwen2MoeForCausalLM"
+            | "Qwen3ForCausalLM"
+            | "Qwen3MoeForCausalLM" => {
+                let qwen_config = QwenForCausalLM::parse_config(&model_dir.join("config.json"))?;
+                Box::new(QwenForCausalLM::from_weights(config, qwen_config, weight_map)?)
             }
             arch => anyhow::bail!("unsupported architecture: {arch}"),
         };

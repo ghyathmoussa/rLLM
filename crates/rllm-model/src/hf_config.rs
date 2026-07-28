@@ -143,11 +143,15 @@ fn validate_config(
             "num_kv_heads must be > 0 and <= num_attention_heads ({num_attention_heads}), got {num_kv_heads}"
         );
     }
-    let native_deepseek = matches!(
+    let independent_head_dim = matches!(
         architecture,
-        "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "DeepseekR1ForCausalLM"
+        "DeepseekV2ForCausalLM"
+            | "DeepseekV3ForCausalLM"
+            | "DeepseekR1ForCausalLM"
+            | "Qwen3ForCausalLM"
+            | "Qwen3MoeForCausalLM"
     );
-    if !native_deepseek && hidden_size % num_attention_heads != 0 {
+    if !independent_head_dim && hidden_size % num_attention_heads != 0 {
         anyhow::bail!(
             "hidden_size ({hidden_size}) must be divisible by num_attention_heads ({num_attention_heads})"
         );
@@ -157,7 +161,7 @@ fn validate_config(
             "num_attention_heads ({num_attention_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         );
     }
-    if !native_deepseek && head_dim != hidden_size / num_attention_heads {
+    if !independent_head_dim && head_dim != hidden_size / num_attention_heads {
         anyhow::bail!(
             "head_dim ({head_dim}) doesn't match hidden_size / num_attention_heads ({})",
             hidden_size / num_attention_heads
@@ -169,7 +173,11 @@ fn validate_config(
         | "DeepseekForCausalLM"
         | "DeepseekV2ForCausalLM"
         | "DeepseekV3ForCausalLM"
-        | "DeepseekR1ForCausalLM" => Ok(()),
+        | "DeepseekR1ForCausalLM"
+        | "Qwen2ForCausalLM"
+        | "Qwen2MoeForCausalLM"
+        | "Qwen3ForCausalLM"
+        | "Qwen3MoeForCausalLM" => Ok(()),
         _ => {
             tracing::warn!(
                 "unsupported architecture '{architecture}', attempting Llama-compatible loading"
@@ -189,6 +197,10 @@ fn normalize_architecture(architecture: &str) -> String {
         "deepseek_r1" | "DeepSeekR1ForCausalLM" | "DeepseekR1ForCausalLM" => {
             "DeepseekR1ForCausalLM".to_string()
         }
+        "qwen2" => "Qwen2ForCausalLM".to_string(),
+        "qwen2_moe" => "Qwen2MoeForCausalLM".to_string(),
+        "qwen3" => "Qwen3ForCausalLM".to_string(),
+        "qwen3_moe" => "Qwen3MoeForCausalLM".to_string(),
         other => other.to_string(),
     }
 }
@@ -361,6 +373,39 @@ mod tests {
     fn normalizes_deepseek_r1_alias() {
         assert_eq!(normalize_architecture("deepseek_r1"), "DeepseekR1ForCausalLM");
         assert_eq!(normalize_architecture("DeepSeekR1ForCausalLM"), "DeepseekR1ForCausalLM");
+    }
+
+    #[test]
+    fn parses_qwen2_model_type_alias() {
+        let f = write_config_json(
+            r#"{
+                "model_type": "qwen2", "vocab_size": 151936,
+                "hidden_size": 896, "intermediate_size": 4864,
+                "num_hidden_layers": 24, "num_attention_heads": 14,
+                "num_key_value_heads": 2, "max_position_embeddings": 32768,
+                "rope_theta": 1000000.0, "torch_dtype": "bfloat16"
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        assert_eq!(config.architecture, "Qwen2ForCausalLM");
+        assert_eq!(config.num_kv_heads, 2);
+    }
+
+    #[test]
+    fn parses_qwen3_explicit_head_dimension() {
+        let f = write_config_json(
+            r#"{
+                "architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3",
+                "vocab_size": 151936, "hidden_size": 2048,
+                "intermediate_size": 6144, "num_hidden_layers": 28,
+                "num_attention_heads": 16, "num_key_value_heads": 8,
+                "head_dim": 128, "max_position_embeddings": 40960,
+                "rope_theta": 1000000.0, "torch_dtype": "bfloat16"
+            }"#,
+        );
+        let config = parse_hf_config(f.path()).unwrap();
+        assert_eq!(config.architecture, "Qwen3ForCausalLM");
+        assert_eq!(config.head_dim, 128);
     }
 
     #[test]

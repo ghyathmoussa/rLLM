@@ -403,16 +403,24 @@ fn dequantize_awq_impl(
 #[cfg(feature = "candle-backend")]
 pub struct Linear {
     weight: LinearWeight,
+    bias: Option<Tensor>,
 }
 
 #[cfg(feature = "candle-backend")]
 impl Linear {
     pub fn new(weight: Tensor) -> Self {
-        Self { weight: LinearWeight::Fp(weight) }
+        Self { weight: LinearWeight::Fp(weight), bias: None }
     }
 
     pub fn from_method(method: Box<dyn LinearMethod>) -> Self {
-        Self { weight: LinearWeight::Method(method) }
+        Self { weight: LinearWeight::Method(method), bias: None }
+    }
+
+    /// Attach an output bias while preserving the underlying dense or
+    /// quantized weight implementation.
+    pub fn with_bias(mut self, bias: Tensor) -> Self {
+        self.bias = Some(bias);
+        self
     }
 
     pub fn new_awq(
@@ -431,6 +439,7 @@ impl Linear {
                 group_size,
                 dequantized: std::sync::OnceLock::new(),
             },
+            bias: None,
         }
     }
 
@@ -452,11 +461,12 @@ impl Linear {
                 group_size,
                 dequantized: std::sync::OnceLock::new(),
             },
+            bias: None,
         }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        match &self.weight {
+        let output = match &self.weight {
             LinearWeight::Fp(weight) => self.forward_fp(x, weight),
             LinearWeight::Method(method) => method.apply(x),
             LinearWeight::Gptq {
@@ -478,7 +488,7 @@ impl Linear {
                     *bits,
                     *group_size,
                 )? {
-                    return Ok(out);
+                    return self.add_bias(out);
                 }
 
                 let weight = if let Some(w) = dequantized.get() {
@@ -495,7 +505,7 @@ impl Linear {
                 if let Some(out) =
                     self.try_forward_awq_cuda(x, qweight, qzeros, scales, *bits, *group_size)?
                 {
-                    return Ok(out);
+                    return self.add_bias(out);
                 }
 
                 let weight = if let Some(w) = dequantized.get() {
@@ -507,6 +517,14 @@ impl Linear {
                 };
                 self.forward_fp(x, weight)
             }
+        }?;
+        self.add_bias(output)
+    }
+
+    fn add_bias(&self, output: Tensor) -> Result<Tensor> {
+        match &self.bias {
+            Some(bias) => output.broadcast_add(bias),
+            None => Ok(output),
         }
     }
 
@@ -765,6 +783,8 @@ pub struct LlamaAttention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    q_norm: Option<RmsNorm>,
+    k_norm: Option<RmsNorm>,
 }
 
 #[cfg(feature = "candle-backend")]
@@ -778,7 +798,17 @@ impl LlamaAttention {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
+        Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            q_norm: None,
+            k_norm: None,
+        }
     }
 
     pub fn new(
@@ -790,7 +820,43 @@ impl LlamaAttention {
         num_kv_heads: usize,
         head_dim: usize,
     ) -> Self {
-        Self { q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim }
+        Self::from_linears(q_proj, k_proj, v_proj, o_proj, num_heads, num_kv_heads, head_dim)
+    }
+
+    /// Apply per-head Q/K normalization before RoPE, as required by Qwen3.
+    pub fn with_qk_norm(mut self, q_norm: RmsNorm, k_norm: RmsNorm) -> Self {
+        self.q_norm = Some(q_norm);
+        self.k_norm = Some(k_norm);
+        self
+    }
+
+    fn project_qkv(&self, hidden_states: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+        let (bsz, seq_len, _) = hidden_states.dims3()?;
+        let mut q = self.q_proj.forward(hidden_states)?.reshape((
+            bsz,
+            seq_len,
+            self.num_heads,
+            self.head_dim,
+        ))?;
+        let mut k = self.k_proj.forward(hidden_states)?.reshape((
+            bsz,
+            seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+        ))?;
+        let v = self.v_proj.forward(hidden_states)?.reshape((
+            bsz,
+            seq_len,
+            self.num_kv_heads,
+            self.head_dim,
+        ))?;
+        if let Some(norm) = &self.q_norm {
+            q = norm.forward(&q)?;
+        }
+        if let Some(norm) = &self.k_norm {
+            k = norm.forward(&k)?;
+        }
+        Ok((q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?))
     }
 
     pub fn forward(
@@ -802,16 +868,7 @@ impl LlamaAttention {
     ) -> Result<Tensor> {
         let (bsz, seq_len, _) = hidden_states.dims3()?;
 
-        let q = self.q_proj.forward(hidden_states)?;
-        let k = self.k_proj.forward(hidden_states)?;
-        let v = self.v_proj.forward(hidden_states)?;
-
-        // Reshape to [batch, seq_len, num_heads, head_dim] then transpose
-        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_heads, seq_len, head_dim]
-
-        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
-
-        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?; // [batch, num_kv_heads, seq_len, head_dim]
+        let (q, k, v) = self.project_qkv(hidden_states)?;
 
         // Apply RoPE
         let (q, k) = rope.apply(&q, &k, positions)?;
@@ -878,14 +935,7 @@ impl LlamaAttention {
     ) -> Result<Tensor> {
         let (bsz, seq_len, _) = hidden_states.dims3()?;
 
-        let q = self.q_proj.forward(hidden_states)?;
-        let k = self.k_proj.forward(hidden_states)?;
-        let v = self.v_proj.forward(hidden_states)?;
-
-        // Reshape to [batch, seq_len, num_heads, head_dim] then transpose
-        let q = q.reshape((bsz, seq_len, self.num_heads, self.head_dim))?.transpose(1, 2)?;
-        let k = k.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
-        let v = v.reshape((bsz, seq_len, self.num_kv_heads, self.head_dim))?.transpose(1, 2)?;
+        let (q, k, v) = self.project_qkv(hidden_states)?;
 
         // Apply RoPE
         let (q, k) = rope.apply(&q, &k, positions)?;
