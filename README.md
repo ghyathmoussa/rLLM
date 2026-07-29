@@ -30,7 +30,7 @@ What rLLM provides:
 - CUDA-accelerated inference via Candle framework
 - Prometheus metrics for monitoring
 - Full sampling options (top-k, top-p, min-p, temperature, penalties)
-- Llama-family and DeepSeek (V2/V3/R1 native MLA + MoE) model support
+- Llama-family, Qwen2/Qwen2.5/Qwen3 (dense + MoE), and DeepSeek model support
 - GGUF Quantization support for single-file model loading and CPU/GPU execution
 - AWQ & GPTQ 4-bit weight quantization support (optimized GPU CUDA kernels & CPU fallback)
 
@@ -47,7 +47,7 @@ What rLLM provides:
 - **CUDA acceleration** – GPU-accelerated inference via the Candle ML framework
 - **Prometheus metrics** – Built-in monitoring: TTFT, TPOT, request rate, token throughput
 - **Rich sampling** – Temperature, top-k, top-p, min-p, frequency/presence penalties, logit bias
-- **Llama & DeepSeek support** – Optimized for Llama-family architectures (Llama 2/3, Mistral, etc.) and native DeepSeek V2/V3/R1 with MLA + MoE
+- **Llama, Qwen & DeepSeek support** – Llama-family architectures, text-only Qwen2/Qwen2.5/Qwen3 dense and MoE decoders, and native DeepSeek V2/V3/R1 with MLA + MoE
 - **GGUF support** – Direct single-file loading of pre-quantized GGUF models on CPU and GPU
 - **AWQ & GPTQ support** – High-performance 4-bit quantized inference via optimized fused CUDA kernels and CPU fallbacks
 
@@ -354,6 +354,10 @@ cargo run --release --features cuda -p rllm-server --example grpc_client -- \
 | DeepSeek-V2 (MLA + MoE) | `DeepseekV2ForCausalLM` | ✅ Supported      |
 | DeepSeek-V3 (MLA + MoE + FP8) | `DeepseekV3ForCausalLM` | ✅ Supported      |
 | DeepSeek-R1              | `DeepseekR1ForCausalLM` | ✅ Supported      |
+| Qwen2 / Qwen2.5 dense    | `Qwen2ForCausalLM`     | ✅ Supported      |
+| Qwen2 MoE                | `Qwen2MoeForCausalLM`  | ✅ Supported      |
+| Qwen3 dense              | `Qwen3ForCausalLM`     | ✅ Supported      |
+| Qwen3 MoE                | `Qwen3MoeForCausalLM`  | ✅ Supported      |
 | Other Llama-family models | `LlamaForCausalLM`    | ⚠️ Compatible    |
 
 ---
