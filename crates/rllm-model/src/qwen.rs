@@ -1,7 +1,10 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result};
+use candle_core::quantized::gguf_file::{Content, Value};
+use candle_core::quantized::{GgmlDType, QTensor};
 use candle_core::{D, DType, Device, Tensor};
+use candle_transformers::fused_moe::FusedMoeGGUF;
 use rllm_core::config::ModelConfig;
 use serde::Deserialize;
 
@@ -134,6 +137,77 @@ impl QwenConfig {
                 anyhow::anyhow!("Qwen config requires 'architectures' or 'model_type'")
             })?;
         QwenArchitecture::resolve(identifier)
+    }
+
+    /// Build the Qwen-specific configuration carried by a GGUF checkpoint.
+    pub fn from_gguf(path: &Path, core: &ModelConfig) -> Result<Self> {
+        let architecture = QwenArchitecture::resolve(&core.architecture)?;
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("opening GGUF file {}", path.display()))?;
+        let content =
+            Content::read(&mut file).map_err(|e| anyhow::anyhow!("reading GGUF content: {e}"))?;
+        let gguf_arch = content
+            .metadata
+            .get("general.architecture")
+            .and_then(|value| value.to_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("GGUF metadata is missing general.architecture"))?;
+        let rms_norm_key = format!("{gguf_arch}.attention.layer_norm_rms_epsilon");
+        let rms_norm_eps = content
+            .metadata
+            .get(&rms_norm_key)
+            .and_then(|value| match value {
+                Value::F32(value) => Some(*value as f64),
+                Value::F64(value) => Some(*value),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("GGUF metadata is missing {rms_norm_key}"))?;
+        let tie_word_embeddings = !content.tensor_infos.contains_key("output.weight");
+        let metadata_usize = |suffix: &str| {
+            let key = format!("{gguf_arch}.{suffix}");
+            content
+                .metadata
+                .get(&key)
+                .and_then(|value| value.to_u64().ok())
+                .map(|value| value as usize)
+        };
+        let num_experts = metadata_usize("expert_count");
+        let num_experts_per_tok = metadata_usize("expert_used_count");
+        let moe_intermediate_size = metadata_usize("expert_feed_forward_length");
+        let shared_expert_intermediate_size =
+            metadata_usize("expert_shared_feed_forward_length").filter(|&width| width > 0);
+
+        let config = Self {
+            architectures: vec![core.architecture.clone()],
+            model_type: None,
+            vocab_size: core.vocab_size,
+            hidden_size: core.hidden_size,
+            intermediate_size: core.intermediate_size,
+            num_hidden_layers: core.num_layers,
+            num_attention_heads: core.num_attention_heads,
+            num_key_value_heads: core.num_kv_heads,
+            head_dim: Some(core.head_dim),
+            hidden_act: "silu".to_string(),
+            rms_norm_eps,
+            rope_theta: core.rope_theta as f64,
+            max_position_embeddings: core.max_model_len,
+            rope_scaling: None,
+            attention_bias: None,
+            attention_dropout: 0.0,
+            use_sliding_window: false,
+            sliding_window: None,
+            tie_word_embeddings,
+            decoder_sparse_step: 1,
+            mlp_only_layers: Vec::new(),
+            num_experts,
+            num_experts_per_tok,
+            moe_intermediate_size,
+            shared_expert_intermediate_size,
+            // Qwen3 normalizes selected routes; Qwen2-MoE combines routed and
+            // separately gated shared experts without route renormalization.
+            norm_topk_prob: architecture == QwenArchitecture::Qwen3Moe,
+        };
+        config.validate_fields()?;
+        Ok(config)
     }
 
     fn head_dim(&self) -> Result<usize> {
@@ -318,9 +392,6 @@ impl QwenForCausalLM {
         qwen_config: QwenConfig,
         weights: WeightMap,
     ) -> Result<Self> {
-        if !weights.gguf_weights.is_empty() {
-            anyhow::bail!("native Qwen support currently requires a SafeTensors checkpoint");
-        }
         qwen_config.validate_core(&config)?;
         let model = QwenModel::new(&config, &qwen_config, weights)?;
         Ok(Self { model, config })
@@ -403,13 +474,15 @@ impl DenseMlp {
     }
 }
 
+enum QwenExperts {
+    Dense { router: Tensor, experts: Vec<DenseMlp>, top_k: usize, normalize: bool },
+    Gguf(FusedMoeGGUF),
+}
+
 struct QwenMoe {
-    router: Tensor,
-    experts: Vec<DenseMlp>,
+    experts: QwenExperts,
     shared_expert: Option<DenseMlp>,
     shared_expert_gate: Option<Linear>,
-    top_k: usize,
-    normalize: bool,
 }
 
 impl QwenMoe {
@@ -418,58 +491,79 @@ impl QwenMoe {
         let width = hidden.dim(D::Minus1)?;
         let tokens = hidden.elem_count() / width;
         let flat = hidden.reshape((tokens, width))?;
-        let logits = flat.to_dtype(DType::F32)?.matmul(&self.router.to_dtype(DType::F32)?.t()?)?;
-        let probabilities = candle_nn::ops::softmax_last_dim(&logits)?;
-        let ids = probabilities
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.top_k)?
-            .contiguous()?;
-        let mut route_weights = probabilities.gather(&ids, D::Minus1)?;
-        if self.normalize && self.top_k > 1 {
-            route_weights =
-                route_weights.broadcast_div(&(route_weights.sum_keepdim(D::Minus1)? + 1e-20)?)?;
-        }
-
-        // rLLM has no generic grouped-expert kernel yet. Only the compact route
-        // metadata is staged on CPU; expert activations and GEMMs remain on device.
-        let cpu_ids = ids.to_device(&Device::Cpu)?.to_vec2::<u32>()?;
-        let cpu_weights =
-            route_weights.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-        let mut output = flat.zeros_like()?;
-        for (expert_id, expert) in self.experts.iter().enumerate() {
-            let mut token_indices = Vec::new();
-            let mut weights = Vec::new();
-            for token in 0..tokens {
-                for route in 0..self.top_k {
-                    if cpu_ids[token][route] as usize == expert_id {
-                        token_indices.push(token as u32);
-                        weights.push(cpu_weights[token][route]);
-                    }
+        let mut output = match &self.experts {
+            QwenExperts::Gguf(experts) => {
+                // Match vLLM route selection: vector kernels serve decode and
+                // small batches; grouped prefill kernels amortize setup above 64 tokens.
+                experts
+                    .forward(hidden, tokens > 64)
+                    .context("executing grouped GGUF Qwen experts")?
+            }
+            QwenExperts::Dense { router, experts, top_k, normalize } => {
+                let logits =
+                    flat.to_dtype(DType::F32)?.matmul(&router.to_dtype(DType::F32)?.t()?)?;
+                let probabilities = candle_nn::ops::softmax_last_dim(&logits)?;
+                let ids = probabilities
+                    .arg_sort_last_dim(false)?
+                    .narrow(D::Minus1, 0, *top_k)?
+                    .contiguous()?;
+                let mut route_weights = probabilities.gather(&ids, D::Minus1)?;
+                if *normalize && *top_k > 1 {
+                    route_weights = route_weights
+                        .broadcast_div(&(route_weights.sum_keepdim(D::Minus1)? + 1e-20)?)?;
                 }
+
+                let cpu_ids = ids.to_device(&Device::Cpu)?.to_vec2::<u32>()?;
+                let cpu_weights = route_weights
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?
+                    .to_vec2::<f32>()?;
+                let mut routed = flat.zeros_like()?;
+                for (expert_id, expert) in experts.iter().enumerate() {
+                    let mut token_indices = Vec::new();
+                    let mut weights = Vec::new();
+                    for token in 0..tokens {
+                        for route in 0..*top_k {
+                            if cpu_ids[token][route] as usize == expert_id {
+                                token_indices.push(token as u32);
+                                weights.push(cpu_weights[token][route]);
+                            }
+                        }
+                    }
+                    if token_indices.is_empty() {
+                        continue;
+                    }
+                    let indices = Tensor::from_vec(token_indices, weights.len(), hidden.device())?;
+                    let selected = expert.forward(&flat.index_select(&indices, 0)?)?;
+                    let weights =
+                        Tensor::from_vec(weights, (indices.elem_count(), 1), hidden.device())?
+                            .to_dtype(selected.dtype())?;
+                    routed = routed.index_add(&indices, &selected.broadcast_mul(&weights)?, 0)?;
+                }
+                routed.reshape(&shape)?
             }
-            if token_indices.is_empty() {
-                continue;
-            }
-            let indices = Tensor::from_vec(token_indices, weights.len(), hidden.device())?;
-            let selected = expert.forward(&flat.index_select(&indices, 0)?)?;
-            let weights = Tensor::from_vec(weights, (indices.elem_count(), 1), hidden.device())?
-                .to_dtype(selected.dtype())?;
-            output = output.index_add(&indices, &selected.broadcast_mul(&weights)?, 0)?;
-        }
+        };
+
         if let Some(shared) = &self.shared_expert {
-            let mut shared_output = shared.forward(&flat)?;
+            let mut shared_output = shared.forward(hidden)?;
             if let Some(gate) = &self.shared_expert_gate {
-                let gate = candle_nn::ops::sigmoid(&gate.forward(&flat)?)?
+                let gate = candle_nn::ops::sigmoid(&gate.forward(hidden)?)?
                     .to_dtype(shared_output.dtype())?;
                 shared_output = shared_output.broadcast_mul(&gate)?;
             }
             output = (output + shared_output)?;
         }
-        output.reshape(shape).map_err(Into::into)
+        Ok(output)
     }
 
     fn quantized_count(&self) -> usize {
-        self.experts.iter().map(DenseMlp::quantized_count).sum::<usize>()
+        let routed = match &self.experts {
+            QwenExperts::Dense { experts, .. } => {
+                experts.iter().map(DenseMlp::quantized_count).sum::<usize>()
+            }
+            QwenExperts::Gguf(_) => 3,
+        };
+        routed
             + self.shared_expert.as_ref().map(DenseMlp::quantized_count).unwrap_or(0)
             + self.shared_expert_gate.as_ref().map(|x| usize::from(x.is_quantized())).unwrap_or(0)
     }
@@ -790,13 +884,74 @@ fn load_moe(
     device: &Device,
 ) -> Result<QwenMoe> {
     let num_experts = config.num_experts.ok_or_else(|| anyhow::anyhow!("missing num_experts"))?;
-    let mut experts = Vec::with_capacity(num_experts);
-    for expert in 0..num_experts {
-        experts.push(
-            load_mlp(&format!("{prefix}.experts.{expert}"), core, weights, device)
-                .with_context(|| format!("loading Qwen expert {expert}"))?,
-        );
-    }
+    let top_k =
+        config.num_experts_per_tok.ok_or_else(|| anyhow::anyhow!("missing num_experts_per_tok"))?;
+    let expert_width = config
+        .moe_intermediate_size
+        .ok_or_else(|| anyhow::anyhow!("missing moe_intermediate_size"))?;
+
+    let packed_gate_name = format!("{prefix}.experts.gate_proj.weight");
+    let packed_up_name = format!("{prefix}.experts.up_proj.weight");
+    let packed_down_name = format!("{prefix}.experts.down_proj.weight");
+    let has_packed_experts = weights.gguf_weights.contains_key(&packed_gate_name)
+        || weights.weights.contains_key(&packed_gate_name);
+
+    let experts = if has_packed_experts {
+        if !matches!(device, Device::Cuda(_)) {
+            anyhow::bail!(
+                "Qwen GGUF MoE requires CUDA grouped-expert kernels; device is {device:?}"
+            );
+        }
+        let gate_experts = take_gguf_experts(
+            weights,
+            &packed_gate_name,
+            &[num_experts, expert_width, core.hidden_size],
+        )?;
+        let up_experts = take_gguf_experts(
+            weights,
+            &packed_up_name,
+            &[num_experts, expert_width, core.hidden_size],
+        )?;
+        let down_experts = take_gguf_experts(
+            weights,
+            &packed_down_name,
+            &[num_experts, core.hidden_size, expert_width],
+        )?;
+        let router =
+            take_tensor(weights, &format!("{prefix}.gate.weight"), device)?.to_dtype(DType::F32)?;
+        if router.dims() != [num_experts, core.hidden_size] {
+            anyhow::bail!(
+                "Qwen GGUF MoE router {prefix}.gate.weight has shape {:?}; expected [{num_experts}, {}]",
+                router.dims(),
+                core.hidden_size
+            );
+        }
+        QwenExperts::Gguf(FusedMoeGGUF {
+            gate: candle_nn::Linear::new(router, None),
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: candle_nn::Activation::Silu,
+            norm_topk_prob: config.norm_topk_prob,
+            num_experts_per_tok: top_k,
+            dtype: DType::F16,
+        })
+    } else {
+        let mut dense_experts = Vec::with_capacity(num_experts);
+        for expert in 0..num_experts {
+            dense_experts.push(
+                load_mlp(&format!("{prefix}.experts.{expert}"), core, weights, device)
+                    .with_context(|| format!("loading Qwen expert {expert}"))?,
+            );
+        }
+        QwenExperts::Dense {
+            router: take_tensor(weights, &format!("{prefix}.gate.weight"), device)?,
+            experts: dense_experts,
+            top_k,
+            normalize: config.norm_topk_prob,
+        }
+    };
+
     let (shared_expert, shared_expert_gate) = if architecture == QwenArchitecture::Qwen2Moe {
         if config.shared_expert_intermediate_size.unwrap_or(0) == 0 {
             (None, None)
@@ -809,16 +964,45 @@ fn load_moe(
     } else {
         (None, None)
     };
-    Ok(QwenMoe {
-        router: take_tensor(weights, &format!("{prefix}.gate.weight"), device)?,
-        experts,
-        shared_expert,
-        shared_expert_gate,
-        top_k: config
-            .num_experts_per_tok
-            .ok_or_else(|| anyhow::anyhow!("missing num_experts_per_tok"))?,
-        normalize: config.norm_topk_prob,
-    })
+
+    Ok(QwenMoe { experts, shared_expert, shared_expert_gate })
+}
+
+fn take_gguf_experts(
+    weights: &mut WeightMap,
+    name: &str,
+    expected_shape: &[usize],
+) -> Result<std::sync::Arc<QTensor>> {
+    let tensor = weights.gguf_weights.remove(name).ok_or_else(|| {
+        if weights.weights.contains_key(name) {
+            anyhow::anyhow!(
+                "Qwen GGUF MoE tensor {name} is not quantized; grouped CUDA experts require Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, or Q8_0"
+            )
+        } else {
+            anyhow::anyhow!("missing Qwen GGUF MoE tensor {name}")
+        }
+    })?;
+    if tensor.shape().dims() != expected_shape {
+        anyhow::bail!(
+            "Qwen GGUF MoE tensor {name} has shape {:?}; expected {expected_shape:?}",
+            tensor.shape().dims()
+        );
+    }
+    if !matches!(
+        tensor.dtype(),
+        GgmlDType::Q8_0
+            | GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+    ) {
+        anyhow::bail!(
+            "Qwen GGUF MoE tensor {name} uses {:?}; grouped CUDA experts support Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, and Q8_0",
+            tensor.dtype()
+        );
+    }
+    Ok(tensor)
 }
 
 fn take_tensor(weights: &mut WeightMap, name: &str, device: &Device) -> Result<Tensor> {
@@ -837,6 +1021,7 @@ fn has_linear(weights: &WeightMap, prefix: &str) -> bool {
     weights.weights.contains_key(&format!("{prefix}.weight"))
         || weights.weights.contains_key(&format!("{prefix}.qweight"))
         || weights.quantized.contains_key(&format!("{prefix}.weight"))
+        || weights.gguf_weights.contains_key(&format!("{prefix}.weight"))
 }
 
 fn embedding_lookup(weight: &Tensor, ids: &Tensor) -> Result<Tensor> {
@@ -1016,6 +1201,85 @@ mod tests {
             let mut cache = vec![None];
             let logits = model.forward(&input, &[0], &mut cache)?;
             assert_eq!(logits.dims(), &[1, 1, 32]);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod gguf_moe_cuda_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a CUDA GPU"]
+    fn grouped_kernels_match_dequantized_reference() -> Result<()> {
+        const HIDDEN: usize = 256;
+        const EXPERT_WIDTH: usize = 256;
+        const EXPERTS: usize = 2;
+
+        let device = Device::new_cuda(0)?;
+        let make_weight = |phase: f32| -> Result<Tensor> {
+            let values = (0..EXPERTS * EXPERT_WIDTH * HIDDEN)
+                .map(|index| ((index as f32 * 0.013 + phase).sin()) * 0.02)
+                .collect::<Vec<_>>();
+            Tensor::from_vec(values, (EXPERTS, EXPERT_WIDTH, HIDDEN), &Device::Cpu)
+                .map_err(Into::into)
+        };
+        let gate_cpu = make_weight(0.0)?;
+        let up_cpu = make_weight(0.7)?;
+        let down_cpu = make_weight(1.3)?;
+        let gate_experts = Arc::new(QTensor::quantize_onto(&gate_cpu, GgmlDType::Q8_0, &device)?);
+        let up_experts = Arc::new(QTensor::quantize_onto(&up_cpu, GgmlDType::Q8_0, &device)?);
+        let down_experts = Arc::new(QTensor::quantize_onto(&down_cpu, GgmlDType::Q8_0, &device)?);
+
+        let mut router_values = vec![0f32; EXPERTS * HIDDEN];
+        router_values[0] = 1.0;
+        router_values[HIDDEN] = -1.0;
+        let router = Tensor::from_vec(router_values, (EXPERTS, HIDDEN), &device)?;
+        let fused = FusedMoeGGUF {
+            gate: candle_nn::Linear::new(router, None),
+            gate_experts: Arc::clone(&gate_experts),
+            up_experts: Arc::clone(&up_experts),
+            down_experts: Arc::clone(&down_experts),
+            act: candle_nn::Activation::Silu,
+            norm_topk_prob: true,
+            num_experts_per_tok: 1,
+            dtype: DType::F16,
+        };
+
+        for tokens in [2usize, 65] {
+            let mut input_values = vec![0f32; tokens * HIDDEN];
+            for token in 0..tokens {
+                input_values[token * HIDDEN] = if token % 2 == 0 { 1.0 } else { -1.0 };
+                for column in 1..HIDDEN {
+                    input_values[token * HIDDEN + column] =
+                        ((token * HIDDEN + column) as f32 * 0.007).cos() * 0.1;
+                }
+            }
+            let input = Tensor::from_vec(input_values, (1, tokens, HIDDEN), &device)?;
+            let actual = fused.forward(&input, tokens > 64)?;
+
+            let gate = gate_experts.dequantize(&device)?;
+            let up = up_experts.dequantize(&device)?;
+            let down = down_experts.dequantize(&device)?;
+            let flat = input.reshape((tokens, HIDDEN))?;
+            let mut reference_tokens = Vec::with_capacity(tokens);
+            for token in 0..tokens {
+                let expert = token % EXPERTS;
+                let x = flat.narrow(0, token, 1)?;
+                let gate_w = gate.narrow(0, expert, 1)?.squeeze(0)?;
+                let up_w = up.narrow(0, expert, 1)?.squeeze(0)?;
+                let down_w = down.narrow(0, expert, 1)?.squeeze(0)?;
+                let activated =
+                    x.matmul(&gate_w.t()?)?.silu()?.broadcast_mul(&x.matmul(&up_w.t()?)?)?;
+                reference_tokens.push(activated.matmul(&down_w.t()?)?);
+            }
+            let references = reference_tokens.iter().collect::<Vec<_>>();
+            let reference = Tensor::cat(&references, 0)?.reshape((1, tokens, HIDDEN))?;
+            let max_error = (actual - reference)?.abs()?.max_all()?.to_vec0::<f32>()?;
+            assert!(max_error < 2e-3, "grouped GGUF MoE max error {max_error} for {tokens} tokens");
         }
         Ok(())
     }
