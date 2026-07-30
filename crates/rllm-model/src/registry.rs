@@ -91,6 +91,10 @@ impl ModelRegistry {
             reg.register("DeepseekV2ForCausalLM", crate::deepseek::DeepseekForCausalLM::factory);
             reg.register("DeepseekV3ForCausalLM", crate::deepseek::DeepseekForCausalLM::factory);
             reg.register("DeepseekR1ForCausalLM", crate::deepseek::DeepseekForCausalLM::factory);
+            reg.register("Qwen2ForCausalLM", crate::qwen::QwenForCausalLM::factory);
+            reg.register("Qwen2MoeForCausalLM", crate::qwen::QwenForCausalLM::factory);
+            reg.register("Qwen3ForCausalLM", crate::qwen::QwenForCausalLM::factory);
+            reg.register("Qwen3MoeForCausalLM", crate::qwen::QwenForCausalLM::factory);
         }
         reg
     }

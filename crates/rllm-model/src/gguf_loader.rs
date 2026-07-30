@@ -49,15 +49,22 @@ pub fn parse_gguf_config(path: &Path) -> Result<ModelConfig> {
     let rope_theta =
         get_metadata_f32(&content.metadata, &format!("{arch}.rope.freq_base")).unwrap_or(10000.0);
 
-    let head_dim = hidden_size / num_attention_heads;
+    if num_attention_heads == 0 {
+        anyhow::bail!("GGUF attention head count must be greater than zero");
+    }
+    let head_dim =
+        get_metadata_val_as_u64(&content.metadata, &format!("{arch}.attention.key_length"))
+            .map(|value| value as usize)
+            .unwrap_or(hidden_size / num_attention_heads);
 
     let architecture = match arch.as_str() {
         "llama" => "LlamaForCausalLM".to_string(),
         "mistral" => "MistralForCausalLM".to_string(),
-        other => {
-            tracing::warn!("Unknown GGUF architecture: {}, defaulting to LlamaForCausalLM", other);
-            "LlamaForCausalLM".to_string()
-        }
+        "qwen2" => "Qwen2ForCausalLM".to_string(),
+        "qwen3" => "Qwen3ForCausalLM".to_string(),
+        "qwen2moe" => "Qwen2MoeForCausalLM".to_string(),
+        "qwen3moe" => "Qwen3MoeForCausalLM".to_string(),
+        other => anyhow::bail!("unsupported GGUF architecture '{other}'"),
     };
 
     let vocab_size =
@@ -108,12 +115,26 @@ pub fn map_gguf_name_to_hf(gguf_name: &str) -> String {
             let suffix = parts[2..].join(".");
             let hf_suffix = match suffix.as_str() {
                 "attn_q.weight" => "self_attn.q_proj.weight",
+                "attn_q.bias" => "self_attn.q_proj.bias",
                 "attn_k.weight" => "self_attn.k_proj.weight",
+                "attn_k.bias" => "self_attn.k_proj.bias",
                 "attn_v.weight" => "self_attn.v_proj.weight",
+                "attn_v.bias" => "self_attn.v_proj.bias",
                 "attn_output.weight" => "self_attn.o_proj.weight",
+                "attn_output.bias" => "self_attn.o_proj.bias",
+                "attn_q_norm.weight" => "self_attn.q_norm.weight",
+                "attn_k_norm.weight" => "self_attn.k_norm.weight",
                 "ffn_gate.weight" => "mlp.gate_proj.weight",
                 "ffn_up.weight" => "mlp.up_proj.weight",
                 "ffn_down.weight" => "mlp.down_proj.weight",
+                "ffn_gate_inp.weight" => "mlp.gate.weight",
+                "ffn_gate_exps.weight" => "mlp.experts.gate_proj.weight",
+                "ffn_up_exps.weight" => "mlp.experts.up_proj.weight",
+                "ffn_down_exps.weight" => "mlp.experts.down_proj.weight",
+                "ffn_gate_inp_shexp.weight" => "mlp.shared_expert_gate.weight",
+                "ffn_gate_shexp.weight" => "mlp.shared_expert.gate_proj.weight",
+                "ffn_up_shexp.weight" => "mlp.shared_expert.up_proj.weight",
+                "ffn_down_shexp.weight" => "mlp.shared_expert.down_proj.weight",
                 "attn_norm.weight" => "input_layernorm.weight",
                 "ffn_norm.weight" => "post_attention_layernorm.weight",
                 other => other,
@@ -190,6 +211,34 @@ mod tests {
         assert_eq!(
             map_gguf_name_to_hf("blk.12.attn_norm.weight"),
             "model.layers.12.input_layernorm.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.2.attn_q.bias"),
+            "model.layers.2.self_attn.q_proj.bias"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.3.attn_q_norm.weight"),
+            "model.layers.3.self_attn.q_norm.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.3.attn_k_norm.weight"),
+            "model.layers.3.self_attn.k_norm.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.7.ffn_gate_exps.weight"),
+            "model.layers.7.mlp.experts.gate_proj.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.7.ffn_down_exps.weight"),
+            "model.layers.7.mlp.experts.down_proj.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.7.ffn_gate_inp_shexp.weight"),
+            "model.layers.7.mlp.shared_expert_gate.weight"
+        );
+        assert_eq!(
+            map_gguf_name_to_hf("blk.7.ffn_up_shexp.weight"),
+            "model.layers.7.mlp.shared_expert.up_proj.weight"
         );
     }
 }

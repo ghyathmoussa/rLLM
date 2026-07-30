@@ -14,6 +14,8 @@ use crate::llama::LlamaForCausalLM;
 #[cfg(feature = "candle-backend")]
 use crate::loader;
 #[cfg(feature = "candle-backend")]
+use crate::qwen::QwenForCausalLM;
+#[cfg(feature = "candle-backend")]
 use crate::registry::CausalLM;
 
 /// Simple model runner for single-prompt greedy decode.
@@ -138,6 +140,17 @@ impl ModelRunner {
                     DeepseekForCausalLM::parse_config(&model_dir.join("config.json"))?;
                 Box::new(DeepseekForCausalLM::from_weights(config, deepseek_config, weight_map)?)
             }
+            "Qwen2ForCausalLM"
+            | "Qwen2MoeForCausalLM"
+            | "Qwen3ForCausalLM"
+            | "Qwen3MoeForCausalLM" => {
+                let qwen_config = if let Some(path) = gguf_file_path.as_deref() {
+                    crate::qwen::QwenConfig::from_gguf(path, &config)?
+                } else {
+                    QwenForCausalLM::parse_config(&model_dir.join("config.json"))?
+                };
+                Box::new(QwenForCausalLM::from_weights(config, qwen_config, weight_map)?)
+            }
             arch => anyhow::bail!("unsupported architecture: {arch}"),
         };
 
@@ -192,6 +205,32 @@ impl ModelRunner {
 
 #[cfg(test)]
 mod tests {
+    use super::ModelRunner;
+
+    /// Opt-in real-model smoke test. Set RLLM_QWEN_GGUF to a Qwen2 or
+    /// Qwen3 dense or MoE GGUF file and run with --features cuda -- --ignored.
+    #[test]
+    #[ignore = "requires a local Qwen GGUF checkpoint and CUDA GPU"]
+    fn qwen_gguf_cuda_smoke() -> anyhow::Result<()> {
+        let path = std::env::var("RLLM_QWEN_GGUF")?;
+        let runner = ModelRunner::from_dir(&path)?;
+        assert!(runner.is_cuda(), "GGUF smoke test must execute on CUDA");
+        assert!(matches!(
+            runner.config().architecture.as_str(),
+            "Qwen2ForCausalLM" | "Qwen2MoeForCausalLM" | "Qwen3ForCausalLM" | "Qwen3MoeForCausalLM"
+        ));
+        assert!(runner.quantized_layer_count() > 0);
+        eprintln!(
+            "loaded {} on {} with {} quantized linear layers",
+            runner.config().architecture,
+            runner.device_description(),
+            runner.quantized_layer_count()
+        );
+        let output = runner.generate(&[0], 2)?;
+        assert_eq!(output.len(), 2);
+        Ok(())
+    }
+
     #[test]
     fn model_runner_placeholder() {
         // ModelRunner requires actual model files to instantiate.

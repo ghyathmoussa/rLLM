@@ -419,7 +419,7 @@ fn files_to_download(
         let preferred = ["Q4_K_M", "Q4_0", "Q5_K_M", "Q3_K_M", "Q6_K", "Q8_0", "Q2_K"];
         let chosen = preferred
             .iter()
-            .find_map(|pat| gguf.iter().find(|n| n.contains(pat)))
+            .find_map(|pat| gguf.iter().find(|name| name.to_ascii_uppercase().contains(pat)))
             .unwrap_or(&gguf[0]);
         tracing::debug!(file = %chosen, "planned single GGUF download");
         return Ok(vec![chosen.to_string()]);

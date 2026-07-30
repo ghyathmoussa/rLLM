@@ -236,6 +236,7 @@ impl Executor for UniProcExecutor {
 
                 // Fallback: if batched path didn't provide per-position logits,
                 // try the legacy per-request forward to get them.
+                #[cfg(feature = "candle-backend")]
                 if per_pos_logits.len() < n_tokens && self.worker.has_loaded_model() {
                     // Run per-request forward with all tokens to get per-position logits.
                     let tokens_to_run = batch
