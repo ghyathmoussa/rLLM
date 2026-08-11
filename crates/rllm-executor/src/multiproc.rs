@@ -184,7 +184,7 @@ impl Executor for MultiProcExecutor {
         request_id: RequestId,
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
-    ) {
+    ) -> Result<()> {
         self.request_states.insert(
             request_id,
             MultiProcRequestState {
@@ -193,6 +193,7 @@ impl Executor for MultiProcExecutor {
                 sampling_params,
             },
         );
+        Ok(())
     }
 
     fn shutdown(&mut self) {

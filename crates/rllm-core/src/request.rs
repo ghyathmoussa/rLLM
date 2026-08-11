@@ -69,12 +69,83 @@ impl Default for SpeculativeDecodingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StructuredOutputParams {
+    #[serde(default, rename = "json", alias = "json_schema")]
     pub json_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub json_object: Option<bool>,
+    /// XGrammar EBNF describing the exact XML document shape.
+    #[serde(default)]
+    pub xml: Option<String>,
+    #[serde(default)]
     pub regex: Option<String>,
+    #[serde(default)]
     pub grammar: Option<String>,
+    #[serde(default)]
     pub choice: Option<Vec<String>>,
+}
+
+impl StructuredOutputParams {
+    pub fn validate(&self) -> Result<()> {
+        let active = [
+            self.json_schema.is_some(),
+            self.json_object.is_some(),
+            self.xml.is_some(),
+            self.regex.is_some(),
+            self.grammar.is_some(),
+            self.choice.is_some(),
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
+
+        if active != 1 {
+            return Err(CoreError::InvalidSamplingParams(
+                "structured_outputs must set exactly one of json, json_object, xml, regex, grammar, or choice"
+                    .into(),
+            ));
+        }
+        if self.json_object == Some(false) {
+            return Err(CoreError::InvalidSamplingParams(
+                "structured_outputs.json_object must be true when set".into(),
+            ));
+        }
+        for (name, value) in [
+            ("xml", self.xml.as_deref()),
+            ("regex", self.regex.as_deref()),
+            ("grammar", self.grammar.as_deref()),
+        ] {
+            if value.is_some_and(str::is_empty) {
+                return Err(CoreError::InvalidSamplingParams(format!(
+                    "structured_outputs.{name} must not be empty"
+                )));
+            }
+            if value.is_some_and(|value| value.len() > 1_048_576) {
+                return Err(CoreError::InvalidSamplingParams(format!(
+                    "structured_outputs.{name} exceeds the 1 MiB limit"
+                )));
+            }
+        }
+        if self.choice.as_ref().is_some_and(|choices| {
+            choices.is_empty() || choices.iter().any(|choice| choice.is_empty())
+        }) {
+            return Err(CoreError::InvalidSamplingParams(
+                "structured_outputs.choice must contain non-empty choices".into(),
+            ));
+        }
+        if self.json_schema.as_ref().is_some_and(|schema| schema.to_string().len() > 1_048_576)
+            || self
+                .choice
+                .as_ref()
+                .is_some_and(|choices| choices.iter().map(String::len).sum::<usize>() > 1_048_576)
+        {
+            return Err(CoreError::InvalidSamplingParams(
+                "structured output constraint exceeds the 1 MiB limit".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for SamplingParams {
@@ -140,6 +211,31 @@ impl SamplingParams {
             return Err(CoreError::InvalidSamplingParams(
                 "n must be 1 when temperature is 0 (greedy)".into(),
             ));
+        }
+        if let Some(structured_outputs) = &self.structured_outputs {
+            structured_outputs.validate()?;
+            if self.speculative_decoding.as_ref().is_some_and(|config| config.enabled) {
+                return Err(CoreError::InvalidSamplingParams(
+                    "structured outputs cannot currently be combined with speculative decoding"
+                        .into(),
+                ));
+            }
+            if self.n != 1 {
+                return Err(CoreError::InvalidSamplingParams(
+                    "structured outputs currently require n = 1".into(),
+                ));
+            }
+            if self.allowed_token_ids.is_some()
+                || self.min_tokens > 0
+                || self.ignore_eos
+                || !self.stop.is_empty()
+                || !self.stop_token_ids.is_empty()
+            {
+                return Err(CoreError::InvalidSamplingParams(
+                    "structured outputs cannot be combined with allowed_token_ids, min_tokens, ignore_eos, or stop conditions"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }

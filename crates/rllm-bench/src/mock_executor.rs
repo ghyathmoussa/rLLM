@@ -191,11 +191,12 @@ impl Executor for MockExecutor {
         request_id: RequestId,
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
-    ) {
+    ) -> Result<()> {
         self.requests.insert(
             request_id,
             MockRequestState { prompt_token_ids, generated_token_ids: Vec::new(), sampling_params },
         );
+        Ok(())
     }
 
     fn shutdown(&mut self) {

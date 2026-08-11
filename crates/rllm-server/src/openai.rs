@@ -1,5 +1,6 @@
 //! OpenAI-compatible protocol types and conversion functions.
 
+use rllm_core::request::StructuredOutputParams;
 use serde::{Deserialize, Serialize};
 
 // ── Request types ──────────────────────────────────────────────────────────
@@ -36,6 +37,10 @@ pub struct ChatCompletionRequest {
     pub frequency_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub structured_outputs: Option<StructuredOutputParams>,
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +48,24 @@ pub struct ChatCompletionRequest {
 pub enum StopSequence {
     Single(String),
     Multiple(Vec<String>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    Text,
+    JsonObject,
+    JsonSchema { json_schema: ResponseFormatJsonSchema },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseFormatJsonSchema {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub schema: serde_json::Value,
+    #[serde(default)]
+    pub strict: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +94,10 @@ pub struct CompletionRequest {
     pub frequency_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
+    #[serde(default)]
+    pub structured_outputs: Option<StructuredOutputParams>,
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +269,8 @@ pub fn chat_request_to_sampling_params(req: &ChatCompletionRequest) -> SamplingP
         params.logprobs = req.top_logprobs.or(Some(1));
     }
     params.stop = extract_stop_strings(&req.stop);
+    params.structured_outputs =
+        request_structured_outputs(req.structured_outputs.clone(), req.response_format.as_ref());
     params
 }
 
@@ -273,7 +302,44 @@ pub fn completion_request_to_sampling_params(req: &CompletionRequest) -> Samplin
         params.logprobs = Some(lp);
     }
     params.stop = extract_stop_strings(&req.stop);
+    params.structured_outputs =
+        request_structured_outputs(req.structured_outputs.clone(), req.response_format.as_ref());
     params
+}
+
+pub fn validate_structured_output_request(
+    structured_outputs: &Option<StructuredOutputParams>,
+    response_format: &Option<ResponseFormat>,
+) -> Result<(), String> {
+    if structured_outputs.is_some() && response_format.is_some() {
+        return Err("structured_outputs and response_format cannot both be set".into());
+    }
+    Ok(())
+}
+
+fn request_structured_outputs(
+    structured_outputs: Option<StructuredOutputParams>,
+    response_format: Option<&ResponseFormat>,
+) -> Option<StructuredOutputParams> {
+    structured_outputs.or_else(|| match response_format {
+        Some(ResponseFormat::JsonObject) => Some(StructuredOutputParams {
+            json_schema: None,
+            json_object: Some(true),
+            xml: None,
+            regex: None,
+            grammar: None,
+            choice: None,
+        }),
+        Some(ResponseFormat::JsonSchema { json_schema }) => Some(StructuredOutputParams {
+            json_schema: Some(json_schema.schema.clone()),
+            json_object: None,
+            xml: None,
+            regex: None,
+            grammar: None,
+            choice: None,
+        }),
+        Some(ResponseFormat::Text) | None => None,
+    })
 }
 
 fn extract_stop_strings(stop: &Option<StopSequence>) -> Vec<String> {
@@ -387,6 +453,8 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             seed: None,
+            structured_outputs: None,
+            response_format: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ChatCompletionRequest = serde_json::from_str(&json).unwrap();
@@ -411,6 +479,8 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             seed: None,
+            structured_outputs: None,
+            response_format: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: CompletionRequest = serde_json::from_str(&json).unwrap();

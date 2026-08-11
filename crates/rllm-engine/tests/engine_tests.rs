@@ -1,4 +1,11 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use rllm_core::{
     ids::RequestId,
@@ -113,16 +120,54 @@ impl Executor for TestExecutor {
         request_id: RequestId,
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
-    ) {
+    ) -> anyhow::Result<()> {
         self.requests.insert(
             request_id,
             TestRequestState { prompt_token_ids, generated_token_ids: Vec::new(), sampling_params },
         );
+        Ok(())
     }
 
     fn shutdown(&mut self) {
         self.requests.clear();
     }
+}
+
+struct FailingExecutor {
+    execute_calls: Arc<AtomicUsize>,
+}
+
+impl Executor for FailingExecutor {
+    fn initialize(
+        &mut self,
+        _kv_cache_configs: &[rllm_cache::spec::KVCacheConfig],
+        _gpu_memory_utilization: f32,
+    ) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
+    fn determine_available_memory(&self) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+
+    fn execute_model(
+        &mut self,
+        _scheduler_output: &rllm_scheduler::SchedulerOutput,
+    ) -> anyhow::Result<ExecutorOutput> {
+        self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        anyhow::bail!("injected executor failure")
+    }
+
+    fn add_request(
+        &mut self,
+        _request_id: RequestId,
+        _prompt_token_ids: Vec<u32>,
+        _sampling_params: SamplingParams,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn shutdown(&mut self) {}
 }
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -206,6 +251,45 @@ fn test_add_request_finished_output() {
     }
 
     assert!(all_finished, "Request should finish");
+}
+
+#[test]
+fn executor_failure_finishes_request_without_retrying() {
+    let execute_calls = Arc::new(AtomicUsize::new(0));
+    let executor = FailingExecutor { execute_calls: execute_calls.clone() };
+    let scheduler = make_test_scheduler(16, 256);
+    let mut core = EngineCore::new(Box::new(executor), scheduler, 99);
+    let request = make_request(8, 4);
+    let request_id = request.request_id;
+    core.add_request(request).unwrap();
+
+    let outputs = core.step();
+    assert_eq!(execute_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].request_id, request_id);
+    assert!(outputs[0].finished);
+    assert_eq!(outputs[0].outputs[0].finish_reason, Some(FinishReason::Error));
+    assert!(!core.has_work());
+    assert_eq!(core.num_active_requests(), 0);
+
+    assert!(core.step().is_empty());
+    assert_eq!(execute_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn secondary_terminal_token_stops_request() {
+    let executor = TestExecutor::new(100, 99, 42);
+    let scheduler = make_test_scheduler(16, 256);
+    let mut core =
+        EngineCore::new(Box::new(executor), scheduler, 99).with_stop_token_ids(vec![8, 99]);
+    core.add_request(make_request(8, 4)).unwrap();
+
+    let outputs = core.step();
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].finished);
+    assert_eq!(outputs[0].outputs[0].token_ids, vec![8]);
+    assert_eq!(outputs[0].outputs[0].finish_reason, Some(FinishReason::Stop));
+    assert!(!core.has_work());
 }
 
 /// Test: multiple requests all complete.

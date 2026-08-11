@@ -266,6 +266,15 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     let tokenizer_ref = args.tokenizer.as_deref().unwrap_or(model_ref);
     let tokenizer = load_tokenizer(tokenizer_ref, &model_dir)?;
     let eos_token_id = tokenizer.eos_token_id().unwrap_or(model_config.vocab_size as u32);
+    let mut stop_token_ids = tokenizer.stop_token_ids().to_vec();
+    if !stop_token_ids.contains(&eos_token_id) {
+        stop_token_ids.insert(0, eos_token_id);
+    }
+    #[cfg(feature = "structured-outputs")]
+    let tokenizer_backend =
+        tokenizer.backend_json().context("serializing tokenizer for XGrammar")?;
+    #[cfg(feature = "structured-outputs")]
+    let tokenizer_vocab_size = tokenizer.vocab_size();
     let tokenizer = Arc::new(AsyncTokenizerPool::new(tokenizer, 4));
 
     // Worst-case block count (max_num_seqs * full context); used only as an
@@ -278,6 +287,10 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     let worker = Worker::new(0, model_config.clone(), rllm_tensor::Device::cuda(0), BLOCK_SIZE);
     let mut executor = UniProcExecutor::new(worker);
     executor.set_eos_token_id(eos_token_id);
+    #[cfg(feature = "structured-outputs")]
+    executor
+        .configure_structured_outputs(&tokenizer_backend, tokenizer_vocab_size, &stop_token_ids)
+        .context("initializing XGrammar structured outputs")?;
     executor.worker_mut().initialize_rng_seed(0).context("initializing worker RNG")?;
     let num_gpu_blocks = executor
         .initialize(&[kv_config], args.gpu_memory_utilization)
@@ -294,7 +307,8 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
 
     let device = "cuda:0".to_string();
     let architecture = model_config.architecture.clone();
-    let core = EngineCore::new(Box::new(executor), scheduler, eos_token_id);
+    let core = EngineCore::new(Box::new(executor), scheduler, eos_token_id)
+        .with_stop_token_ids(stop_token_ids);
     let engine = Arc::new(AsyncLLMEngine::new(core));
 
     tracing::info!(
@@ -576,6 +590,47 @@ async fn chat_completions_handler(
     let started = std::time::Instant::now();
     rllm_metrics::counter!("rllm_http_requests_total").increment(1);
 
+    if let Err(error) =
+        validate_structured_output_request(&req.structured_outputs, &req.response_format)
+    {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &error,
+            "invalid_request_error",
+            started,
+        );
+    }
+
+    let request_sampling_params = chat_request_to_sampling_params(&req);
+    if let Err(error) = request_sampling_params.validate() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("invalid sampling params: {error}"),
+            "invalid_request_error",
+            started,
+        );
+    }
+    #[cfg(not(feature = "structured-outputs"))]
+    if request_sampling_params.structured_outputs.is_some() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "structured output support requires the structured-outputs build feature",
+            "invalid_request_error",
+            started,
+        );
+    }
+    #[cfg(feature = "structured-outputs")]
+    if let Some(params) = request_sampling_params.structured_outputs.as_ref() {
+        if let Err(error) = rllm_executor::validate_structured_output(params) {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("invalid structured output: {error}"),
+                "invalid_request_error",
+                started,
+            );
+        }
+    }
+
     if req.messages.is_empty() {
         return typed_error_response(
             axum::http::StatusCode::BAD_REQUEST,
@@ -780,6 +835,47 @@ async fn completions_handler(
     let started = std::time::Instant::now();
     rllm_metrics::counter!("rllm_http_requests_total").increment(1);
 
+    if let Err(error) =
+        validate_structured_output_request(&req.structured_outputs, &req.response_format)
+    {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &error,
+            "invalid_request_error",
+            started,
+        );
+    }
+
+    let request_sampling_params = completion_request_to_sampling_params(&req);
+    if let Err(error) = request_sampling_params.validate() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &format!("invalid sampling params: {error}"),
+            "invalid_request_error",
+            started,
+        );
+    }
+    #[cfg(not(feature = "structured-outputs"))]
+    if request_sampling_params.structured_outputs.is_some() {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "structured output support requires the structured-outputs build feature",
+            "invalid_request_error",
+            started,
+        );
+    }
+    #[cfg(feature = "structured-outputs")]
+    if let Some(params) = request_sampling_params.structured_outputs.as_ref() {
+        if let Err(error) = rllm_executor::validate_structured_output(params) {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("invalid structured output: {error}"),
+                "invalid_request_error",
+                started,
+            );
+        }
+    }
+
     if let PromptInput::Multiple(items) = &req.prompt {
         if items.len() > 16 {
             return typed_error_response(
@@ -889,6 +985,9 @@ pub(crate) async fn submit_and_collect(
             for completion in &output.outputs {
                 generated_ids.extend_from_slice(&completion.token_ids);
                 if let Some(reason) = completion.finish_reason {
+                    if reason == FinishReason::Error {
+                        anyhow::bail!("inference executor failed while generating the request");
+                    }
                     finish_reason = finish_reason_to_openai(reason);
                 }
             }
@@ -941,7 +1040,8 @@ pub(crate) fn finish_reason_to_openai(reason: FinishReason) -> String {
     match reason {
         FinishReason::Stop => "stop",
         FinishReason::Length => "length",
-        FinishReason::Aborted | FinishReason::Error => "stop",
+        FinishReason::Aborted => "stop",
+        FinishReason::Error => "error",
     }
     .to_string()
 }

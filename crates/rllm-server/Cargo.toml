@@ -50,6 +50,7 @@ cuda = [
     "rllm-model/cuda",
     "rllm-worker/cuda",
 ]
+structured-outputs = ["rllm-executor/structured-outputs"]
 
 [dev-dependencies]
 rllm-metrics.workspace = true
