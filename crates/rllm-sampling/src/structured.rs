@@ -36,18 +36,36 @@ pub fn validate_structured_output(params: &StructuredOutputParams) -> Result<()>
 
 impl StructuredOutputManager {
     pub fn new(tokenizer_backend: &str, vocab_size: usize, eos_token_id: u32) -> Result<Self> {
+        Self::new_with_stop_token_ids(tokenizer_backend, vocab_size, &[eos_token_id])
+    }
+
+    pub fn new_with_stop_token_ids(
+        tokenizer_backend: &str,
+        vocab_size: usize,
+        stop_token_ids: &[u32],
+    ) -> Result<Self> {
         let vocab_size_i32 =
             i32::try_from(vocab_size).context("tokenizer vocabulary is too large")?;
-        if eos_token_id as usize >= vocab_size {
-            bail!(
-                "structured outputs require a valid EOS token ID, got {eos_token_id} for vocabulary size {vocab_size}"
-            );
+        if stop_token_ids.is_empty() {
+            bail!("structured outputs require at least one stop token ID");
         }
-        let eos_token_id = i32::try_from(eos_token_id).context("EOS token ID is too large")?;
+        let mut stop_token_ids_i32 = Vec::with_capacity(stop_token_ids.len());
+        for &token_id in stop_token_ids {
+            if token_id as usize >= vocab_size {
+                bail!(
+                    "structured outputs require valid stop token IDs, got {token_id} for vocabulary size {vocab_size}"
+                );
+            }
+            let token_id =
+                i32::try_from(token_id).context("structured output stop token ID is too large")?;
+            if !stop_token_ids_i32.contains(&token_id) {
+                stop_token_ids_i32.push(token_id);
+            }
+        }
         let tokenizer_info = TokenizerInfo::from_backend_str(
             tokenizer_backend,
             Some(vocab_size),
-            vec![eos_token_id],
+            stop_token_ids_i32,
         )
         .context("building XGrammar tokenizer metadata")?;
         let compiler = GrammarCompiler::new(&tokenizer_info);
@@ -96,7 +114,11 @@ impl StructuredOutputManager {
                 .with_context(|| format!("compiling {kind} grammar with XGrammar"))?
         };
 
-        self.matchers.insert(request_id, GrammarMatcher::new(&compiled));
+        // rLLM owns request termination and stops after a model terminal token.
+        // GrammarMatcher::new() terminates immediately when the root rule is
+        // complete, which makes the following EOS/EOT token fail acceptance.
+        let matcher = GrammarMatcher::with(&compiled, None, Some(false), None);
+        self.matchers.insert(request_id, matcher);
         Ok(())
     }
 
@@ -191,5 +213,34 @@ mod tests {
         let mut logits = vec![1.0, 2.0, 3.0];
         manager.mask_logits(&RequestId::new(), &mut logits).unwrap();
         assert_eq!(logits, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn completed_grammar_waits_for_and_accepts_stop_token() {
+        let request_id = RequestId::new();
+        let mut manager = StructuredOutputManager::new(TOKENIZER, 3, 2).unwrap();
+        let params = StructuredOutputParams {
+            json_schema: None,
+            json_object: None,
+            xml: None,
+            regex: None,
+            grammar: Some("root ::= \"a\"".into()),
+            choice: None,
+        };
+        manager.register(request_id, &params).unwrap();
+
+        manager.accept_token(&request_id, 0).unwrap();
+        let matcher = manager.matchers.get(&request_id).unwrap();
+        assert!(matcher.is_completed());
+        assert!(!matcher.is_terminated());
+
+        let mut logits = vec![10.0, 9.0, 8.0];
+        manager.mask_logits(&request_id, &mut logits).unwrap();
+        assert_eq!(logits[0], f32::NEG_INFINITY);
+        assert_eq!(logits[1], f32::NEG_INFINITY);
+        assert!(logits[2].is_finite());
+
+        manager.accept_token(&request_id, 2).unwrap();
+        assert!(manager.matchers.get(&request_id).unwrap().is_terminated());
     }
 }

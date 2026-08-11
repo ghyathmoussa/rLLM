@@ -66,9 +66,13 @@ impl UniProcExecutor {
         &mut self,
         tokenizer_backend: &str,
         vocab_size: usize,
+        stop_token_ids: &[u32],
     ) -> Result<()> {
-        self.structured_outputs =
-            Some(StructuredOutputManager::new(tokenizer_backend, vocab_size, self.eos_token_id)?);
+        self.structured_outputs = Some(StructuredOutputManager::new_with_stop_token_ids(
+            tokenizer_backend,
+            vocab_size,
+            stop_token_ids,
+        )?);
         Ok(())
     }
 }
@@ -515,21 +519,28 @@ impl Executor for UniProcExecutor {
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
     ) -> Result<()> {
+        #[cfg(feature = "structured-outputs")]
+        if let Some(params) = sampling_params.structured_outputs.as_ref() {
+            let manager = self.structured_outputs.as_mut().ok_or_else(|| {
+                anyhow::anyhow!("structured outputs are not configured for this executor")
+            })?;
+            manager.register(request_id, params)?;
+        }
+        #[cfg(not(feature = "structured-outputs"))]
         if sampling_params.structured_outputs.is_some() {
-            #[cfg(feature = "structured-outputs")]
-            {
-                let params = sampling_params.structured_outputs.as_ref().unwrap();
-                let manager = self.structured_outputs.as_mut().ok_or_else(|| {
-                    anyhow::anyhow!("structured outputs are not configured for this executor")
-                })?;
-                manager.register(request_id, params)?;
-            }
-            #[cfg(not(feature = "structured-outputs"))]
             anyhow::bail!("structured output support requires the structured-outputs feature");
         }
         self.worker.model_runner_mut().add_request(request_id, prompt_token_ids.clone());
         self.worker.model_runner_mut().set_sampling_params(request_id, sampling_params);
         Ok(())
+    }
+
+    fn abort_request(&mut self, request_id: &RequestId) {
+        #[cfg(feature = "structured-outputs")]
+        if let Some(manager) = &mut self.structured_outputs {
+            manager.remove(request_id);
+        }
+        self.worker.model_runner_mut().remove_request(request_id);
     }
 
     fn shutdown(&mut self) {

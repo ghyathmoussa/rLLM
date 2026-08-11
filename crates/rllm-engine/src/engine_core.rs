@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use rllm_core::{
@@ -41,11 +41,24 @@ pub struct EngineCore {
     scheduler: Scheduler,
     requests: HashMap<RequestId, EngineRequest>,
     eos_token_id: u32,
+    stop_token_ids: HashSet<u32>,
 }
 
 impl EngineCore {
     pub fn new(executor: Box<dyn Executor>, scheduler: Scheduler, eos_token_id: u32) -> Self {
-        Self { executor, scheduler, requests: HashMap::new(), eos_token_id }
+        Self {
+            executor,
+            scheduler,
+            requests: HashMap::new(),
+            eos_token_id,
+            stop_token_ids: HashSet::from([eos_token_id]),
+        }
+    }
+
+    pub fn with_stop_token_ids(mut self, stop_token_ids: Vec<u32>) -> Self {
+        self.stop_token_ids.extend(stop_token_ids);
+        self.stop_token_ids.insert(self.eos_token_id);
+        self
     }
 
     /// Add a new inference request.
@@ -83,6 +96,7 @@ impl EngineCore {
     /// Abort a request.
     pub fn abort_request(&mut self, request_id: RequestId) {
         self.scheduler.abort_request(request_id);
+        self.executor.abort_request(&request_id);
         self.requests.remove(&request_id);
     }
 
@@ -118,7 +132,41 @@ impl EngineCore {
                     self.scheduler.debug_request_state_summary(scheduler_output.finished.len())
                 );
                 tracing::debug!("{}", self.scheduler.debug_kv_cache_summary());
-                return vec![];
+                let affected_ids: HashSet<RequestId> = scheduler_output
+                    .scheduled_new
+                    .iter()
+                    .chain(scheduler_output.scheduled_cached.iter())
+                    .chain(scheduler_output.scheduled_running.iter())
+                    .copied()
+                    .collect();
+                let mut error_outputs = Vec::with_capacity(affected_ids.len());
+                for request_id in affected_ids {
+                    self.scheduler.abort_request(request_id);
+                    self.executor.abort_request(&request_id);
+                    if let Some(req) = self.requests.remove(&request_id) {
+                        let prompt_tokens =
+                            u32::try_from(req.prompt_token_ids.len()).unwrap_or(u32::MAX);
+                        let completion_tokens =
+                            u32::try_from(req.generated_token_ids.len()).unwrap_or(u32::MAX);
+                        error_outputs.push(RequestOutput {
+                            request_id,
+                            outputs: vec![CompletionOutput {
+                                index: 0,
+                                text: String::new(),
+                                token_ids: Vec::new(),
+                                finish_reason: Some(FinishReason::Error),
+                                logprobs: None,
+                            }],
+                            finished: true,
+                            usage: Usage {
+                                prompt_tokens,
+                                completion_tokens,
+                                total_tokens: prompt_tokens.saturating_add(completion_tokens),
+                            },
+                        });
+                    }
+                }
+                return error_outputs;
             }
         };
 
@@ -146,7 +194,7 @@ impl EngineCore {
 
                     // Check stopping conditions.
                     let reached_eos =
-                        token_id == self.eos_token_id && !req.sampling_params.ignore_eos;
+                        self.stop_token_ids.contains(&token_id) && !req.sampling_params.ignore_eos;
                     let reached_length = req.generated_token_ids.len() >= req.max_tokens as usize;
                     let hit_stop_token = req.sampling_params.stop_token_ids.contains(&token_id);
 
@@ -199,6 +247,7 @@ impl EngineCore {
             // Tell the scheduler to stop tracking this request so has_work()
             // and future step() calls no longer include it.
             self.scheduler.abort_request(*id);
+            self.executor.abort_request(id);
 
             if let Some(req) = self.requests.remove(id) {
                 // Record e2e latency and finished count.

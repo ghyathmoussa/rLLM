@@ -23,6 +23,7 @@ pub trait Executor: Send + Sync {
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
     ) -> Result<()>;
+    fn abort_request(&mut self, _request_id: &RequestId) {}
     fn shutdown(&mut self);
 }
 

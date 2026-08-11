@@ -6,6 +6,7 @@ use tokenizers::Tokenizer as HfTokenizer;
 pub struct Tokenizer {
     inner: HfTokenizer,
     eos_token_id: Option<u32>,
+    stop_token_ids: Vec<u32>,
     bos_token_id: Option<u32>,
     pad_token_id: Option<u32>,
     chat_template: Option<String>,
@@ -90,6 +91,10 @@ impl Tokenizer {
         self.eos_token_id
     }
 
+    pub fn stop_token_ids(&self) -> &[u32] {
+        &self.stop_token_ids
+    }
+
     pub fn bos_token_id(&self) -> Option<u32> {
         self.bos_token_id
     }
@@ -111,6 +116,7 @@ impl Tokenizer {
         Some(Self {
             inner: self.inner.clone(),
             eos_token_id: self.eos_token_id,
+            stop_token_ids: self.stop_token_ids.clone(),
             bos_token_id: self.bos_token_id,
             pad_token_id: self.pad_token_id,
             chat_template: self.chat_template.clone(),
@@ -119,12 +125,30 @@ impl Tokenizer {
 
     fn build(inner: HfTokenizer, config: &TokenizerConfigData) -> Result<Self> {
         let eos_token_id = config
-            .eos_token
-            .as_deref()
-            .and_then(|t| token_id_from_str(&inner, t))
+            .eos_tokens
+            .iter()
+            .find_map(|token| token_id_from_str(&inner, token))
             .or_else(|| single_token_id(&inner, "</s>"))
             .or_else(|| single_token_id(&inner, "<|end_of_text|>"))
             .or_else(|| single_token_id(&inner, "<|eot_id|>"));
+        let mut stop_token_ids = Vec::new();
+        for token in config.eos_tokens.iter().map(String::as_str).chain([
+            "</s>",
+            "<|end_of_text|>",
+            "<|eom_id|>",
+            "<|eot_id|>",
+        ]) {
+            if let Some(token_id) = token_id_from_str(&inner, token)
+                && !stop_token_ids.contains(&token_id)
+            {
+                stop_token_ids.push(token_id);
+            }
+        }
+        if let Some(eos_token_id) = eos_token_id
+            && !stop_token_ids.contains(&eos_token_id)
+        {
+            stop_token_ids.insert(0, eos_token_id);
+        }
 
         let bos_token_id = config
             .bos_token
@@ -138,6 +162,7 @@ impl Tokenizer {
         Ok(Self {
             inner,
             eos_token_id,
+            stop_token_ids,
             bos_token_id,
             pad_token_id,
             chat_template: config.chat_template.clone(),
@@ -162,7 +187,7 @@ fn token_id_from_str(tokenizer: &HfTokenizer, s: &str) -> Option<u32> {
 }
 
 struct TokenizerConfigData {
-    eos_token: Option<String>,
+    eos_tokens: Vec<String>,
     bos_token: Option<String>,
     pad_token: Option<String>,
     chat_template: Option<String>,
@@ -196,7 +221,7 @@ fn load_config_from_dir(dir: &Path) -> Result<TokenizerConfigData> {
     let json: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("parsing {}", config_path.display()))?;
 
-    let eos_token = extract_token_field(&json, "eos_token");
+    let eos_tokens = extract_token_fields(&json, "eos_token");
     let bos_token = extract_token_field(&json, "bos_token");
     let pad_token = extract_token_field(&json, "pad_token");
     let chat_template = json.get("chat_template").and_then(|v| {
@@ -210,31 +235,60 @@ fn load_config_from_dir(dir: &Path) -> Result<TokenizerConfigData> {
         }
     });
 
-    Ok(TokenizerConfigData { eos_token, bos_token, pad_token, chat_template })
+    Ok(TokenizerConfigData { eos_tokens, bos_token, pad_token, chat_template })
 }
 
-fn extract_token_field(json: &serde_json::Value, field: &str) -> Option<String> {
-    let val = json.get(field)?;
-    if val.is_string() {
-        val.as_str().map(|s| s.to_string())
-    } else if val.is_object() {
-        // {"content": "</s>", "lstrip": false, ...}
-        val.get("content").and_then(|c| c.as_str().map(|s| s.to_string()))
-    } else {
-        None
+fn extract_token_fields(json: &serde_json::Value, field: &str) -> Vec<String> {
+    let Some(value) = json.get(field) else {
+        return Vec::new();
+    };
+    match value {
+        serde_json::Value::Array(values) => values.iter().filter_map(extract_token_value).collect(),
+        value => extract_token_value(value).into_iter().collect(),
     }
 }
 
+fn extract_token_value(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(ToOwned::to_owned).or_else(|| {
+        value.get("content").and_then(|content| content.as_str()).map(ToOwned::to_owned)
+    })
+}
+
+fn extract_token_field(json: &serde_json::Value, field: &str) -> Option<String> {
+    json.get(field).and_then(extract_token_value)
+}
+
 fn empty_config() -> TokenizerConfigData {
-    TokenizerConfigData { eos_token: None, bos_token: None, pad_token: None, chat_template: None }
+    TokenizerConfigData {
+        eos_tokens: Vec::new(),
+        bos_token: None,
+        pad_token: None,
+        chat_template: None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn decode_single_token_returns_string() {
         // We can't test with a real tokenizer in unit tests without a model,
         // but we can verify the API compiles and returns empty for invalid tokens.
         // Real tests will use from_file with actual tokenizer files.
+    }
+
+    #[test]
+    fn extracts_scalar_object_and_array_token_fields() {
+        let scalar = serde_json::json!({"eos_token": "<eos>"});
+        assert_eq!(extract_token_fields(&scalar, "eos_token"), ["<eos>"]);
+
+        let object = serde_json::json!({"eos_token": {"content": "<eot>"}});
+        assert_eq!(extract_token_fields(&object, "eos_token"), ["<eot>"]);
+
+        let array = serde_json::json!({
+            "eos_token": ["<eos>", {"content": "<eot>"}]
+        });
+        assert_eq!(extract_token_fields(&array, "eos_token"), ["<eos>", "<eot>"]);
     }
 }
