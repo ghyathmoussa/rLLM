@@ -22,7 +22,7 @@ pub trait Executor: Send + Sync {
         request_id: RequestId,
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
-    );
+    ) -> Result<()>;
     fn shutdown(&mut self);
 }
 

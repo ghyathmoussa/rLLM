@@ -26,6 +26,7 @@ tokio.workspace = true
 default = []
 cuda = ["rllm-server/cuda", "rllm-model/cuda"]
 candle-backend = ["rllm-server/candle-backend", "rllm-model/candle-backend"]
+structured-outputs = ["rllm-server/structured-outputs"]
 
 [[example]]
 name = "offline_generate"
@@ -143,6 +144,10 @@ subtle = "2"
 cudarc = { version = "0.19.7", features = ["driver", "fallback-latest"] }
 libc = "0.2"
 
+
+# Structured decoding
+xgrammar = { version = "0.5.0", default-features = false }
+dlpark = "0.6.0"
 
 # Hashing
 sha2 = "0.10"

@@ -14,5 +14,12 @@ thiserror.workspace = true
 tracing.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+xgrammar = { workspace = true, optional = true }
+dlpark = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+structured-outputs = ["dep:xgrammar", "dep:dlpark", "dep:serde_json"]
 
 [dev-dependencies]

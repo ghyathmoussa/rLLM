@@ -81,6 +81,11 @@ impl Tokenizer {
         self.inner.get_vocab_size(true)
     }
 
+    /// Serialize the Hugging Face tokenizer backend for XGrammar.
+    pub fn backend_json(&self) -> Result<String> {
+        self.inner.to_string(false).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     pub fn eos_token_id(&self) -> Option<u32> {
         self.eos_token_id
     }

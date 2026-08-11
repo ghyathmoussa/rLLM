@@ -224,6 +224,64 @@ components:
           type: string
           example: "What is the capital of France?"
 
+    StructuredOutputs:
+      type: object
+      description: Set exactly one constraint. XML values are XGrammar EBNF grammars for an exact XML shape.
+      properties:
+        json:
+          description: JSON Schema object or JSON-encoded schema string.
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: string
+        json_object:
+          type: boolean
+          enum: [true]
+        xml:
+          type: string
+          description: XGrammar EBNF whose root rule describes the XML document.
+        regex:
+          type: string
+        grammar:
+          type: string
+          description: XGrammar EBNF grammar.
+        choice:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+
+    ResponseFormat:
+      oneOf:
+        - type: object
+          required: [type]
+          properties:
+            type:
+              type: string
+              enum: [text, json_object]
+        - type: object
+          required: [type, json_schema]
+          properties:
+            type:
+              type: string
+              enum: [json_schema]
+            json_schema:
+              type: object
+              required: [name, schema]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  nullable: true
+                schema:
+                  type: object
+                  additionalProperties: true
+                strict:
+                  type: boolean
+                  nullable: true
+
     ChatCompletionRequest:
       type: object
       required:
@@ -296,6 +354,10 @@ components:
           format: int64
           nullable: true
           example: 42
+        structured_outputs:
+          $ref: '#/components/schemas/StructuredOutputs'
+        response_format:
+          $ref: '#/components/schemas/ResponseFormat'
 
     ChatCompletionResponse:
       type: object
@@ -434,6 +496,11 @@ components:
           type: integer
           format: int64
           nullable: true
+
+        structured_outputs:
+          $ref: '#/components/schemas/StructuredOutputs'
+        response_format:
+          $ref: '#/components/schemas/ResponseFormat'
 
     CompletionResponse:
       type: object

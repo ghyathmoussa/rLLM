@@ -54,12 +54,13 @@ impl EngineCore {
     /// registers with the scheduler and executor.
     pub fn add_request(&mut self, request: InferenceRequest) -> Result<()> {
         let request_id = request.request_id;
+        request.sampling_params.validate()?;
         let token_ids = request.token_ids.clone().unwrap_or_default();
         let max_tokens = request.sampling_params.max_tokens.unwrap_or(16);
         let sampling_params = request.sampling_params.clone();
         let prompt_text = request.prompt.clone();
 
-        self.executor.add_request(request_id, token_ids.clone(), sampling_params.clone());
+        self.executor.add_request(request_id, token_ids.clone(), sampling_params.clone())?;
 
         let engine_req = EngineRequest {
             prompt_token_ids: token_ids,

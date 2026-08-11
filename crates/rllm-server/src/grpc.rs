@@ -461,6 +461,8 @@ fn proto_to_chat_request(req: pb::ChatCompletionRequest) -> openai::ChatCompleti
         presence_penalty: req.presence_penalty,
         frequency_penalty: req.frequency_penalty,
         seed: req.seed,
+        structured_outputs: None,
+        response_format: None,
     }
 }
 
@@ -479,6 +481,8 @@ fn proto_to_completion_request(req: pb::CompletionRequest) -> openai::Completion
         presence_penalty: req.presence_penalty,
         frequency_penalty: req.frequency_penalty,
         seed: req.seed,
+        structured_outputs: None,
+        response_format: None,
     }
 }
 

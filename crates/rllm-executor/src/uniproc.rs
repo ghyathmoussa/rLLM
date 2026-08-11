@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rllm_cache::spec::KVCacheConfig;
 use rllm_core::{ids::RequestId, request::SamplingParams};
+#[cfg(feature = "structured-outputs")]
+use rllm_sampling::StructuredOutputManager;
 use rllm_sampling::{NGramProposer, Sampler, SamplingInput, SpeculativeProposer};
 use rllm_scheduler::SchedulerOutput;
 use rllm_worker::Worker;
@@ -27,13 +29,21 @@ pub struct UniProcExecutor {
     worker: Worker,
     sampler: Sampler,
     eos_token_id: u32,
+    #[cfg(feature = "structured-outputs")]
+    structured_outputs: Option<StructuredOutputManager>,
 }
 
 impl UniProcExecutor {
     pub fn new(mut worker: Worker) -> Self {
         let eos_token_id = worker.model_config().vocab_size as u32; // placeholder
         let sampler = worker.take_sampler().unwrap_or_default();
-        Self { worker, sampler, eos_token_id }
+        Self {
+            worker,
+            sampler,
+            eos_token_id,
+            #[cfg(feature = "structured-outputs")]
+            structured_outputs: None,
+        }
     }
 
     /// Get a reference to the underlying worker.
@@ -49,6 +59,17 @@ impl UniProcExecutor {
     /// Set the EOS token ID (should be called after model loading).
     pub fn set_eos_token_id(&mut self, eos_token_id: u32) {
         self.eos_token_id = eos_token_id;
+    }
+
+    #[cfg(feature = "structured-outputs")]
+    pub fn configure_structured_outputs(
+        &mut self,
+        tokenizer_backend: &str,
+        vocab_size: usize,
+    ) -> Result<()> {
+        self.structured_outputs =
+            Some(StructuredOutputManager::new(tokenizer_backend, vocab_size, self.eos_token_id)?);
+        Ok(())
     }
 }
 
@@ -92,6 +113,13 @@ impl Executor for UniProcExecutor {
     #[tracing::instrument(skip_all, name = "model_forward")]
     fn execute_model(&mut self, scheduler_output: &SchedulerOutput) -> Result<ExecutorOutput> {
         let start = std::time::Instant::now();
+
+        #[cfg(feature = "structured-outputs")]
+        if let Some(manager) = &mut self.structured_outputs {
+            for request_id in &scheduler_output.finished {
+                manager.remove(request_id);
+            }
+        }
 
         // 0. Propose speculative draft tokens for decode requests.
         let mut speculative_draft_map: HashMap<RequestId, Vec<u32>> = HashMap::new();
@@ -427,6 +455,13 @@ impl Executor for UniProcExecutor {
                         None => vec![0.0f32; vocab_size],
                     };
 
+                    #[cfg(feature = "structured-outputs")]
+                    let mut logits = logits;
+                    #[cfg(feature = "structured-outputs")]
+                    if let Some(manager) = &mut self.structured_outputs {
+                        manager.mask_logits(&request_id, &mut logits)?;
+                    }
+
                     let sampling_input = SamplingInput {
                         logits,
                         params: sampling_params.clone(),
@@ -436,6 +471,10 @@ impl Executor for UniProcExecutor {
                         bad_word_token_ids: vec![],
                     };
                     let output = self.sampler.sample(&sampling_input);
+                    #[cfg(feature = "structured-outputs")]
+                    if let Some(manager) = &mut self.structured_outputs {
+                        manager.accept_token(&request_id, output.token_id)?;
+                    }
                     (output.token_id, output.logprob)
                 };
 
@@ -475,9 +514,22 @@ impl Executor for UniProcExecutor {
         request_id: RequestId,
         prompt_token_ids: Vec<u32>,
         sampling_params: SamplingParams,
-    ) {
+    ) -> Result<()> {
+        if sampling_params.structured_outputs.is_some() {
+            #[cfg(feature = "structured-outputs")]
+            {
+                let params = sampling_params.structured_outputs.as_ref().unwrap();
+                let manager = self.structured_outputs.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!("structured outputs are not configured for this executor")
+                })?;
+                manager.register(request_id, params)?;
+            }
+            #[cfg(not(feature = "structured-outputs"))]
+            anyhow::bail!("structured output support requires the structured-outputs feature");
+        }
         self.worker.model_runner_mut().add_request(request_id, prompt_token_ids.clone());
         self.worker.model_runner_mut().set_sampling_params(request_id, sampling_params);
+        Ok(())
     }
 
     fn shutdown(&mut self) {

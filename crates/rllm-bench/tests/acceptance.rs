@@ -266,6 +266,8 @@ fn acceptance_openai_chat_completion() {
         presence_penalty: Some(0.1),
         frequency_penalty: Some(0.1),
         seed: Some(42),
+        structured_outputs: None,
+        response_format: None,
     };
 
     let params = rllm_server::openai::chat_request_to_sampling_params(&chat_req);
