@@ -8,7 +8,74 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    /// OpenAI represents function arguments as a JSON-encoded string.
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionTool {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: FunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoiceMode {
+    None,
+    Auto,
+    Required,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    Mode(ToolChoiceMode),
+    Named(NamedToolChoice),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedToolChoice {
+    #[serde(rename = "type")]
+    pub tool_type: String,
+    pub function: NamedFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamedFunction {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +108,12 @@ pub struct ChatCompletionRequest {
     pub structured_outputs: Option<StructuredOutputParams>,
     #[serde(default)]
     pub response_format: Option<ResponseFormat>,
+    #[serde(default)]
+    pub tools: Option<Vec<ChatCompletionTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +390,185 @@ pub fn validate_structured_output_request(
     Ok(())
 }
 
+pub fn validate_tool_call_request(req: &ChatCompletionRequest) -> Result<(), String> {
+    let tools = req.tools.as_deref().unwrap_or_default();
+    if req.tools.as_ref().is_some_and(Vec::is_empty) {
+        return Err("tools must contain at least one function".into());
+    }
+    if tools.len() > 128 {
+        return Err("tools cannot contain more than 128 functions".into());
+    }
+
+    let mut names = std::collections::HashSet::with_capacity(tools.len());
+    for tool in tools {
+        if tool.tool_type != "function" {
+            return Err("only tools with type \"function\" are supported".into());
+        }
+        validate_function_name(&tool.function.name)?;
+        if !names.insert(tool.function.name.as_str()) {
+            return Err(format!("duplicate tool function name: {}", tool.function.name));
+        }
+        if let Some(parameters) = &tool.function.parameters
+            && !parameters.is_object()
+        {
+            return Err(format!(
+                "parameters for tool {} must be a JSON object",
+                tool.function.name
+            ));
+        }
+    }
+
+    match req.tool_choice.as_ref() {
+        None | Some(ToolChoice::Mode(ToolChoiceMode::None)) => {}
+        Some(ToolChoice::Mode(ToolChoiceMode::Auto | ToolChoiceMode::Required)) => {
+            if tools.is_empty() {
+                return Err("tools must be set when tool_choice is auto or required".into());
+            }
+        }
+        Some(ToolChoice::Named(choice)) => {
+            if choice.tool_type != "function" {
+                return Err("named tool_choice must have type \"function\"".into());
+            }
+            validate_function_name(&choice.function.name)?;
+            if !names.contains(choice.function.name.as_str()) {
+                return Err("the named tool_choice does not match any supplied tool".into());
+            }
+        }
+    }
+
+    for message in &req.messages {
+        validate_tool_message(message)?;
+    }
+    Ok(())
+}
+
+pub fn tools_for_chat_template(
+    req: &ChatCompletionRequest,
+) -> Result<Option<Vec<serde_json::Value>>, String> {
+    validate_tool_call_request(req)?;
+    let Some(tools) = req.tools.as_ref() else {
+        return Ok(None);
+    };
+    if matches!(req.tool_choice.as_ref(), Some(ToolChoice::Mode(ToolChoiceMode::None))) {
+        return Ok(None);
+    }
+
+    let named = match req.tool_choice.as_ref() {
+        Some(ToolChoice::Named(choice)) => Some(choice.function.name.as_str()),
+        _ => None,
+    };
+    tools
+        .iter()
+        .filter(|tool| named.is_none_or(|name| tool.function.name == name))
+        .map(|tool| serde_json::to_value(tool).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+pub fn messages_for_chat_template(
+    req: &ChatCompletionRequest,
+) -> Result<Vec<serde_json::Value>, String> {
+    validate_tool_call_request(req)?;
+    req.messages
+        .iter()
+        .map(|message| {
+            let mut value = serde_json::to_value(message).map_err(|error| error.to_string())?;
+            if let Some(tool_calls) =
+                value.get_mut("tool_calls").and_then(|calls| calls.as_array_mut())
+            {
+                for tool_call in tool_calls {
+                    let Some(arguments) = tool_call
+                        .get_mut("function")
+                        .and_then(|function| function.get_mut("arguments"))
+                    else {
+                        continue;
+                    };
+                    if let Some(encoded) = arguments.as_str() {
+                        *arguments = serde_json::from_str(encoded).map_err(|_| {
+                            "assistant tool call arguments must contain valid JSON".to_string()
+                        })?;
+                    }
+                }
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
+pub fn tool_choice_for_chat_template(
+    req: &ChatCompletionRequest,
+) -> Result<Option<serde_json::Value>, String> {
+    validate_tool_call_request(req)?;
+    if req.tools.is_none() {
+        return Ok(None);
+    }
+    let choice = req.tool_choice.clone().unwrap_or(ToolChoice::Mode(ToolChoiceMode::Auto));
+    serde_json::to_value(choice).map(Some).map_err(|error| error.to_string())
+}
+
+fn validate_function_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 64 {
+        return Err("tool function names must contain between 1 and 64 characters".into());
+    }
+    if !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) {
+        return Err(format!(
+            "invalid tool function name {name:?}: use only letters, numbers, underscores, or hyphens"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tool_message(message: &ChatMessage) -> Result<(), String> {
+    match message.role.as_str() {
+        "system" | "user" => {
+            if message.content.is_none() {
+                return Err(format!("{} messages require content", message.role));
+            }
+            if message.tool_calls.is_some() || message.tool_call_id.is_some() {
+                return Err(format!("{} messages cannot contain tool call fields", message.role));
+            }
+        }
+        "assistant" => {
+            if message.content.is_none() && message.tool_calls.as_ref().is_none_or(Vec::is_empty) {
+                return Err("assistant messages require content or tool_calls".into());
+            }
+            if message.tool_call_id.is_some() {
+                return Err("assistant messages cannot contain tool_call_id".into());
+            }
+            if let Some(tool_calls) = &message.tool_calls {
+                for tool_call in tool_calls {
+                    if tool_call.id.is_empty() {
+                        return Err("assistant tool calls require a non-empty id".into());
+                    }
+                    if tool_call.tool_type != "function" {
+                        return Err(
+                            "only assistant tool calls with type \"function\" are supported".into(),
+                        );
+                    }
+                    validate_function_name(&tool_call.function.name)?;
+                    serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+                        .map_err(|_| {
+                            "assistant tool call arguments must contain valid JSON".to_string()
+                        })?;
+                }
+            }
+        }
+        "tool" => {
+            if message.content.is_none() {
+                return Err("tool messages require content".into());
+            }
+            if message.tool_call_id.as_deref().is_none_or(str::is_empty) {
+                return Err("tool messages require a non-empty tool_call_id".into());
+            }
+            if message.tool_calls.is_some() {
+                return Err("tool messages cannot contain tool_calls".into());
+            }
+        }
+        role => return Err(format!("unsupported chat message role: {role}")),
+    }
+    Ok(())
+}
+
 fn request_structured_outputs(
     structured_outputs: Option<StructuredOutputParams>,
     response_format: Option<&ResponseFormat>,
@@ -439,8 +691,20 @@ mod tests {
         let req = ChatCompletionRequest {
             model: "test-model".into(),
             messages: vec![
-                ChatMessage { role: "system".into(), content: "You are helpful.".into() },
-                ChatMessage { role: "user".into(), content: "Hello!".into() },
+                ChatMessage {
+                    role: "system".into(),
+                    content: Some("You are helpful.".into()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: Some("Hello!".into()),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
             ],
             temperature: Some(0.7),
             max_tokens: Some(100),
@@ -455,12 +719,97 @@ mod tests {
             seed: None,
             structured_outputs: None,
             response_format: None,
+            tools: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: ChatCompletionRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.model, "test-model");
         assert_eq!(back.messages.len(), 2);
         assert_eq!(back.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn tool_request_parses_and_defaults_template_choice_to_auto() {
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Weather in Istanbul?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }
+            }]
+        }))
+        .unwrap();
+
+        validate_tool_call_request(&req).unwrap();
+        assert_eq!(tools_for_chat_template(&req).unwrap().unwrap().len(), 1);
+        assert_eq!(tool_choice_for_chat_template(&req).unwrap(), Some(serde_json::json!("auto")));
+    }
+
+    #[test]
+    fn named_tool_choice_filters_template_tools() {
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "tools": [
+                {"type": "function", "function": {"name": "get_weather"}},
+                {"type": "function", "function": {"name": "get_time"}}
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+        }))
+        .unwrap();
+
+        let tools = tools_for_chat_template(&req).unwrap().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+    }
+
+    #[test]
+    fn prior_tool_calls_are_normalized_for_model_templates() {
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Weather?"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Istanbul\"}"
+                        }
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "Sunny"}
+            ]
+        }))
+        .unwrap();
+
+        let messages = messages_for_chat_template(&req).unwrap();
+        assert_eq!(messages[1]["tool_calls"][0]["function"]["arguments"]["city"], "Istanbul");
+    }
+
+    #[test]
+    fn rejects_unknown_named_tool_choice() {
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Weather?"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+            "tool_choice": {"type": "function", "function": {"name": "missing"}}
+        }))
+        .unwrap();
+        assert!(validate_tool_call_request(&req).is_err());
     }
 
     #[test]

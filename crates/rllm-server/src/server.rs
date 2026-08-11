@@ -600,6 +600,14 @@ async fn chat_completions_handler(
             started,
         );
     }
+    if let Err(error) = validate_tool_call_request(&req) {
+        return typed_error_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            &error,
+            "invalid_request_error",
+            started,
+        );
+    }
 
     let request_sampling_params = chat_request_to_sampling_params(&req);
     if let Err(error) = request_sampling_params.validate() {
@@ -658,15 +666,50 @@ async fn chat_completions_handler(
         return placeholder_chat_response(&state.model_name, started);
     };
 
-    let messages = req
-        .messages
-        .iter()
-        .map(|msg| rllm_core::request::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    let prompt = match runtime.tokenizer.render_chat(messages.clone(), true).await {
+    let messages = match messages_for_chat_template(&req) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &error,
+                "invalid_request_error",
+                started,
+            );
+        }
+    };
+    let tools = match tools_for_chat_template(&req) {
+        Ok(tools) => tools,
+        Err(error) => {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &error,
+                "invalid_request_error",
+                started,
+            );
+        }
+    };
+    let tool_choice = match tool_choice_for_chat_template(&req) {
+        Ok(tool_choice) => tool_choice,
+        Err(error) => {
+            return typed_error_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &error,
+                "invalid_request_error",
+                started,
+            );
+        }
+    };
+    let prompt = match runtime
+        .tokenizer
+        .render_chat_with_tools(
+            messages,
+            tools,
+            tool_choice,
+            req.parallel_tool_calls.unwrap_or(true),
+            true,
+        )
+        .await
+    {
         Ok(p) => p,
         Err(e) => {
             return typed_error_response(

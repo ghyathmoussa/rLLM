@@ -5,7 +5,10 @@ use parking_lot::Mutex;
 use rllm_core::request::ChatMessage;
 
 use crate::{
-    chat_template::{render_chat_template, render_chat_template_fallback},
+    chat_template::{
+        render_chat_template, render_chat_template_fallback,
+        render_chat_template_fallback_with_tools, render_chat_template_with_tools,
+    },
     tokenizer::Tokenizer,
 };
 
@@ -78,6 +81,37 @@ impl AsyncTokenizerPool {
                 render_chat_template(template, &messages, add_generation_prompt)
             } else {
                 Ok(render_chat_template_fallback(&messages, add_generation_prompt))
+            }
+        })
+        .await?
+    }
+
+    pub async fn render_chat_with_tools(
+        &self,
+        messages: Vec<serde_json::Value>,
+        tools: Option<Vec<serde_json::Value>>,
+        tool_choice: Option<serde_json::Value>,
+        parallel_tool_calls: bool,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = inner.lock();
+            if let Some(template) = guard.tokenizers[0].chat_template() {
+                render_chat_template_with_tools(
+                    template,
+                    messages,
+                    tools,
+                    tool_choice,
+                    parallel_tool_calls,
+                    add_generation_prompt,
+                )
+            } else {
+                render_chat_template_fallback_with_tools(
+                    &messages,
+                    tools.as_deref(),
+                    add_generation_prompt,
+                )
             }
         })
         .await?

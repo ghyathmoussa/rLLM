@@ -8,7 +8,9 @@ use tonic::{Request, Response, Status};
 use crate::{
     openai::{
         self, PromptInput, StopSequence, chat_request_to_sampling_params,
-        completion_request_to_sampling_params, generate_completion_id, now_timestamp,
+        completion_request_to_sampling_params, generate_completion_id, messages_for_chat_template,
+        now_timestamp, tool_choice_for_chat_template, tools_for_chat_template,
+        validate_tool_call_request,
     },
     server::{
         AppState, EngineCompletion, ModelRuntime, finish_reason_to_openai, submit_and_collect,
@@ -371,17 +373,19 @@ async fn run_chat_completion(
     req: openai::ChatCompletionRequest,
     timeout: Duration,
 ) -> Result<EngineCompletion, Status> {
-    let messages = req
-        .messages
-        .iter()
-        .map(|msg| rllm_core::request::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        })
-        .collect::<Vec<_>>();
+    validate_tool_call_request(&req).map_err(Status::invalid_argument)?;
+    let messages = messages_for_chat_template(&req).map_err(Status::invalid_argument)?;
+    let tools = tools_for_chat_template(&req).map_err(Status::invalid_argument)?;
+    let tool_choice = tool_choice_for_chat_template(&req).map_err(Status::invalid_argument)?;
     let prompt = runtime
         .tokenizer
-        .render_chat(messages, true)
+        .render_chat_with_tools(
+            messages,
+            tools,
+            tool_choice,
+            req.parallel_tool_calls.unwrap_or(true),
+            true,
+        )
         .await
         .map_err(|e| Status::internal(format!("failed to render chat template: {e}")))?;
     let token_ids = runtime
@@ -403,17 +407,19 @@ async fn start_chat_stream(
     runtime: ModelRuntime,
     req: openai::ChatCompletionRequest,
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<rllm_core::output::RequestOutput>, Status> {
-    let messages = req
-        .messages
-        .iter()
-        .map(|msg| rllm_core::request::ChatMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        })
-        .collect::<Vec<_>>();
+    validate_tool_call_request(&req).map_err(Status::invalid_argument)?;
+    let messages = messages_for_chat_template(&req).map_err(Status::invalid_argument)?;
+    let tools = tools_for_chat_template(&req).map_err(Status::invalid_argument)?;
+    let tool_choice = tool_choice_for_chat_template(&req).map_err(Status::invalid_argument)?;
     let prompt = runtime
         .tokenizer
-        .render_chat(messages, true)
+        .render_chat_with_tools(
+            messages,
+            tools,
+            tool_choice,
+            req.parallel_tool_calls.unwrap_or(true),
+            true,
+        )
         .await
         .map_err(|e| Status::internal(format!("failed to render chat template: {e}")))?;
     let token_ids = runtime
@@ -448,7 +454,13 @@ fn proto_to_chat_request(req: pb::ChatCompletionRequest) -> openai::ChatCompleti
         messages: req
             .messages
             .into_iter()
-            .map(|msg| openai::ChatMessage { role: msg.role, content: msg.content })
+            .map(|msg| openai::ChatMessage {
+                role: msg.role,
+                content: Some(msg.content),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            })
             .collect(),
         temperature: req.temperature,
         top_p: req.top_p,
@@ -463,6 +475,9 @@ fn proto_to_chat_request(req: pb::ChatCompletionRequest) -> openai::ChatCompleti
         seed: req.seed,
         structured_outputs: None,
         response_format: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
     }
 }
 

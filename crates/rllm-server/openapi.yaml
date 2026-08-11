@@ -214,15 +214,93 @@ components:
       type: object
       required:
         - role
-        - content
       properties:
         role:
           type: string
-          enum: [system, user, assistant]
+          enum: [system, user, assistant, tool]
           example: user
         content:
           type: string
+          nullable: true
           example: "What is the capital of France?"
+        name:
+          type: string
+        tool_call_id:
+          type: string
+          description: Required on messages with role tool.
+        tool_calls:
+          type: array
+          description: Function calls made by a prior assistant message.
+          items:
+            $ref: '#/components/schemas/ToolCall'
+
+    FunctionCall:
+      type: object
+      required: [name, arguments]
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        arguments:
+          type: string
+          description: JSON-encoded function arguments.
+
+    ToolCall:
+      type: object
+      required: [id, type, function]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [function]
+        function:
+          $ref: '#/components/schemas/FunctionCall'
+
+    FunctionDefinition:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        description:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+          description: JSON Schema describing the function arguments.
+        strict:
+          type: boolean
+          nullable: true
+
+    ChatCompletionTool:
+      type: object
+      required: [type, function]
+      properties:
+        type:
+          type: string
+          enum: [function]
+        function:
+          $ref: '#/components/schemas/FunctionDefinition'
+
+    ToolChoice:
+      oneOf:
+        - type: string
+          enum: [none, auto, required]
+        - type: object
+          required: [type, function]
+          properties:
+            type:
+              type: string
+              enum: [function]
+            function:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  pattern: '^[A-Za-z0-9_-]{1,64}$'
 
     StructuredOutputs:
       type: object
@@ -358,6 +436,18 @@ components:
           $ref: '#/components/schemas/StructuredOutputs'
         response_format:
           $ref: '#/components/schemas/ResponseFormat'
+        tools:
+          type: array
+          minItems: 1
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/ChatCompletionTool'
+        tool_choice:
+          $ref: '#/components/schemas/ToolChoice'
+        parallel_tool_calls:
+          type: boolean
+          nullable: true
+          default: true
 
     ChatCompletionResponse:
       type: object
