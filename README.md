@@ -40,6 +40,7 @@ What rLLM provides:
 
 - **OpenAI-compatible API** – Drop-in replacement for existing OpenAI client code
 - **Structured outputs** – XGrammar-backed JSON Schema and fixed-shape XML constraints ([guide](docs/structured-outputs.md))
+- **Tool request plumbing** – OpenAI-compatible function definitions, tool choice, and tool-aware chat templates ([guide](docs/tool-calling.md))
 - **gRPC API** – Optional tonic/protobuf inference service for low-overhead service-to-service calls
 - **PagedAttention** – Efficient memory management for KV cache, enabling larger batch sizes
 - **Continuous batching** – Dynamically add/remove requests between iterations

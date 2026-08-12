@@ -11,7 +11,10 @@ struct TemplateMessage {
 
 #[derive(Serialize)]
 struct TemplateContext {
-    messages: Vec<TemplateMessage>,
+    messages: Vec<serde_json::Value>,
+    tools: Option<Vec<serde_json::Value>>,
+    tool_choice: Option<serde_json::Value>,
+    parallel_tool_calls: bool,
     add_generation_prompt: bool,
     bos_token: &'static str,
     eos_token: &'static str,
@@ -22,16 +25,35 @@ pub fn render_chat_template(
     messages: &[ChatMessage],
     add_generation_prompt: bool,
 ) -> Result<String> {
-    let mut env = Environment::new();
-    env.add_template("chat", template).context("invalid chat template")?;
-
     let tmpl_messages: Vec<TemplateMessage> = messages
         .iter()
         .map(|m| TemplateMessage { role: m.role.clone(), content: m.content.clone() })
         .collect();
 
+    let messages = tmpl_messages
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .context("serializing chat messages")?;
+    render_chat_template_with_tools(template, messages, None, None, true, add_generation_prompt)
+}
+
+pub fn render_chat_template_with_tools(
+    template: &str,
+    messages: Vec<serde_json::Value>,
+    tools: Option<Vec<serde_json::Value>>,
+    tool_choice: Option<serde_json::Value>,
+    parallel_tool_calls: bool,
+    add_generation_prompt: bool,
+) -> Result<String> {
+    let mut env = Environment::new();
+    env.add_template("chat", template).context("invalid chat template")?;
+
     let ctx = TemplateContext {
-        messages: tmpl_messages,
+        messages,
+        tools,
+        tool_choice,
+        parallel_tool_calls,
         add_generation_prompt,
         bos_token: "",
         eos_token: "",
@@ -41,6 +63,34 @@ pub fn render_chat_template(
     let rendered = tmpl.render(ctx).context("chat template rendering failed")?;
 
     Ok(rendered)
+}
+
+pub fn render_chat_template_fallback_with_tools(
+    messages: &[serde_json::Value],
+    tools: Option<&[serde_json::Value]>,
+    add_generation_prompt: bool,
+) -> Result<String> {
+    let mut output = String::new();
+    if let Some(tools) = tools {
+        output.push_str("<|system|>\nYou have access to the following functions. ");
+        output.push_str(
+            "When a function is needed, respond with a JSON object containing its name and arguments.\n",
+        );
+        output.push_str(
+            &serde_json::to_string_pretty(tools)
+                .context("serializing tools for fallback prompt")?,
+        );
+        output.push('\n');
+    }
+    for message in messages {
+        let role = message.get("role").and_then(serde_json::Value::as_str).unwrap_or("user");
+        let content = message.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+        output.push_str(&format!("<|{role}|>\n{content}\n"));
+    }
+    if add_generation_prompt {
+        output.push_str("<|assistant|>\n");
+    }
+    Ok(output)
 }
 
 pub fn render_chat_template_fallback(
@@ -133,5 +183,27 @@ mod tests {
         let messages = make_messages();
         let result = render_chat_template("{{ unclosed", &messages, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_context_is_available_to_chat_template() {
+        let template = "{{ tools | tojson }}|{{ tool_choice }}|{{ parallel_tool_calls }}";
+        let messages = vec![serde_json::json!({"role": "user", "content": "weather"})];
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "get_weather", "parameters": {"type": "object"}}
+        })];
+        let rendered = render_chat_template_with_tools(
+            template,
+            messages,
+            Some(tools),
+            Some(serde_json::json!("required")),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(rendered.contains("get_weather"));
+        assert!(rendered.contains("required"));
+        assert!(rendered.ends_with("false"));
     }
 }

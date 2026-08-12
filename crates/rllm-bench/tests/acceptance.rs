@@ -253,7 +253,10 @@ fn acceptance_openai_chat_completion() {
         model: "llama-2-7b".into(),
         messages: vec![rllm_server::openai::ChatMessage {
             role: "user".into(),
-            content: "Hello!".into(),
+            content: Some("Hello!".into()),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
         }],
         temperature: Some(0.7),
         top_p: Some(0.9),
@@ -268,6 +271,9 @@ fn acceptance_openai_chat_completion() {
         seed: Some(42),
         structured_outputs: None,
         response_format: None,
+        tools: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
     };
 
     let params = rllm_server::openai::chat_request_to_sampling_params(&chat_req);

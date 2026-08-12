@@ -95,7 +95,7 @@ indexmap = "2"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
 safetensors = "0.6"
-minijinja = "2"
+minijinja = { version = "2", features = ["json"] }
 
 # Candle tensor framework
 candle-core = "0.9"
