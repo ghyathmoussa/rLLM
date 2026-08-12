@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-bench"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-cache"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -3050,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-engine"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "parking_lot",
@@ -3068,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-executor"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3084,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-kernels"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "half",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-metrics"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-model"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3131,7 +3131,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-quant"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3146,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-sampling"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "dlpark",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-scheduler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "indexmap",
@@ -3176,7 +3176,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-tensor"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "rllm-core",
@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-tokenizer"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "rllm-worker"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "candle-core",
