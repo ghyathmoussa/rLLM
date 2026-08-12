@@ -741,6 +741,13 @@ async fn chat_completions_handler(
         );
     }
 
+    let response_tools =
+        if matches!(req.tool_choice.as_ref(), Some(ToolChoice::Mode(ToolChoiceMode::None))) {
+            None
+        } else {
+            req.tools.clone()
+        };
+
     if is_stream {
         let inference_req = InferenceRequest {
             request_id: RequestId::new(),
@@ -775,7 +782,7 @@ async fn chat_completions_handler(
                 model: model.clone(),
                 choices: vec![ChunkChoice {
                     index: 0,
-                    delta: ChunkDelta { role: Some("assistant".into()), content: None },
+                    delta: ChunkDelta { role: Some("assistant".into()), content: None, tool_calls: None },
                     finish_reason: None,
                 }],
                 generation_time: None,
@@ -785,19 +792,58 @@ async fn chat_completions_handler(
             );
 
             let elapsed_start = std::time::Instant::now();
+            let mut buffered_tool_token_ids = Vec::new();
             while let Some(output) = receiver.recv().await {
                 let mut chunk_text = String::new();
                 for completion in &output.outputs {
-                    if !completion.token_ids.is_empty() {
-                        if let Ok(text) = runtime.tokenizer.decode(completion.token_ids.clone(), true).await {
-                            chunk_text.push_str(&text);
-                        }
+                    if response_tools.is_some() {
+                        buffered_tool_token_ids.extend_from_slice(&completion.token_ids);
+                    } else if !completion.token_ids.is_empty()
+                        && let Ok(text) = runtime
+                            .tokenizer
+                            .decode(completion.token_ids.clone(), true)
+                            .await
+                    {
+                        chunk_text.push_str(&text);
                     }
                 }
 
-                let finish_reason = output.outputs.first().and_then(|c| c.finish_reason).map(finish_reason_to_openai);
+                let engine_finish_reason = output
+                    .outputs
+                    .first()
+                    .and_then(|completion| completion.finish_reason)
+                    .map(finish_reason_to_openai);
 
-                if !chunk_text.is_empty() || finish_reason.is_some() {
+                if response_tools.is_some() {
+                    if output.finished {
+                        let buffered_tool_text = runtime
+                            .tokenizer
+                            .decode(buffered_tool_token_ids.clone(), true)
+                            .await
+                            .unwrap_or_default();
+                        let parsed = parse_chat_output(&buffered_tool_text, response_tools.as_deref());
+                        let has_tool_calls = parsed.tool_calls.is_some();
+                        let delta = ChunkDelta {
+                            role: None,
+                            content: parsed.content,
+                            tool_calls: parsed.tool_calls.as_deref().map(tool_calls_to_deltas),
+                        };
+                        let finish_reason = if has_tool_calls {
+                            Some("tool_calls".to_string())
+                        } else {
+                            engine_finish_reason
+                        };
+                        let content_chunk = ChatCompletionChunk {
+                            id: id.clone(),
+                            object: "chat.completion.chunk".to_string(),
+                            created,
+                            model: model.clone(),
+                            choices: vec![ChunkChoice { index: 0, delta, finish_reason }],
+                            generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
+                        };
+                        yield Ok(Event::default().data(serialize_sse(&content_chunk)));
+                    }
+                } else if !chunk_text.is_empty() || engine_finish_reason.is_some() {
                     let content_chunk = ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk".to_string(),
@@ -805,8 +851,12 @@ async fn chat_completions_handler(
                         model: model.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: ChunkDelta { role: None, content: Some(chunk_text) },
-                            finish_reason,
+                            delta: ChunkDelta {
+                                role: None,
+                                content: Some(chunk_text),
+                                tool_calls: None,
+                            },
+                            finish_reason: engine_finish_reason,
                         }],
                         generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
                     };
@@ -839,6 +889,12 @@ async fn chat_completions_handler(
 
     match result {
         Ok(completion) => {
+            let parsed = parse_chat_output(&completion.text, response_tools.as_deref());
+            let finish_reason = if parsed.tool_calls.is_some() {
+                "tool_calls".to_string()
+            } else {
+                completion.finish_reason
+            };
             let response = ChatCompletionResponse {
                 id: generate_completion_id("chatcmpl"),
                 object: "chat.completion".to_string(),
@@ -848,9 +904,10 @@ async fn chat_completions_handler(
                     index: 0,
                     message: ChatResponseMessage {
                         role: "assistant".into(),
-                        content: completion.text,
+                        content: parsed.content,
+                        tool_calls: parsed.tool_calls,
                     },
-                    finish_reason: Some(completion.finish_reason),
+                    finish_reason: Some(finish_reason),
                 }],
                 usage: completion.usage,
                 generation_time: Some(completion.generation_time),
@@ -1130,7 +1187,7 @@ fn placeholder_chat_stream_response(
             model,
             choices: vec![ChunkChoice {
                 index: 0,
-                delta: ChunkDelta { role: Some("assistant".into()), content: None },
+                delta: ChunkDelta { role: Some("assistant".into()), content: None, tool_calls: None },
                 finish_reason: Some("stop".into()),
             }],
             generation_time: Some(started.elapsed().as_secs_f64()),
@@ -1156,7 +1213,11 @@ fn placeholder_chat_response(model: &str, started: std::time::Instant) -> axum::
         model: model.to_string(),
         choices: vec![ChatChoice {
             index: 0,
-            message: ChatResponseMessage { role: "assistant".into(), content: String::new() },
+            message: ChatResponseMessage {
+                role: "assistant".into(),
+                content: Some(String::new()),
+                tool_calls: None,
+            },
             finish_reason: Some("stop".into()),
         }],
         usage: UsageInfo { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
