@@ -305,7 +305,7 @@ fn acceptance_openai_chat_completion() {
     assert_eq!(response.object, "chat.completion");
     assert_eq!(response.model, "llama-2-7b");
     assert_eq!(response.choices.len(), 1);
-    assert_eq!(response.choices[0].message.content, "Hello! How can I help you?");
+    assert_eq!(response.choices[0].message.content.as_deref(), Some("Hello! How can I help you?"));
     assert_eq!(response.usage.prompt_tokens, 10);
     assert_eq!(response.usage.completion_tokens, 5);
 

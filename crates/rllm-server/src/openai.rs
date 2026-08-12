@@ -18,7 +18,7 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     #[serde(rename = "type")]
@@ -26,7 +26,7 @@ pub struct ToolCall {
     pub function: FunctionCall,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
     /// OpenAI represents function arguments as a JSON-encoded string.
@@ -204,7 +204,9 @@ pub struct ChatChoice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponseMessage {
     pub role: String,
-    pub content: String,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +261,33 @@ pub struct ChunkDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub tool_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionCallDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedChatOutput {
+    pub content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 // ── Model list ─────────────────────────────────────────────────────────────
@@ -307,6 +336,10 @@ use uuid::Uuid;
 /// Generate a completion ID (e.g., "cmpl-abc123").
 pub fn generate_completion_id(prefix: &str) -> String {
     format!("{}-{}", prefix, Uuid::new_v4().as_simple())
+}
+
+pub fn generate_tool_call_id() -> String {
+    format!("call_{}", Uuid::new_v4().as_simple())
 }
 
 /// Get the current unix timestamp.
@@ -602,10 +635,174 @@ fn extract_stop_strings(stop: &Option<StopSequence>) -> Vec<String> {
     }
 }
 
-/// Convert engine RequestOutput to a ChatCompletionResponse.
+/// Parse model-native function-call text into the OpenAI response shape.
+///
+/// Extraction is gated by the tools supplied with the request and validates
+/// every parsed function name against that list. This prevents an ordinary
+/// JSON answer from being mistaken for a tool call.
+pub fn parse_chat_output(text: &str, tools: Option<&[ChatCompletionTool]>) -> ParsedChatOutput {
+    let Some(tools) = tools.filter(|tools| !tools.is_empty()) else {
+        return ParsedChatOutput { content: Some(text.to_string()), tool_calls: None };
+    };
+    let allowed_names = tools
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+
+    let Some((values, content)) = tool_call_json_values(text) else {
+        return ParsedChatOutput { content: Some(text.to_string()), tool_calls: None };
+    };
+    let Some(raw_calls) = values_to_tool_calls(values) else {
+        return ParsedChatOutput { content: Some(text.to_string()), tool_calls: None };
+    };
+
+    let mut tool_calls = Vec::with_capacity(raw_calls.len());
+    for raw in raw_calls {
+        let Some((id, name, arguments)) = normalize_tool_call(raw) else {
+            return ParsedChatOutput { content: Some(text.to_string()), tool_calls: None };
+        };
+        if !allowed_names.contains(name.as_str()) {
+            return ParsedChatOutput { content: Some(text.to_string()), tool_calls: None };
+        }
+        tool_calls.push(ToolCall {
+            id: id.unwrap_or_else(generate_tool_call_id),
+            tool_type: "function".to_string(),
+            function: FunctionCall { name, arguments },
+        });
+    }
+
+    if tool_calls.is_empty() {
+        ParsedChatOutput { content: Some(text.to_string()), tool_calls: None }
+    } else {
+        ParsedChatOutput { content, tool_calls: Some(tool_calls) }
+    }
+}
+
+/// Convert complete tool calls into a valid OpenAI streaming delta.
+/// Arguments may be emitted in one chunk; clients concatenate them exactly as
+/// they do with token-sized argument deltas.
+pub fn tool_calls_to_deltas(tool_calls: &[ToolCall]) -> Vec<ToolCallDelta> {
+    tool_calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| ToolCallDelta {
+            index: index as u32,
+            id: Some(call.id.clone()),
+            tool_type: Some(call.tool_type.clone()),
+            function: Some(FunctionCallDelta {
+                name: Some(call.function.name.clone()),
+                arguments: Some(call.function.arguments.clone()),
+            }),
+        })
+        .collect()
+}
+
+fn tool_call_json_values(text: &str) -> Option<(Vec<serde_json::Value>, Option<String>)> {
+    const OPEN_TAG: &str = "<tool_call>";
+    const CLOSE_TAG: &str = "</tool_call>";
+    const PYTHON_TAG: &str = "<|python_tag|>";
+
+    if text.contains(OPEN_TAG) {
+        let mut values = Vec::new();
+        let mut remaining = String::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = text[cursor..].find(OPEN_TAG) {
+            let start = cursor + relative_start;
+            remaining.push_str(&text[cursor..start]);
+            let body_start = start + OPEN_TAG.len();
+            let relative_end = text[body_start..].find(CLOSE_TAG)?;
+            let end = body_start + relative_end;
+            values.extend(parse_json_sequence(&text[body_start..end])?);
+            cursor = end + CLOSE_TAG.len();
+        }
+        remaining.push_str(&text[cursor..]);
+        return Some((values, nonempty_content(&remaining)));
+    }
+
+    if let Some(start) = text.find(PYTHON_TAG) {
+        let content = nonempty_content(&text[..start]);
+        let values = parse_json_sequence(&text[start + PYTHON_TAG.len()..])?;
+        return Some((values, content));
+    }
+
+    let trimmed = strip_json_code_fence(text.trim());
+    parse_json_sequence(trimmed).map(|values| (values, None))
+}
+
+fn strip_json_code_fence(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("```json").or_else(|| text.strip_prefix("```")) else {
+        return text;
+    };
+    rest.strip_suffix("```").unwrap_or(rest).trim()
+}
+
+fn parse_json_sequence(text: &str) -> Option<Vec<serde_json::Value>> {
+    let values = serde_json::Deserializer::from_str(text)
+        .into_iter::<serde_json::Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!values.is_empty()).then_some(values)
+}
+
+fn values_to_tool_calls(values: Vec<serde_json::Value>) -> Option<Vec<serde_json::Value>> {
+    let mut calls = Vec::new();
+    for value in values {
+        match value {
+            serde_json::Value::Array(items) => calls.extend(items),
+            serde_json::Value::Object(mut object) => {
+                if let Some(serde_json::Value::Array(items)) = object.remove("tool_calls") {
+                    calls.extend(items);
+                } else {
+                    calls.push(serde_json::Value::Object(object));
+                }
+            }
+            _ => return None,
+        }
+    }
+    (!calls.is_empty()).then_some(calls)
+}
+
+fn normalize_tool_call(value: serde_json::Value) -> Option<(Option<String>, String, String)> {
+    let object = value.as_object()?;
+    let id = object.get("id").and_then(serde_json::Value::as_str).map(str::to_string);
+    let call = object.get("function").and_then(serde_json::Value::as_object).unwrap_or(object);
+    let name = call.get("name")?.as_str()?.to_string();
+    let arguments = call
+        .get("arguments")
+        .or_else(|| call.get("parameters"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let arguments = match arguments {
+        serde_json::Value::String(encoded) => {
+            serde_json::from_str::<serde_json::Value>(&encoded).ok()?;
+            encoded
+        }
+        value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+            serde_json::to_string(&value).ok()?
+        }
+        _ => return None,
+    };
+    Some((id.filter(|id| !id.is_empty()), name, arguments))
+}
+
+fn nonempty_content(text: &str) -> Option<String> {
+    let content = text.trim();
+    (!content.is_empty()).then(|| content.to_string())
+}
+
+/// Convert engine RequestOutput to a ChatCompletionResponse without tool extraction.
 pub fn request_output_to_chat_completion(
     output: &RequestOutput,
     model: &str,
+) -> ChatCompletionResponse {
+    request_output_to_chat_completion_with_tools(output, model, None)
+}
+
+/// Convert engine output and extract calls that match the request's tools.
+pub fn request_output_to_chat_completion_with_tools(
+    output: &RequestOutput,
+    model: &str,
+    tools: Option<&[ChatCompletionTool]>,
 ) -> ChatCompletionResponse {
     let id = generate_completion_id("chatcmpl");
     let created = now_timestamp();
@@ -615,17 +812,23 @@ pub fn request_output_to_chat_completion(
         .iter()
         .enumerate()
         .map(|(i, co)| {
-            let finish_reason = co.finish_reason.map(|r| match r {
-                rllm_core::output::FinishReason::Stop => "stop".to_string(),
-                rllm_core::output::FinishReason::Length => "length".to_string(),
-                rllm_core::output::FinishReason::Aborted => "stop".to_string(),
-                rllm_core::output::FinishReason::Error => "stop".to_string(),
-            });
+            let parsed = parse_chat_output(&co.text, tools);
+            let finish_reason = if parsed.tool_calls.is_some() {
+                Some("tool_calls".to_string())
+            } else {
+                co.finish_reason.map(|r| match r {
+                    rllm_core::output::FinishReason::Stop => "stop".to_string(),
+                    rllm_core::output::FinishReason::Length => "length".to_string(),
+                    rllm_core::output::FinishReason::Aborted => "stop".to_string(),
+                    rllm_core::output::FinishReason::Error => "stop".to_string(),
+                })
+            };
             ChatChoice {
                 index: i as u32,
                 message: ChatResponseMessage {
                     role: "assistant".to_string(),
-                    content: co.text.clone(),
+                    content: parsed.content,
+                    tool_calls: parsed.tool_calls,
                 },
                 finish_reason,
             }
@@ -854,5 +1057,116 @@ mod tests {
         let id = generate_completion_id("chatcmpl");
         assert!(id.starts_with("chatcmpl-"));
         assert!(id.len() > "chatcmpl-".len());
+    }
+
+    fn output_tools() -> Vec<ChatCompletionTool> {
+        vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }))
+            .unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type": "function",
+                "function": {"name": "get_time"}
+            }))
+            .unwrap(),
+        ]
+    }
+
+    #[test]
+    fn parses_llama_json_tool_call() {
+        let tools = output_tools();
+        let parsed = parse_chat_output(
+            r#"{"name":"get_weather","parameters":{"city":"Istanbul"}}"#,
+            Some(&tools),
+        );
+        assert_eq!(parsed.content, None);
+        let calls = parsed.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].id.starts_with("call_"));
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"city": "Istanbul"})
+        );
+    }
+
+    #[test]
+    fn parses_parallel_hermes_tool_calls_and_preserves_content() {
+        let tools = output_tools();
+        let parsed = parse_chat_output(
+            concat!(
+                "I will check both.\n",
+                "<tool_call>{\"name\":\"get_weather\",\"arguments\":{\"city\":\"Istanbul\"}}</tool_call>\n",
+                "<tool_call>{\"name\":\"get_time\",\"arguments\":{\"timezone\":\"UTC\"}}</tool_call>"
+            ),
+            Some(&tools),
+        );
+        assert_eq!(parsed.content.as_deref(), Some("I will check both."));
+        let calls = parsed.tool_calls.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "get_time");
+    }
+
+    #[test]
+    fn leaves_unknown_or_malformed_calls_as_content() {
+        let tools = output_tools();
+        for text in [
+            r#"{"name":"delete_everything","arguments":{}}"#,
+            r#"<tool_call>{"name":"get_weather","arguments":</tool_call>"#,
+            r#"{"answer":42}"#,
+        ] {
+            let parsed = parse_chat_output(text, Some(&tools));
+            assert_eq!(parsed.content.as_deref(), Some(text));
+            assert!(parsed.tool_calls.is_none());
+        }
+    }
+
+    #[test]
+    fn response_converter_emits_tool_calls_finish_reason() {
+        let output = RequestOutput {
+            request_id: rllm_core::ids::RequestId::new(),
+            outputs: vec![rllm_core::output::CompletionOutput {
+                index: 0,
+                text: r#"<|python_tag|>{"name":"get_weather","arguments":{"city":"Istanbul"}}"#
+                    .into(),
+                token_ids: vec![],
+                finish_reason: Some(rllm_core::output::FinishReason::Stop),
+                logprobs: None,
+            }],
+            finished: true,
+            usage: rllm_core::output::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 8,
+                total_tokens: 18,
+            },
+        };
+        let tools = output_tools();
+        let response =
+            request_output_to_chat_completion_with_tools(&output, "test-model", Some(&tools));
+        let choice = &response.choices[0];
+        assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
+        assert!(choice.message.content.is_none());
+        assert_eq!(choice.message.tool_calls.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn streaming_delta_has_openai_tool_call_shape() {
+        let tools = output_tools();
+        let parsed = parse_chat_output(
+            r#"[{"name":"get_weather","arguments":{"city":"Istanbul"}}]"#,
+            Some(&tools),
+        );
+        let delta = ChunkDelta {
+            role: None,
+            content: None,
+            tool_calls: parsed.tool_calls.as_deref().map(tool_calls_to_deltas),
+        };
+        let json = serde_json::to_value(delta).unwrap();
+        assert_eq!(json["tool_calls"][0]["index"], 0);
+        assert_eq!(json["tool_calls"][0]["type"], "function");
+        assert_eq!(json["tool_calls"][0]["function"]["name"], "get_weather");
     }
 }

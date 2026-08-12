@@ -89,7 +89,7 @@ impl InferenceService for GrpcInferenceService {
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
-        let req = proto_to_chat_request(request.into_inner());
+        let req = proto_to_chat_request(request.into_inner()).map_err(Status::invalid_argument)?;
         if req.messages.is_empty() {
             return Err(Status::invalid_argument("messages must not be empty"));
         }
@@ -104,6 +104,7 @@ impl InferenceService for GrpcInferenceService {
             return Ok(Response::new(empty_chat_response(self.state.model_name(), started)));
         };
 
+        let response_tools = response_tools(&req);
         let completion = run_chat_completion(
             runtime,
             req,
@@ -113,7 +114,11 @@ impl InferenceService for GrpcInferenceService {
         rllm_metrics::histogram!("rllm_grpc_request_duration_seconds")
             .record(started.elapsed().as_secs_f64());
 
-        Ok(Response::new(chat_completion_response(self.state.model_name(), completion)))
+        Ok(Response::new(chat_completion_response(
+            self.state.model_name(),
+            completion,
+            response_tools.as_deref(),
+        )))
     }
 
     async fn stream_chat_completion(
@@ -126,7 +131,7 @@ impl InferenceService for GrpcInferenceService {
         let started = std::time::Instant::now();
         rllm_metrics::counter!("rllm_grpc_requests_total").increment(1);
 
-        let req = proto_to_chat_request(request.into_inner());
+        let req = proto_to_chat_request(request.into_inner()).map_err(Status::invalid_argument)?;
         if req.messages.is_empty() {
             return Err(Status::invalid_argument("messages must not be empty"));
         }
@@ -139,6 +144,7 @@ impl InferenceService for GrpcInferenceService {
 
         let model = self.state.model_name().to_string();
         let runtime = self.state.runtime();
+        let response_tools = response_tools(&req);
         let stream = try_stream! {
             if let Some(runtime) = runtime {
                 let mut receiver = start_chat_stream(runtime.clone(), req).await?;
@@ -154,6 +160,7 @@ impl InferenceService for GrpcInferenceService {
                         delta: Some(pb::ChunkDelta {
                             role: Some("assistant".to_string()),
                             content: None,
+                            tool_calls: Vec::new(),
                         }),
                         finish_reason: None,
                     }],
@@ -161,10 +168,13 @@ impl InferenceService for GrpcInferenceService {
                 };
 
                 let elapsed_start = std::time::Instant::now();
+                let mut buffered_tool_token_ids = Vec::new();
                 while let Some(output) = receiver.recv().await {
                     let mut chunk_text = String::new();
                     for completion in &output.outputs {
-                        if !completion.token_ids.is_empty() {
+                        if response_tools.is_some() {
+                            buffered_tool_token_ids.extend_from_slice(&completion.token_ids);
+                        } else if !completion.token_ids.is_empty() {
                             let text = runtime
                                 .tokenizer
                                 .decode(completion.token_ids.clone(), true)
@@ -174,13 +184,50 @@ impl InferenceService for GrpcInferenceService {
                         }
                     }
 
-                    let finish_reason = output
+                    let engine_finish_reason = output
                         .outputs
                         .first()
                         .and_then(|completion| completion.finish_reason)
                         .map(finish_reason_to_openai);
 
-                    if !chunk_text.is_empty() || finish_reason.is_some() {
+                    if response_tools.is_some() {
+                        if output.finished {
+                            let buffered_tool_text = runtime
+                                .tokenizer
+                                .decode(buffered_tool_token_ids.clone(), true)
+                                .await
+                                .map_err(|e| Status::internal(format!("failed to decode tool call: {e}")))?;
+                            let parsed = openai::parse_chat_output(
+                                &buffered_tool_text,
+                                response_tools.as_deref(),
+                            );
+                            let has_tool_calls = parsed.tool_calls.is_some();
+                            yield pb::ChatCompletionChunk {
+                                id: id.clone(),
+                                object: "chat.completion.chunk".to_string(),
+                                created,
+                                model: model.clone(),
+                                choices: vec![pb::ChunkChoice {
+                                    index: 0,
+                                    delta: Some(pb::ChunkDelta {
+                                        role: None,
+                                        content: parsed.content,
+                                        tool_calls: parsed
+                                            .tool_calls
+                                            .as_deref()
+                                            .map(tool_call_deltas_to_proto)
+                                            .unwrap_or_default(),
+                                    }),
+                                    finish_reason: if has_tool_calls {
+                                        Some("tool_calls".to_string())
+                                    } else {
+                                        engine_finish_reason
+                                    },
+                                }],
+                                generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
+                            };
+                        }
+                    } else if !chunk_text.is_empty() || engine_finish_reason.is_some() {
                         yield pb::ChatCompletionChunk {
                             id: id.clone(),
                             object: "chat.completion.chunk".to_string(),
@@ -191,8 +238,9 @@ impl InferenceService for GrpcInferenceService {
                                 delta: Some(pb::ChunkDelta {
                                     role: None,
                                     content: Some(chunk_text),
+                                    tool_calls: Vec::new(),
                                 }),
-                                finish_reason,
+                                finish_reason: engine_finish_reason,
                             }],
                             generation_time: Some(elapsed_start.elapsed().as_secs_f64()),
                         };
@@ -213,6 +261,7 @@ impl InferenceService for GrpcInferenceService {
                         delta: Some(pb::ChunkDelta {
                             role: Some("assistant".to_string()),
                             content: None,
+                            tool_calls: Vec::new(),
                         }),
                         finish_reason: Some("stop".to_string()),
                     }],
@@ -448,20 +497,85 @@ async fn start_chat_stream(
         .map_err(internal_status)
 }
 
-fn proto_to_chat_request(req: pb::ChatCompletionRequest) -> openai::ChatCompletionRequest {
-    openai::ChatCompletionRequest {
-        model: req.model,
-        messages: req
-            .messages
-            .into_iter()
-            .map(|msg| openai::ChatMessage {
+fn proto_to_chat_request(
+    req: pb::ChatCompletionRequest,
+) -> Result<openai::ChatCompletionRequest, String> {
+    let messages = req
+        .messages
+        .into_iter()
+        .map(|msg| {
+            let tool_calls = if msg.tool_calls.is_empty() {
+                None
+            } else {
+                Some(
+                    msg.tool_calls
+                        .into_iter()
+                        .map(proto_to_tool_call)
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            };
+            Ok(openai::ChatMessage {
                 role: msg.role,
-                content: Some(msg.content),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
+                content: msg.content,
+                name: msg.name,
+                tool_call_id: msg.tool_call_id,
+                tool_calls,
             })
-            .collect(),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let tools = if req.tools.is_empty() {
+        None
+    } else {
+        Some(
+            req.tools
+                .into_iter()
+                .map(|tool| {
+                    let function =
+                        tool.function.ok_or_else(|| "tools require a function".to_string())?;
+                    let parameters = function
+                        .parameters_json
+                        .map(|json| {
+                            serde_json::from_str(&json)
+                                .map_err(|error| format!("invalid tool parameters_json: {error}"))
+                        })
+                        .transpose()?;
+                    Ok(openai::ChatCompletionTool {
+                        tool_type: tool.r#type,
+                        function: openai::FunctionDefinition {
+                            name: function.name,
+                            description: function.description,
+                            parameters,
+                            strict: function.strict,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )
+    };
+
+    let tool_choice = req
+        .tool_choice
+        .and_then(|choice| choice.choice)
+        .map(|choice| match choice {
+            pb::tool_choice::Choice::Mode(mode) => match mode.as_str() {
+                "none" => Ok(openai::ToolChoice::Mode(openai::ToolChoiceMode::None)),
+                "auto" => Ok(openai::ToolChoice::Mode(openai::ToolChoiceMode::Auto)),
+                "required" => Ok(openai::ToolChoice::Mode(openai::ToolChoiceMode::Required)),
+                _ => Err("tool_choice mode must be none, auto, or required".to_string()),
+            },
+            pb::tool_choice::Choice::Named(named) => {
+                Ok(openai::ToolChoice::Named(openai::NamedToolChoice {
+                    tool_type: named.r#type,
+                    function: openai::NamedFunction { name: named.function_name },
+                }))
+            }
+        })
+        .transpose()?;
+
+    Ok(openai::ChatCompletionRequest {
+        model: req.model,
+        messages,
         temperature: req.temperature,
         top_p: req.top_p,
         max_tokens: req.max_tokens,
@@ -475,10 +589,19 @@ fn proto_to_chat_request(req: pb::ChatCompletionRequest) -> openai::ChatCompleti
         seed: req.seed,
         structured_outputs: None,
         response_format: None,
-        tools: None,
-        tool_choice: None,
-        parallel_tool_calls: None,
-    }
+        tools,
+        tool_choice,
+        parallel_tool_calls: req.parallel_tool_calls,
+    })
+}
+
+fn proto_to_tool_call(call: pb::ToolCall) -> Result<openai::ToolCall, String> {
+    let function = call.function.ok_or_else(|| "tool calls require a function".to_string())?;
+    Ok(openai::ToolCall {
+        id: call.id,
+        tool_type: call.r#type,
+        function: openai::FunctionCall { name: function.name, arguments: function.arguments },
+    })
 }
 
 fn proto_to_completion_request(req: pb::CompletionRequest) -> openai::CompletionRequest {
@@ -508,7 +631,10 @@ fn stop_sequence(stop: Vec<String>) -> Option<StopSequence> {
 fn chat_completion_response(
     model: &str,
     completion: EngineCompletion,
+    tools: Option<&[openai::ChatCompletionTool]>,
 ) -> pb::ChatCompletionResponse {
+    let parsed = openai::parse_chat_output(&completion.text, tools);
+    let has_tool_calls = parsed.tool_calls.is_some();
     pb::ChatCompletionResponse {
         id: generate_completion_id("chatcmpl"),
         object: "chat.completion".to_string(),
@@ -518,13 +644,63 @@ fn chat_completion_response(
             index: 0,
             message: Some(pb::ChatResponseMessage {
                 role: "assistant".to_string(),
-                content: completion.text,
+                content: parsed.content,
+                tool_calls: parsed
+                    .tool_calls
+                    .as_deref()
+                    .map(tool_calls_to_proto)
+                    .unwrap_or_default(),
             }),
-            finish_reason: Some(completion.finish_reason),
+            finish_reason: Some(if has_tool_calls {
+                "tool_calls".to_string()
+            } else {
+                completion.finish_reason
+            }),
         }],
         usage: Some(usage_to_proto(completion.usage)),
         generation_time: Some(completion.generation_time),
     }
+}
+
+fn response_tools(req: &openai::ChatCompletionRequest) -> Option<Vec<openai::ChatCompletionTool>> {
+    if matches!(
+        req.tool_choice.as_ref(),
+        Some(openai::ToolChoice::Mode(openai::ToolChoiceMode::None))
+    ) {
+        None
+    } else {
+        req.tools.clone()
+    }
+}
+
+fn tool_calls_to_proto(calls: &[openai::ToolCall]) -> Vec<pb::ToolCall> {
+    calls
+        .iter()
+        .map(|call| pb::ToolCall {
+            id: call.id.clone(),
+            r#type: call.tool_type.clone(),
+            function: Some(pb::FunctionCall {
+                name: call.function.name.clone(),
+                arguments: call.function.arguments.clone(),
+            }),
+        })
+        .collect()
+}
+
+fn tool_call_deltas_to_proto(calls: &[openai::ToolCall]) -> Vec<pb::ToolCallDelta> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| pb::ToolCallDelta {
+            index: index as u32,
+            id: Some(call.id.clone()),
+            r#type: Some(call.tool_type.clone()),
+            function: Some(pb::FunctionCallDelta {
+                name: Some(call.function.name.clone()),
+                arguments: Some(call.function.arguments.clone()),
+            }),
+        })
+        .collect()
 }
 
 fn completion_response(model: &str, completion: EngineCompletion) -> pb::CompletionResponse {
@@ -553,7 +729,8 @@ fn empty_chat_response(model: &str, started: std::time::Instant) -> pb::ChatComp
             index: 0,
             message: Some(pb::ChatResponseMessage {
                 role: "assistant".to_string(),
-                content: String::new(),
+                content: Some(String::new()),
+                tool_calls: Vec::new(),
             }),
             finish_reason: Some("stop".to_string()),
         }],
@@ -669,7 +846,13 @@ mod tests {
     fn chat_request(content: impl Into<String>) -> pb::ChatCompletionRequest {
         pb::ChatCompletionRequest {
             model: "test-model".to_string(),
-            messages: vec![pb::ChatMessage { role: "user".to_string(), content: content.into() }],
+            messages: vec![pb::ChatMessage {
+                role: "user".to_string(),
+                content: Some(content.into()),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }],
             temperature: None,
             top_p: None,
             max_tokens: Some(4),
@@ -680,6 +863,9 @@ mod tests {
             presence_penalty: None,
             frequency_penalty: None,
             seed: None,
+            tools: Vec::new(),
+            tool_choice: None,
+            parallel_tool_calls: None,
         }
     }
 
@@ -778,5 +964,47 @@ mod tests {
 
         let _ = shutdown.send(());
         server_handle.await.unwrap();
+    }
+
+    #[test]
+    fn proto_tool_request_maps_all_fields() {
+        let mut req = chat_request("Weather in Istanbul?");
+        req.messages.push(pb::ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: vec![pb::ToolCall {
+                id: "call_weather".to_string(),
+                r#type: "function".to_string(),
+                function: Some(pb::FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Istanbul"}"#.to_string(),
+                }),
+            }],
+        });
+        req.tools = vec![pb::ChatCompletionTool {
+            r#type: "function".to_string(),
+            function: Some(pb::FunctionDefinition {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters_json: Some(r#"{"type":"object"}"#.to_string()),
+                strict: Some(true),
+            }),
+        }];
+        req.tool_choice = Some(pb::ToolChoice {
+            choice: Some(pb::tool_choice::Choice::Named(pb::NamedToolChoice {
+                r#type: "function".to_string(),
+                function_name: "get_weather".to_string(),
+            })),
+        });
+        req.parallel_tool_calls = Some(false);
+
+        let mapped = proto_to_chat_request(req).unwrap();
+        validate_tool_call_request(&mapped).unwrap();
+        assert_eq!(mapped.tools.as_ref().unwrap()[0].function.name, "get_weather");
+        assert!(matches!(mapped.tool_choice, Some(openai::ToolChoice::Named(_))));
+        assert_eq!(mapped.messages[1].tool_calls.as_ref().unwrap()[0].id, "call_weather");
+        assert_eq!(mapped.parallel_tool_calls, Some(false));
     }
 }

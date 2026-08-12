@@ -234,6 +234,21 @@ components:
           items:
             $ref: '#/components/schemas/ToolCall'
 
+    ChatResponseMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [assistant]
+        content:
+          type: string
+          nullable: true
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCall'
+
     FunctionCall:
       type: object
       required: [name, arguments]
@@ -496,12 +511,49 @@ components:
           type: integer
           example: 0
         message:
-          $ref: '#/components/schemas/ChatMessage'
+          $ref: '#/components/schemas/ChatResponseMessage'
         finish_reason:
           type: string
           nullable: true
-          enum: [stop, length, content_filter, null]
+          enum: [stop, length, tool_calls, content_filter, null]
           example: stop
+
+    FunctionCallDelta:
+      type: object
+      properties:
+        name:
+          type: string
+        arguments:
+          type: string
+          description: A complete or partial JSON-encoded argument string.
+
+    ToolCallDelta:
+      type: object
+      required: [index]
+      properties:
+        index:
+          type: integer
+        id:
+          type: string
+        type:
+          type: string
+          enum: [function]
+        function:
+          $ref: '#/components/schemas/FunctionCallDelta'
+
+    ChunkDelta:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [assistant]
+        content:
+          type: string
+          nullable: true
+        tool_calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCallDelta'
 
     UsageInfo:
       type: object

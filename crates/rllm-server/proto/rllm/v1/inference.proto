@@ -33,7 +33,45 @@ message ModelInfo {
 
 message ChatMessage {
   string role = 1;
-  string content = 2;
+  optional string content = 2;
+  optional string name = 3;
+  optional string tool_call_id = 4;
+  repeated ToolCall tool_calls = 5;
+}
+
+message FunctionCall {
+  string name = 1;
+  string arguments = 2;
+}
+
+message ToolCall {
+  string id = 1;
+  string type = 2;
+  FunctionCall function = 3;
+}
+
+message FunctionDefinition {
+  string name = 1;
+  optional string description = 2;
+  optional string parameters_json = 3;
+  optional bool strict = 4;
+}
+
+message ChatCompletionTool {
+  string type = 1;
+  FunctionDefinition function = 2;
+}
+
+message NamedToolChoice {
+  string type = 1;
+  string function_name = 2;
+}
+
+message ToolChoice {
+  oneof choice {
+    string mode = 1;
+    NamedToolChoice named = 2;
+  }
 }
 
 message ChatCompletionRequest {
@@ -49,6 +87,9 @@ message ChatCompletionRequest {
   optional float presence_penalty = 10;
   optional float frequency_penalty = 11;
   optional uint64 seed = 12;
+  repeated ChatCompletionTool tools = 13;
+  optional ToolChoice tool_choice = 14;
+  optional bool parallel_tool_calls = 15;
 }
 
 message ChatCompletionResponse {
@@ -69,7 +110,8 @@ message ChatChoice {
 
 message ChatResponseMessage {
   string role = 1;
-  string content = 2;
+  optional string content = 2;
+  repeated ToolCall tool_calls = 3;
 }
 
 message ChatCompletionChunk {
@@ -87,9 +129,22 @@ message ChunkChoice {
   optional string finish_reason = 3;
 }
 
+message FunctionCallDelta {
+  optional string name = 1;
+  optional string arguments = 2;
+}
+
+message ToolCallDelta {
+  uint32 index = 1;
+  optional string id = 2;
+  optional string type = 3;
+  FunctionCallDelta function = 4;
+}
+
 message ChunkDelta {
   optional string role = 1;
   optional string content = 2;
+  repeated ToolCallDelta tool_calls = 3;
 }
 
 message CompletionRequest {
