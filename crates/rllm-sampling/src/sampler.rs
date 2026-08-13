@@ -54,124 +54,102 @@ impl Sampler {
     #[tracing::instrument(skip_all, name = "sampling")]
     pub fn sample(&mut self, input: &SamplingInput) -> SamplingOutput {
         let start = std::time::Instant::now();
-        let vocab_size = input.logits.len();
-        if vocab_size == 0 {
+        if input.logits.is_empty() {
             return SamplingOutput { token_id: 0, logprob: None, top_logprobs: None };
         }
 
-        let mut logits = input.logits.clone();
-
-        // 1. Apply logit bias.
-        if !input.params.logit_bias.is_empty() {
-            logits::apply_logit_bias(&mut logits, &input.params.logit_bias);
-        }
-
-        // 2. Apply repetition/frequency/presence penalties.
-        if !input.context_token_ids.is_empty() {
-            if input.params.repetition_penalty != 1.0 {
-                logits::apply_repetition_penalty(
-                    &mut logits,
-                    &input.context_token_ids,
-                    input.params.repetition_penalty,
-                );
-            }
-            if input.params.frequency_penalty != 0.0 {
-                logits::apply_frequency_penalty(
-                    &mut logits,
-                    &input.context_token_ids,
-                    input.params.frequency_penalty,
-                );
-            }
-            if input.params.presence_penalty != 0.0 {
-                logits::apply_presence_penalty(
-                    &mut logits,
-                    &input.context_token_ids,
-                    input.params.presence_penalty,
-                );
-            }
-        }
-
-        // 3. Apply bad-word token masks.
-        for bad_word in &input.bad_word_token_ids {
-            if let Some(&last_tid) = bad_word.last() {
-                logits::apply_bad_token_ids(&mut logits, &[last_tid]);
-            }
-        }
-
-        // 4. Apply allowed-token-id mask.
-        if let Some(ref allowed) = input.params.allowed_token_ids {
-            logits::apply_allowed_token_ids(&mut logits, allowed);
-        }
-
-        // 5. Suppress EOS until min_tokens reached.
-        if input.params.min_tokens > 0 {
-            logits::apply_eos_suppression(
-                &mut logits,
-                input.eos_token_id,
-                input.num_generated,
-                input.params.min_tokens,
-            );
-        }
-
-        // 6. Determine greedy vs stochastic.
         let is_greedy = input.params.temperature <= 0.0 || input.params.top_k == 1;
-
-        // 7. Temperature scaling (skip for greedy — we'll argmax directly).
-        if !is_greedy {
-            logits::apply_temperature(&mut logits, input.params.temperature);
-        }
-
-        // 8. Top-k filtering.
-        if !is_greedy && input.params.top_k > 0 {
-            logits::apply_top_k(&mut logits, input.params.top_k);
-        }
-
-        // 9. Top-p filtering.
-        if !is_greedy && input.params.top_p < 1.0 {
-            logits::apply_top_p(&mut logits, input.params.top_p);
-        }
-
-        // 10. Min-p filtering.
-        if !is_greedy && input.params.min_p > 0.0 {
-            logits::apply_min_p(&mut logits, input.params.min_p);
-        }
-
-        // 11. Compute logprobs before sampling (from the modified but un-softmaxed logits).
-        let want_logprobs = input.params.logprobs.is_some();
-
-        // 12. Sample.
+        let mut logits = prepare_logits(input, !is_greedy, !is_greedy);
         let token_id = if is_greedy {
             greedy_sample(&logits)
         } else {
             random_sample(&mut logits, &mut self.rng)
         };
 
-        // 13. Compute logprobs if requested (from original modified logits).
-        let (logprob, top_logprobs) = if want_logprobs {
+        let (logprob, top_logprobs) = if let Some(top_n) = input.params.logprobs {
             let (lp, _) = logprobs::compute_logprob(&input.logits, token_id);
-            let top_n = input.params.logprobs.unwrap_or(0) as usize;
-            let top = if top_n > 0 {
-                Some(logprobs::compute_top_n_logprobs(&input.logits, top_n))
-            } else {
-                None
-            };
+            let top = (top_n > 0)
+                .then(|| logprobs::compute_top_n_logprobs(&input.logits, top_n as usize));
             (Some(lp), top)
         } else {
             (None, None)
         };
 
-        let output = SamplingOutput { token_id, logprob, top_logprobs };
-
         rllm_metrics::histogram!("rllm_sampling_duration_seconds")
             .record(start.elapsed().as_secs_f64());
-
-        output
+        SamplingOutput { token_id, logprob, top_logprobs }
     }
 
     /// Sample a batch of requests, returning one `SamplingOutput` per request.
     pub fn sample_batch(&mut self, inputs: &[SamplingInput]) -> Vec<SamplingOutput> {
-        inputs.iter().map(|inp| self.sample(inp)).collect()
+        inputs.iter().map(|input| self.sample(input)).collect()
     }
+}
+
+/// Apply the deterministic logit processors shared by sampling and beam search.
+pub(crate) fn prepare_logits(
+    input: &SamplingInput,
+    apply_temperature: bool,
+    apply_truncation: bool,
+) -> Vec<f32> {
+    let mut logits = input.logits.clone();
+    if !input.params.logit_bias.is_empty() {
+        logits::apply_logit_bias(&mut logits, &input.params.logit_bias);
+    }
+    if !input.context_token_ids.is_empty() {
+        if input.params.repetition_penalty != 1.0 {
+            logits::apply_repetition_penalty(
+                &mut logits,
+                &input.context_token_ids,
+                input.params.repetition_penalty,
+            );
+        }
+        if input.params.frequency_penalty != 0.0 {
+            logits::apply_frequency_penalty(
+                &mut logits,
+                &input.context_token_ids,
+                input.params.frequency_penalty,
+            );
+        }
+        if input.params.presence_penalty != 0.0 {
+            logits::apply_presence_penalty(
+                &mut logits,
+                &input.context_token_ids,
+                input.params.presence_penalty,
+            );
+        }
+    }
+    for bad_word in &input.bad_word_token_ids {
+        if let Some((&last_token_id, prefix)) = bad_word.split_last()
+            && (prefix.is_empty() || input.context_token_ids.ends_with(prefix))
+        {
+            logits::apply_bad_token_ids(&mut logits, &[last_token_id]);
+        }
+    }
+    if let Some(allowed) = &input.params.allowed_token_ids {
+        logits::apply_allowed_token_ids(&mut logits, allowed);
+    }
+    if input.params.min_tokens > 0 {
+        logits::apply_eos_suppression(
+            &mut logits,
+            input.eos_token_id,
+            input.num_generated,
+            input.params.min_tokens,
+        );
+    }
+    if apply_temperature && input.params.temperature > 0.0 {
+        logits::apply_temperature(&mut logits, input.params.temperature);
+    }
+    if apply_truncation && input.params.top_k > 0 {
+        logits::apply_top_k(&mut logits, input.params.top_k);
+    }
+    if apply_truncation && input.params.top_p < 1.0 {
+        logits::apply_top_p(&mut logits, input.params.top_p);
+    }
+    if apply_truncation && input.params.min_p > 0.0 {
+        logits::apply_min_p(&mut logits, input.params.min_p);
+    }
+    logits
 }
 
 impl Default for Sampler {
@@ -317,6 +295,24 @@ mod tests {
         let mut sampler = Sampler::new();
         let out = sampler.sample(&input);
         assert_ne!(out.token_id, 1, "bad word should block token 1");
+    }
+
+    #[test]
+    fn test_multi_token_bad_word_only_blocks_after_prefix() {
+        let params = SamplingParams { temperature: 0.0, ..SamplingParams::default() };
+        let mut sampler = Sampler::new();
+        let without_prefix = SamplingInput {
+            logits: vec![1.0, 5.0, 1.0],
+            params: params.clone(),
+            context_token_ids: vec![7],
+            num_generated: 0,
+            eos_token_id: 2,
+            bad_word_token_ids: vec![vec![8, 1]],
+        };
+        assert_eq!(sampler.sample(&without_prefix).token_id, 1);
+
+        let with_prefix = SamplingInput { context_token_ids: vec![7, 8], ..without_prefix };
+        assert_ne!(sampler.sample(&with_prefix).token_id, 1);
     }
 
     #[test]

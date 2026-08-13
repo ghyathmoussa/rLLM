@@ -48,7 +48,9 @@ What rLLM provides:
 - **Streaming** – Token-by-token streaming via Server-Sent Events (SSE) and gRPC server streams
 - **CUDA acceleration** – GPU-accelerated inference via the Candle ML framework
 - **Prometheus metrics** – Built-in monitoring: TTFT, TPOT, request rate, token throughput
+- **OpenTelemetry tracing** – Optional OTLP/gRPC span export with graceful flush and shutdown
 - **Rich sampling** – Temperature, top-k, top-p, min-p, frequency/presence penalties, logit bias
+- **Beam-search sampler** – Deterministic multi-hypothesis decoding with length penalty and typed errors
 - **Llama, Qwen & DeepSeek support** – Llama-family architectures, text-only Qwen2/Qwen2.5/Qwen3 dense and MoE decoders, and native DeepSeek V2/V3/R1 with MLA + MoE
 - **GGUF support** – Direct single-file loading of pre-quantized GGUF models on CPU and GPU
 - **AWQ & GPTQ support** – High-performance 4-bit quantized inference via optimized fused CUDA kernels and CPU fallbacks
@@ -333,11 +335,11 @@ cargo run --release --features cuda -p rllm-server --example grpc_client -- \
 | `rllm-core` | Core types: config, requests, outputs, IDs |
 | `rllm-scheduler` | Scheduler: FCFS with continuous batching |
 | `rllm-cache` | Prefix-aware KV cache manager |
-| `rllm-sampling` | Token sampling: top-k, top-p, penalties, logprobs |
+| `rllm-sampling` | Token sampling and beam search: top-k, top-p, penalties, logprobs |
 | `rllm-tokenizer` | Async tokenizer pool (HuggingFace tokenizers) |
 | `rllm-tensor` | Tensor types and pinned buffer utilities |
 | `rllm-kernels` | CUDA kernels: PagedAttention, cache ops |
-| `rllm-metrics` | Prometheus metrics recording and description |
+| `rllm-metrics` | Prometheus metrics and optional OpenTelemetry trace export |
 | `rllm-model` | Model config loading, weight loading from disk/HF |
 | `rllm-bench` | Benchmarking tools and serve client |
 
@@ -381,6 +383,20 @@ rLLM exports the following Prometheus metrics on the `/metrics` endpoint:
 | `rllm_e2e_latency_seconds` | Histogram | End-to-end request latency |
 | `rllm_sampling_duration_seconds` | Histogram | Sampling step duration |
 | `rllm_tokens_per_second` | Histogram | Token generation throughput |
+
+### OpenTelemetry traces
+
+Build with `otel` and set the standard OTLP environment variables. The exporter uses OTLP/gRPC and defaults to `http://localhost:4317`:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=development \
+cargo run --release --features cuda,otel -- serve meta-llama/Llama-3.2-1B-Instruct
+```
+
+Startup returns a descriptive error if the exporter, filter, or global subscriber cannot be initialized. The CLI flushes and shuts down the tracer provider on both successful and failed commands. Library users can initialize the same pipeline with `rllm_metrics::init_otel_tracing` and must retain the returned `OtelGuard` until shutdown.
+
+Beam search is exposed as the `rllm_sampling::BeamSearch` state machine. The caller supplies logits for each active beam and uses each step’s `active_parent_indices` to reorder or branch KV state; it is not an HTTP request option. Unsupported combinations that need detokenizer, grammar, or speculative-decoding state return `BeamSearchError::InvalidSamplingParams`.
 
 ## Benchmarking & Concurrency Testing
 

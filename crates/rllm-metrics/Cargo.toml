@@ -10,7 +10,18 @@ description = "Metrics infrastructure for rLLM (Prometheus + optional OpenTeleme
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 
 [features]
 default = []
-otel = []
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]

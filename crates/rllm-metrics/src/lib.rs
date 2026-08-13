@@ -4,6 +4,11 @@
 //! for recording counters, gauges, and histograms throughout the inference
 //! pipeline. An optional `otel` feature adds OpenTelemetry trace export.
 
+#[cfg(feature = "otel")]
+mod otel;
+#[cfg(feature = "otel")]
+pub use otel::{OtelConfig, OtelError, OtelGuard, init_otel_tracing};
+
 // Re-export the metrics facade macros so downstream crates only need
 // `rllm-metrics` as a dependency.
 pub use metrics::{
