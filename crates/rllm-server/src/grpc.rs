@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::{pin::Pin, time::Duration};
 
 use async_stream::try_stream;
