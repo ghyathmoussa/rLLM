@@ -96,13 +96,42 @@ async fn main() -> anyhow::Result<()> {
         Cli::Quantize(args) => args.log_level.as_str(),
     };
 
+    #[cfg(feature = "otel")]
+    let telemetry =
+        rllm_metrics::init_otel_tracing(rllm_metrics::OtelConfig::new("rllm", cli_log_level))?;
+    #[cfg(not(feature = "otel"))]
+    init_local_tracing(cli_log_level)?;
+
+    let command_result = run(cli).await;
+    #[cfg(feature = "otel")]
+    {
+        let shutdown_result = telemetry.shutdown().map_err(anyhow::Error::from);
+        return match (command_result, shutdown_result) {
+            (Err(command_error), Err(shutdown_error)) => {
+                tracing::error!(%shutdown_error, "failed to shut down OpenTelemetry after command failure");
+                Err(command_error)
+            }
+            (Err(command_error), Ok(())) => Err(command_error),
+            (Ok(()), Err(shutdown_error)) => Err(shutdown_error),
+            (Ok(()), Ok(())) => Ok(()),
+        };
+    }
+    #[cfg(not(feature = "otel"))]
+    command_result
+}
+
+#[cfg(not(feature = "otel"))]
+fn init_local_tracing(fallback_filter: &str) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(cli_log_level)),
+                .or_else(|_| tracing_subscriber::EnvFilter::try_new(fallback_filter))?,
         )
-        .init();
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to install tracing subscriber: {error}"))
+}
 
+async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli {
         Cli::Serve(args) => {
             tracing::info!(
@@ -111,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 port = %args.port,
                 "Starting rLLM server"
             );
-            rllm_server::server::serve(*args).await?;
+            rllm_server::server::serve(*args).await
         }
         Cli::Quantize(args) => {
             let prompts = load_calibration_prompts(&args.calibration_file)?;
@@ -133,11 +162,9 @@ async fn main() -> anyhow::Result<()> {
                 act_order = args.act_order,
                 "Starting GPTQ quantization"
             );
-            quantize_model_to_gptq(&args.model, &args.output_dir, &opts)?;
+            quantize_model_to_gptq(&args.model, &args.output_dir, &opts)
         }
     }
-
-    Ok(())
 }
 
 fn load_calibration_prompts(path: &PathBuf) -> anyhow::Result<Vec<String>> {

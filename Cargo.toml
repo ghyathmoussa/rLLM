@@ -24,6 +24,7 @@ rllm-server.workspace = true
 rllm-engine.workspace = true
 rllm-tokenizer.workspace = true
 rllm-model.workspace = true
+rllm-metrics = { workspace = true, optional = true }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -35,6 +36,7 @@ default = []
 cuda = ["rllm-server/cuda", "rllm-model/cuda"]
 candle-backend = ["rllm-server/candle-backend", "rllm-model/candle-backend"]
 structured-outputs = ["rllm-server/structured-outputs"]
+otel = ["dep:rllm-metrics", "rllm-metrics/otel"]
 
 [[example]]
 name = "offline_generate"
@@ -136,6 +138,10 @@ rand_chacha = "0.9"
 # Observability
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-roots"] }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 
 # Benchmarking
 criterion = { version = "0.6", features = ["html_reports"] }
