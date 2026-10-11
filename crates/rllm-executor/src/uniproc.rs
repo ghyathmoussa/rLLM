@@ -87,13 +87,20 @@ impl Executor for UniProcExecutor {
         // Weights must be resident before profiling free memory.
         self.worker.load_model_weights()?;
         let num_blocks = if let Some(config) = kv_cache_configs.first() {
-            // Profile GPU memory and shrink the requested (worst-case) block
-            // count to what actually fits.
-            let fitted = self.worker.fit_kv_blocks(
-                &config.spec,
-                gpu_memory_utilization,
-                config.num_blocks,
-            )?;
+            // CPU inference uses Candle's per-request KV cache.  The block
+            // count remains a logical scheduler limit, so do not try to size
+            // it from GPU memory (which is zero on a CPU worker).
+            let fitted = if self.worker.device().is_cpu() {
+                config.num_blocks
+            } else {
+                // Profile GPU memory and shrink the requested (worst-case)
+                // block count to what actually fits.
+                self.worker.fit_kv_blocks(
+                    &config.spec,
+                    gpu_memory_utilization,
+                    config.num_blocks,
+                )?
+            };
             let fitted_config = KVCacheConfig { num_blocks: fitted, spec: config.spec.clone() };
             self.worker.initialize_kv_cache(&fitted_config)?;
 

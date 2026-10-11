@@ -124,7 +124,8 @@ cargo run --release --features cuda -p rllm-server --example grpc_client -- \
   13.3 toolkit makes the build fail with `Unsupported cuda toolkit version: 13.3`.
   Install CUDA 12.x (e.g. 12.8) and point `CUDA_HOME`/`PATH` at it; your GPU driver
   can stay newer (drivers are backward compatible).
-- **Linux** (Ubuntu 22.04+, RHEL/AlmaLinux/Rocky 8+, CentOS 7+)
+- **Linux** (Ubuntu 22.04+, RHEL/AlmaLinux/Rocky 8+, CentOS 7+) for CUDA inference.
+- **macOS 13+** for CPU inference. Apple GPU / Metal acceleration is not implemented yet.
 
 > **Building CUDA kernels for a specific GPU:** by default kernels are compiled for
 > `sm_75`–`sm_90`. To build only for your card (faster compile) set `CUDA_ARCH`,
@@ -150,6 +151,9 @@ You can compile and install the CLI tool directly to your system path:
   ```bash
   cargo install --path .
   ```
+
+  This is the native macOS path. Build without `--features cuda`; rLLM uses Candle's
+  CPU backend and serves the OpenAI-compatible API normally.
 
 * **For GPU execution (with CUDA acceleration):**
   ```bash

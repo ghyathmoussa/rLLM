@@ -1189,6 +1189,26 @@ mod tests {
     }
 
     #[test]
+    fn dense_qwen2_bf16_cpu_forward() -> Result<()> {
+        let qwen = QwenConfig::from_json(&qwen_json("Qwen2ForCausalLM", "qwen2", false))?;
+        let mut checkpoint = weights(QwenArchitecture::Qwen2, false)?;
+        for tensor in checkpoint.weights.values_mut() {
+            *tensor = tensor.to_dtype(DType::BF16)?;
+        }
+        let promoted = crate::loader::promote_cpu_weights_to_f32(&mut checkpoint)?;
+        assert!((promoted > 0));
+        let mut config = core("Qwen2ForCausalLM");
+        config.dtype = CoreDType::F32;
+        let model = QwenForCausalLM::from_weights(config, qwen, checkpoint)?;
+        let input = Tensor::new(&[[1u32, 2]], &Device::Cpu)?;
+        let mut cache = vec![None];
+        let logits = model.forward(&input, &[0, 1], &mut cache)?;
+        assert_eq!(logits.dims(), &[1, 2, 32]);
+        assert_eq!(logits.dtype(), DType::F32);
+        Ok(())
+    }
+
+    #[test]
     fn qwen2_and_qwen3_moe_forward() -> Result<()> {
         for (name, model_type, architecture) in [
             ("Qwen2MoeForCausalLM", "qwen2_moe", QwenArchitecture::Qwen2Moe),

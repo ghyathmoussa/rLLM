@@ -3,7 +3,10 @@ use anyhow::{Context, Result};
 #[cfg(feature = "candle-backend")]
 use candle_core::Device;
 #[cfg(feature = "candle-backend")]
-use rllm_core::config::{ModelConfig, QuantizationKind};
+use rllm_core::{
+    config::{ModelConfig, QuantizationKind},
+    dtype::DType as CoreDType,
+};
 
 #[cfg(feature = "candle-backend")]
 use crate::deepseek::DeepseekForCausalLM;
@@ -73,7 +76,7 @@ impl ModelRunner {
         let device =
             Device::cuda_if_available(0).map_err(|e| anyhow::anyhow!("device init: {e}"))?;
 
-        let (config, weight_map) = if let Some(ref path) = gguf_file_path {
+        let (mut config, mut weight_map) = if let Some(ref path) = gguf_file_path {
             let config = match config {
                 Some(config) => config,
                 None => crate::gguf_loader::parse_gguf_config(path)
@@ -122,6 +125,18 @@ impl ModelRunner {
                     .context("loading weights")?;
             (config, weight_map)
         };
+
+        if matches!(device, Device::Cpu) {
+            let promoted = loader::promote_cpu_weights_to_f32(&mut weight_map)
+                .context("promoting CPU model weights to F32")?;
+            if promoted > 0 {
+                tracing::info!(
+                    tensors = promoted,
+                    "promoted F16/BF16 checkpoint weights to F32 for CPU inference"
+                );
+                config.dtype = CoreDType::F32;
+            }
+        }
 
         tracing::debug!(
             model_dir = %model_dir.display(),

@@ -47,6 +47,21 @@ impl WeightMap {
     }
 }
 
+/// Candle's CPU matmul currently accepts F32 but not F16/BF16. Promote the
+/// floating checkpoint weights when the inference backend is CPU (including
+/// native macOS builds) so standard Hugging Face BF16 checkpoints can run.
+#[cfg(feature = "candle-backend")]
+pub fn promote_cpu_weights_to_f32(weights: &mut WeightMap) -> Result<usize> {
+    let mut promoted = 0;
+    for tensor in weights.weights.values_mut() {
+        if matches!(tensor.dtype(), candle_core::DType::F16 | candle_core::DType::BF16) {
+            *tensor = tensor.to_dtype(candle_core::DType::F32)?;
+            promoted += 1;
+        }
+    }
+    Ok(promoted)
+}
+
 /// Load weights from a local directory containing SafeTensors files.
 ///
 /// When `load_device` is `Some`, tensors are loaded onto that device instead of
