@@ -112,6 +112,14 @@ pub fn factory_from_config(
                 "unsupported INT8 checkpoint weight strategy {strategy:?}; only per-channel and per-tensor INT8 weights are supported"
             );
         }
+        if schema.is_compressed_tensors_int8() {
+            bail!(
+                "unsupported compressed-tensors checkpoint: only 8-bit per-channel or per-tensor weights are supported (format={:?}, bits={:?}, strategy={:?})",
+                schema.format,
+                schema.weight_num_bits,
+                schema.weight_strategy
+            );
+        }
     }
 
     let Some(config) = config else {
@@ -189,5 +197,22 @@ mod tests {
         let factory = factory_from_config(None, Some(&schema))?;
         assert!(factory.kv_cache_dtype() == rllm_core::dtype::DType::INT8);
         Ok(())
+    }
+
+    #[test]
+    fn unsupported_compressed_tensor_bits_fail_explicitly() {
+        let schema = QuantSchema {
+            quant_method: Some("compressed-tensors".into()),
+            format: Some("int-quantized".into()),
+            weight_num_bits: Some(4),
+            weight_strategy: Some("channel".into()),
+            weight_symmetric: Some(true),
+            ignore: Vec::new(),
+        };
+        let error = match factory_from_config(None, Some(&schema)) {
+            Ok(_) => panic!("4-bit compressed-tensors checkpoint must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("unsupported compressed-tensors checkpoint"));
     }
 }

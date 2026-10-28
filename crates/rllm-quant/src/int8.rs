@@ -128,7 +128,16 @@ impl Int8Linear {
         }
         let out_features = dims[0];
         let in_features = dims[1];
+        if strategy != "channel" && strategy != "tensor" {
+            anyhow::bail!("unsupported INT8 weight strategy {strategy:?}");
+        }
         let scale_values = scale.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        if scale_values.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+            anyhow::bail!("INT8 weight scales must be finite and positive");
+        }
+        if !symmetric && zero_point.is_none() {
+            anyhow::bail!("asymmetric INT8 weights require zero points");
+        }
 
         if strategy == "channel" && scale_values.len() != out_features {
             anyhow::bail!(
@@ -252,11 +261,13 @@ impl LinearMethod for Int8Linear {
             return self.apply_cuda(x);
         }
 
-        let weight = self.dequantized_weight.get_or_init(|| {
-            self.qweight
-                .dequantize(&self.scale, self.zero_point.as_ref(), x.dtype())
-                .expect("dequantize failed")
-        });
+        if self.dequantized_weight.get().is_none() {
+            let weight =
+                self.qweight.dequantize(&self.scale, self.zero_point.as_ref(), DType::F32)?;
+            let _ = self.dequantized_weight.set(weight);
+        }
+        let weight = self.dequantized_weight.get().expect("weight stored above");
+        let weight = weight.to_device(x.device())?.to_dtype(x.dtype())?;
 
         let x_shape = x.dims();
         let trailing = x_shape.len().saturating_sub(1);
@@ -403,6 +414,23 @@ mod tests {
         };
 
         assert!(err.contains("INT8 per-channel scale must have one value per output channel"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_missing_asymmetric_zero_point_and_invalid_scale() -> Result<()> {
+        let device = Device::Cpu;
+        let qweight = QuantTensor::new(vec![1, 2], vec![1, 2], device.clone())?;
+        let scale = Tensor::from_vec(vec![1.0f32], (1,), &device)?;
+        assert!(
+            Int8Linear::new(qweight.clone(), scale, None, false, "tensor".to_string()).is_err()
+        );
+        let zero = Tensor::from_vec(vec![0.0f32], (1,), &device)?;
+        let invalid_scale = Tensor::from_vec(vec![0.0f32], (1,), &device)?;
+        assert!(
+            Int8Linear::new(qweight, invalid_scale, Some(zero), false, "tensor".to_string())
+                .is_err()
+        );
         Ok(())
     }
 }
@@ -557,8 +585,8 @@ impl candle_core::CustomOp1 for Int8MatmulOp {
     }
 }
 
-// GPU integration test — compiled only with `--features cuda` (needs nvcc), and
-// runs only when a CUDA device is actually present, otherwise it skips. Validates
+// GPU integration test — compiled only with `--features cuda` (needs nvcc) and
+// requires a CUDA device. Validates
 // that the resident-weight CUDA W8A8 path matches the CPU oracle within f16
 // tolerance. Run on the RTX box: `cargo test -p rllm-quant --features cuda`.
 #[cfg(all(test, feature = "cuda"))]
@@ -569,10 +597,7 @@ mod cuda_tests {
 
     #[test]
     fn cuda_w8a8_matches_cpu_reference() -> Result<()> {
-        let device = match Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(_) => return Ok(()), // no GPU on this host; skip.
-        };
+        let device = Device::new_cuda(0)?;
 
         let (rows, in_features, out_features) = (4usize, 16usize, 8usize);
         let qdata: Vec<i8> =

@@ -75,10 +75,10 @@ pub fn calibrate_kv_cache(worker: &mut Worker) -> Result<()> {
         let k_absmax = k_f32.flatten_all()?.abs()?.max(0)?.to_scalar::<f32>()?;
         let v_absmax = v_f32.flatten_all()?.abs()?.max(0)?.to_scalar::<f32>()?;
 
-        // scale = absmax / 127.0, with a floor of 1.0 to avoid shrinking
-        // activations that are already within the int8 range.
-        let k_scale = (k_absmax / 127.0).max(1.0);
-        let v_scale = (v_absmax / 127.0).max(1.0);
+        // Use the available INT8 range even when activations are smaller than 127.
+        // A unit scale would round most small activations to zero.
+        let k_scale = int8_scale(k_absmax)?;
+        let v_scale = int8_scale(v_absmax)?;
 
         k_scales.push(k_scale);
         v_scales.push(v_scale);
@@ -101,8 +101,33 @@ pub fn calibrate_kv_cache(worker: &mut Worker) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "candle-backend")]
+fn int8_scale(absmax: f32) -> Result<f32> {
+    if !absmax.is_finite() || absmax < 0.0 {
+        anyhow::bail!("INT8 KV calibration produced invalid activation magnitude {absmax}");
+    }
+    if absmax == 0.0 {
+        Ok(1.0)
+    } else {
+        Ok((absmax / 127.0).max(f32::MIN_POSITIVE))
+    }
+}
+
 #[cfg(not(feature = "candle-backend"))]
 pub fn calibrate_kv_cache(_worker: &mut crate::worker::Worker) -> Result<()> {
     tracing::debug!("skipping KV cache calibration: candle-backend feature not enabled");
     Ok(())
+}
+
+#[cfg(all(test, feature = "candle-backend"))]
+mod tests {
+    use super::int8_scale;
+
+    #[test]
+    fn calibration_uses_full_int8_range_for_small_activations() {
+        let scale = int8_scale(1.0).unwrap();
+        assert!((scale - 1.0 / 127.0).abs() < 1e-7);
+        assert_eq!(int8_scale(0.0).unwrap(), 1.0);
+        assert!(int8_scale(f32::NAN).is_err());
+    }
 }

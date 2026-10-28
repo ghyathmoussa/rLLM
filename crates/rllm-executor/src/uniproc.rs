@@ -106,9 +106,7 @@ impl Executor for UniProcExecutor {
 
             // Calibrate INT8 KV cache scales from a forward pass with
             // representative tokens.  No-op when the cache dtype is not INT8.
-            if let Err(e) = self.worker.calibrate_kv_cache() {
-                tracing::warn!(error = %e, "KV cache calibration failed; using default scales");
-            }
+            self.worker.calibrate_kv_cache()?;
 
             fitted
         } else {

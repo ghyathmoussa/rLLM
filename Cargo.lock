@@ -3233,6 +3233,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "candle-core",
+ "float8 0.6.1",
  "half",
  "rllm-core",
  "rllm-kernels",
