@@ -3181,6 +3181,7 @@ dependencies = [
  "anyhow",
  "half",
  "libc",
+ "proptest",
  "rllm-core",
  "rllm-tensor",
  "thiserror 2.0.18",
