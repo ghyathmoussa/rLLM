@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod backend;
 pub mod cache_ops;
 pub mod fused;
 pub mod quant_matmul;
@@ -13,6 +14,7 @@ pub use attention::{
     paged_attention_prefill_f16, paged_attention_prefill_f16_sync, paged_attention_prefill_fp8,
     paged_attention_prefill_fp8_sync, paged_attention_prefill_i8, paged_attention_prefill_i8_sync,
 };
+pub use backend::{AttentionBackend, AttnSpec, BackendKind, KvLayout, StepMetadata, Unsupported};
 pub use cache_ops::GpuKVCache;
 /// Re-export error type.
 pub use cuda::CudaKernelError;

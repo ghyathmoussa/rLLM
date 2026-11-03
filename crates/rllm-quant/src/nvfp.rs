@@ -65,8 +65,30 @@ pub struct NvfpLinear {
 impl NvfpLinear {
     pub fn new(qweight: Tensor, scales: Tensor, group_size: usize) -> Result<Self> {
         let dims = qweight.dims();
+        if dims.len() != 2 || dims.contains(&0) {
+            anyhow::bail!("NVFP4 weight must be a non-empty rank-2 tensor, got {dims:?}");
+        }
+        if qweight.dtype() != DType::U8 {
+            anyhow::bail!("NVFP4 packed weight must have U8 dtype, got {:?}", qweight.dtype());
+        }
         let out_features = dims[0];
         let in_features = dims[1] * 2;
+        validate_group_size(in_features, group_size)?;
+        if scales.dims() != [out_features, in_features / group_size] {
+            anyhow::bail!(
+                "NVFP4 scales must have shape [{out_features}, {}], got {:?}",
+                in_features / group_size,
+                scales.dims()
+            );
+        }
+        let scale_values = scales
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        if scale_values.iter().any(|scale| !scale.is_finite() || *scale <= 0.0) {
+            anyhow::bail!("NVFP4 scales must be finite and positive");
+        }
 
         Ok(Self {
             qweight,
@@ -78,15 +100,16 @@ impl NvfpLinear {
         })
     }
 
-    fn get_or_dequantize(&self, target_device: &Device, target_dtype: DType) -> Result<&Tensor> {
-        if let Some(dequant) = self.dequantized.get() {
-            return Ok(dequant);
+    fn get_or_dequantize(&self, target_device: &Device, target_dtype: DType) -> Result<Tensor> {
+        if self.dequantized.get().is_none() {
+            let _ = self.dequantized.set(self.dequantize_nvfp4_cpu()?);
         }
-
-        let dequant = self.dequantize_nvfp4_cpu()?;
-        let dequant_dev = dequant.to_device(target_device)?.to_dtype(target_dtype)?;
-        let _ = self.dequantized.set(dequant_dev);
-        Ok(self.dequantized.get().unwrap())
+        self.dequantized
+            .get()
+            .expect("dequantized weight stored above")
+            .to_device(target_device)?
+            .to_dtype(target_dtype)
+            .map_err(Into::into)
     }
 
     fn dequantize_nvfp4_cpu(&self) -> Result<Tensor> {
@@ -162,8 +185,12 @@ fn quantize_nvfp4_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
     let dev = weight.device();
     let weight_cpu = weight.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let dims = weight_cpu.dims();
+    if dims.len() != 2 || dims.contains(&0) {
+        anyhow::bail!("NVFP4 source weight must be a non-empty rank-2 tensor, got {dims:?}");
+    }
     let out_features = dims[0];
     let in_features = dims[1];
+    validate_group_size(in_features, group_size)?;
 
     let w_data = weight_cpu.flatten_all()?.to_vec1::<f32>()?;
     let num_groups = in_features / group_size;
@@ -202,6 +229,15 @@ fn quantize_nvfp4_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
     let scale_tensor = Tensor::from_vec(scales, (out_features, num_groups), dev)?;
 
     Ok((qweight, scale_tensor))
+}
+
+fn validate_group_size(in_features: usize, group_size: usize) -> Result<()> {
+    if group_size != 16 || in_features % group_size != 0 {
+        anyhow::bail!(
+            "NVFP4 requires group size 16, which must divide {in_features} input features; got {group_size}"
+        );
+    }
+    Ok(())
 }
 
 fn find_closest_fp4(val: f32) -> u8 {
@@ -314,15 +350,35 @@ mod tests {
     }
 
     #[test]
+    fn rejects_partial_groups_and_wrong_scale_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::ones((1, 18), DType::F32, &device)?;
+        assert!(quantize_nvfp4_cpu(&weight, 16).is_err());
+        let packed = Tensor::zeros((1, 8), DType::U8, &device)?;
+        let bad_scales = Tensor::ones((1, 2), DType::F32, &device)?;
+        assert!(NvfpLinear::new(packed, bad_scales, 16).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_nvfp4_weight_supports_different_input_dtypes() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::ones((1, 16), DType::F32, &device)?;
+        let (packed, scales) = quantize_nvfp4_cpu(&weight, 16)?;
+        let linear = NvfpLinear::new(packed, scales, 16)?;
+        let x_f32 = Tensor::ones((1, 16), DType::F32, &device)?;
+        let x_f16 = x_f32.to_dtype(DType::F16)?;
+        let f32_result = linear.apply(&x_f32)?.to_vec2::<f32>()?[0][0];
+        let f16_result = linear.apply(&x_f16)?.to_vec2::<half::f16>()?[0][0].to_f32();
+        assert!((f32_result - f16_result).abs() < 0.1);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
     fn test_nvfp4_quantize_and_apply_gpu() -> Result<()> {
         let cpu_device = Device::Cpu;
-        let gpu_device = match Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                println!("Skipping GPU test because CUDA is not available");
-                return Ok(());
-            }
-        };
+        let gpu_device = Device::new_cuda(0)?;
 
         let weight_data = vec![
             1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0, -2.0, 1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0, 1.0,
@@ -349,6 +405,38 @@ mod tests {
 
         println!("GPU test - CPU out: {}, GPU out: {}", out_cpu_val, out_gpu_val);
         assert!((out_cpu_val - out_gpu_val).abs() < 1e-3);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn nvfp4_cuda_matches_cpu_for_multiple_rows_and_groups() -> Result<()> {
+        let cpu = Device::Cpu;
+        let gpu = Device::new_cuda(0)?;
+        let weight_values: Vec<f32> =
+            (0..3 * 64).map(|i| (i as f32 * 0.31).sin() * (1 + i / 64) as f32).collect();
+        let input_values: Vec<f32> = (0..4 * 64).map(|i| (i as f32 * 0.13).cos()).collect();
+        let weight = Tensor::from_vec(weight_values, (3, 64), &cpu)?;
+        let input = Tensor::from_vec(input_values, (4, 64), &cpu)?.to_dtype(DType::F16)?;
+        let (packed, scales) = quantize_nvfp4_cpu(&weight, 16)?;
+        let cpu_linear = NvfpLinear::new(packed.clone(), scales.clone(), 16)?;
+        let gpu_linear = NvfpLinear::new(packed.to_device(&gpu)?, scales.to_device(&gpu)?, 16)?;
+        let expected = cpu_linear.apply(&input)?.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+        let actual = gpu_linear
+            .apply(&input.to_device(&gpu)?)?
+            .to_device(&cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()?;
+        for (row, (expected_row, actual_row)) in expected.iter().zip(actual.iter()).enumerate() {
+            for (column, (&expected, &actual)) in
+                expected_row.iter().zip(actual_row.iter()).enumerate()
+            {
+                assert!(
+                    (expected - actual).abs() <= 0.02 * expected.abs().max(1.0),
+                    "NVFP4 mismatch at ({row}, {column}): CPU {expected}, CUDA {actual}"
+                );
+            }
+        }
         Ok(())
     }
 }

@@ -30,8 +30,20 @@ impl QuantMethodFactory for MxfpWeightOnlyFactory {
         if source.has_tensor(&weight_name) {
             let weight = source.remove_tensor(&weight_name)?;
             if source.has_tensor(&scale_name) {
-                let scales = source.remove_tensor(&scale_name)?;
-                return Ok(Box::new(MxfpLinear::new(weight, scales, self.bits, self.group_size)?));
+                let scales = decode_e8m0_scales(source.remove_tensor(&scale_name)?)?;
+                let packed = if self.bits == 8 && weight.dtype() == DType::F8E4M3 {
+                    let device = weight.device().clone();
+                    let shape = weight.dims().to_vec();
+                    let values = weight
+                        .to_device(&Device::Cpu)?
+                        .flatten_all()?
+                        .to_vec1::<float8::F8E4M3>()?;
+                    let bytes = values.iter().map(float8::F8E4M3::to_bits).collect();
+                    Tensor::from_vec(bytes, shape, &device)?
+                } else {
+                    weight
+                };
+                return Ok(Box::new(MxfpLinear::new(packed, scales, self.bits, self.group_size)?));
             } else {
                 // Perform online quantization if no scale is found
                 let (qweight, scales) = if self.bits == 8 {
@@ -46,7 +58,7 @@ impl QuantMethodFactory for MxfpWeightOnlyFactory {
         // Check in quantized map (from safetensors load)
         if source.has_quant_tensor(&weight_name) {
             let qweight = source.remove_quant_tensor(&weight_name)?;
-            let scales = source.remove_tensor(&scale_name)?;
+            let scales = decode_e8m0_scales(source.remove_tensor(&scale_name)?)?;
             // Convert QuantTensor inner data to candle Tensor
             let device = qweight.device().clone();
             let data = qweight.data().iter().map(|&x| x as u8).collect::<Vec<u8>>();
@@ -63,6 +75,31 @@ impl QuantMethodFactory for MxfpWeightOnlyFactory {
     }
 }
 
+/// Convert OCP E8M0 exponent bytes to ordinary scale values for the existing
+/// CPU and CUDA matmul paths, which both expect numeric scales.
+fn decode_e8m0_scales(scales: Tensor) -> Result<Tensor> {
+    if scales.dtype() != DType::U8 {
+        return Ok(scales);
+    }
+    let device = scales.device().clone();
+    let shape = scales.dims().to_vec();
+    let bytes = scales.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<u8>()?;
+    let values = bytes
+        .into_iter()
+        .map(|exponent| {
+            if exponent == u8::MAX {
+                anyhow::bail!("MXFP E8M0 scale contains the reserved NaN exponent 255");
+            }
+            Ok(2.0f32.powi(exponent as i32 - 127))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Tensor::from_vec(values, shape, &device)?)
+}
+
+fn power_of_two_scale(absmax: f32, max_value: f32) -> f32 {
+    if absmax == 0.0 { 1.0 } else { (absmax / max_value).log2().ceil().exp2() }
+}
+
 pub struct MxfpLinear {
     qweight: Tensor,
     scales: Tensor,
@@ -76,8 +113,37 @@ pub struct MxfpLinear {
 impl MxfpLinear {
     pub fn new(qweight: Tensor, scales: Tensor, bits: u8, group_size: usize) -> Result<Self> {
         let dims = qweight.dims();
+        if dims.len() != 2 || dims.contains(&0) {
+            anyhow::bail!("MXFP weight must be a non-empty rank-2 tensor, got {dims:?}");
+        }
+        if bits != 4 && bits != 8 {
+            anyhow::bail!("MXFP supports 4 or 8 bits, got {bits}");
+        }
+        if qweight.dtype() != DType::U8 {
+            anyhow::bail!("MXFP packed weight must have U8 dtype, got {:?}", qweight.dtype());
+        }
         let out_features = dims[0];
         let in_features = if bits == 4 { dims[1] * 2 } else { dims[1] };
+        if group_size == 0 || in_features % group_size != 0 || (bits == 4 && group_size % 2 != 0) {
+            anyhow::bail!(
+                "MXFP group size {group_size} must divide {in_features} input features and be even for 4-bit weights"
+            );
+        }
+        if scales.dims() != [out_features, in_features / group_size] {
+            anyhow::bail!(
+                "MXFP scales must have shape [{out_features}, {}], got {:?}",
+                in_features / group_size,
+                scales.dims()
+            );
+        }
+        let scale_values = scales
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        if scale_values.iter().any(|scale| !scale.is_finite() || *scale <= 0.0) {
+            anyhow::bail!("MXFP scales must be finite and positive");
+        }
 
         Ok(Self {
             qweight,
@@ -90,26 +156,28 @@ impl MxfpLinear {
         })
     }
 
-    fn get_or_dequantize(&self, target_device: &Device, target_dtype: DType) -> Result<&Tensor> {
-        if let Some(dequant) = self.dequantized.get() {
-            return Ok(dequant);
+    fn get_or_dequantize(&self, target_device: &Device, target_dtype: DType) -> Result<Tensor> {
+        if self.dequantized.get().is_none() {
+            let dequant = if self.bits == 8 {
+                self.dequantize_mxfp8_cpu()?
+            } else {
+                self.dequantize_mxfp4_cpu()?
+            };
+            let _ = self.dequantized.set(dequant);
         }
-
-        let dequant = if self.bits == 8 {
-            self.dequantize_mxfp8_cpu()?
-        } else {
-            self.dequantize_mxfp4_cpu()?
-        };
-
-        let dequant_dev = dequant.to_device(target_device)?.to_dtype(target_dtype)?;
-        let _ = self.dequantized.set(dequant_dev);
-        Ok(self.dequantized.get().unwrap())
+        self.dequantized
+            .get()
+            .expect("dequantized weight stored above")
+            .to_device(target_device)?
+            .to_dtype(target_dtype)
+            .map_err(Into::into)
     }
 
     fn dequantize_mxfp8_cpu(&self) -> Result<Tensor> {
         let q_u8 = self.qweight.to_device(&Device::Cpu)?;
         let q_data_u8 = q_u8.flatten_all()?.to_vec1::<u8>()?;
-        let q_data: Vec<f32> = q_data_u8.iter().map(|&x| (x as i8) as f32).collect();
+        let q_data: Vec<f32> =
+            q_data_u8.iter().map(|&x| float8::F8E4M3::from_bits(x).to_f32()).collect();
 
         let scales_f32 = self.scales.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
         let scales_data = scales_f32.flatten_all()?.to_vec1::<f32>()?;
@@ -200,13 +268,14 @@ fn quantize_mxfp8_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
     let dev = weight.device();
     let weight_cpu = weight.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let dims = weight_cpu.dims();
+    validate_online_shape(dims, group_size, false)?;
     let out_features = dims[0];
     let in_features = dims[1];
 
     let w_data = weight_cpu.flatten_all()?.to_vec1::<f32>()?;
     let num_groups = in_features / group_size;
 
-    let mut q_data = vec![0i8; out_features * in_features];
+    let mut q_data = vec![0u8; out_features * in_features];
     let mut scales = vec![0.0f32; out_features * num_groups];
 
     for o in 0..out_features {
@@ -217,19 +286,18 @@ fn quantize_mxfp8_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
                 abs_max = abs_max.max(val.abs());
             }
 
-            let scale = if abs_max > 0.0 { abs_max / 127.0 } else { 1.0 };
+            let scale = power_of_two_scale(abs_max, 448.0);
             scales[o * num_groups + g] = scale;
 
             for k in 0..group_size {
                 let idx = o * in_features + g * group_size + k;
                 let val = w_data[idx];
-                q_data[idx] = (val / scale).round().clamp(-127.0, 127.0) as i8;
+                q_data[idx] = float8::F8E4M3::from_f32(val / scale).to_bits();
             }
         }
     }
 
-    let q_u8 = unsafe { std::mem::transmute::<Vec<i8>, Vec<u8>>(q_data) };
-    let qweight = Tensor::from_vec(q_u8, (out_features, in_features), dev)?;
+    let qweight = Tensor::from_vec(q_data, (out_features, in_features), dev)?;
     let scale_tensor = Tensor::from_vec(scales, (out_features, num_groups), dev)?;
 
     Ok((qweight, scale_tensor))
@@ -239,6 +307,7 @@ fn quantize_mxfp4_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
     let dev = weight.device();
     let weight_cpu = weight.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
     let dims = weight_cpu.dims();
+    validate_online_shape(dims, group_size, true)?;
     let out_features = dims[0];
     let in_features = dims[1];
 
@@ -256,7 +325,7 @@ fn quantize_mxfp4_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
                 abs_max = abs_max.max(val.abs());
             }
 
-            let scale = if abs_max > 0.0 { abs_max / 6.0 } else { 1.0 };
+            let scale = power_of_two_scale(abs_max, 6.0);
             scales[o * num_groups + g] = scale;
 
             for k in (0..group_size).step_by(2) {
@@ -279,6 +348,19 @@ fn quantize_mxfp4_cpu(weight: &Tensor, group_size: usize) -> Result<(Tensor, Ten
     let scale_tensor = Tensor::from_vec(scales, (out_features, num_groups), dev)?;
 
     Ok((qweight, scale_tensor))
+}
+
+fn validate_online_shape(dims: &[usize], group_size: usize, packed: bool) -> Result<()> {
+    if dims.len() != 2 || dims.contains(&0) {
+        anyhow::bail!("MXFP source weight must be a non-empty rank-2 tensor, got {dims:?}");
+    }
+    let in_features = dims[1];
+    if group_size == 0 || in_features % group_size != 0 || (packed && group_size % 2 != 0) {
+        anyhow::bail!(
+            "MXFP group size {group_size} must divide {in_features} input features and be even for 4-bit weights"
+        );
+    }
+    Ok(())
 }
 
 fn find_closest_fp4(val: f32) -> u8 {
@@ -395,6 +477,10 @@ mod tests {
         let (qweight, scales) = quantize_mxfp8_cpu(&weight, 32)?;
         assert_eq!(qweight.dims(), &[1, 32]);
         assert_eq!(scales.dims(), &[1, 1]);
+        let bytes = qweight.flatten_all()?.to_vec1::<u8>()?;
+        let scale = scales.flatten_all()?.to_vec1::<f32>()?[0];
+        let expected: f32 =
+            bytes.iter().map(|&byte| float8::F8E4M3::from_bits(byte).to_f32() * scale).sum();
 
         let linear = MxfpLinear::new(qweight, scales, 8, 32)?;
         let x = Tensor::ones((1, 32), DType::F32, &device)?;
@@ -403,7 +489,60 @@ mod tests {
 
         let out_val = out.flatten_all()?.to_vec1::<f32>()?[0];
         println!("test_mxfp8_quantize_and_apply_cpu out_val: {}", out_val);
-        assert!((out_val - (-16.0)).abs() < 0.2);
+        assert!((out_val - expected).abs() < 1e-4);
+        assert!((out_val - (-16.0)).abs() < 1.0);
+        Ok(())
+    }
+
+    #[test]
+    fn mxfp8_online_weights_use_e4m3_bytes() -> Result<()> {
+        let device = Device::Cpu;
+        let mut values = vec![0.0f32; 32];
+        values[0] = 448.0;
+        values[1] = 1.0;
+        values[2] = -1.0;
+        let weight = Tensor::from_vec(values, (1, 32), &device)?;
+        let (packed, scales) = quantize_mxfp8_cpu(&weight, 32)?;
+        assert_eq!(scales.to_vec2::<f32>()?, vec![vec![1.0]]);
+        let bytes = packed.to_vec2::<u8>()?;
+        assert_eq!(bytes[0][1], float8::F8E4M3::from_f32(1.0).to_bits());
+        assert_eq!(bytes[0][2], float8::F8E4M3::from_f32(-1.0).to_bits());
+        Ok(())
+    }
+
+    #[test]
+    fn cached_mxfp_weight_supports_different_input_dtypes() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::ones((1, 32), DType::F32, &device)?;
+        let (packed, scales) = quantize_mxfp8_cpu(&weight, 32)?;
+        let linear = MxfpLinear::new(packed, scales, 8, 32)?;
+        let x_f32 = Tensor::ones((1, 32), DType::F32, &device)?;
+        let x_f16 = x_f32.to_dtype(DType::F16)?;
+        let f32_result = linear.apply(&x_f32)?.to_vec2::<f32>()?[0][0];
+        let f16_result = linear.apply(&x_f16)?.to_vec2::<half::f16>()?[0][0].to_f32();
+        assert!((f32_result - f16_result).abs() < 0.1);
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_e8m0_checkpoint_scales() -> Result<()> {
+        let device = Device::Cpu;
+        let encoded = Tensor::from_vec(vec![127u8, 128, 126], (1, 3), &device)?;
+        let scales = decode_e8m0_scales(encoded)?;
+        assert_eq!(scales.to_vec2::<f32>()?, vec![vec![1.0, 2.0, 0.5]]);
+        let reserved = Tensor::from_vec(vec![255u8], (1, 1), &device)?;
+        assert!(decode_e8m0_scales(reserved).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_partial_groups_and_wrong_scale_shape() -> Result<()> {
+        let device = Device::Cpu;
+        let weight = Tensor::ones((1, 30), DType::F32, &device)?;
+        assert!(quantize_mxfp8_cpu(&weight, 32).is_err());
+        let packed = Tensor::zeros((1, 16), DType::U8, &device)?;
+        let bad_scales = Tensor::ones((1, 2), DType::F32, &device)?;
+        assert!(MxfpLinear::new(packed, bad_scales, 4, 32).is_err());
         Ok(())
     }
 
@@ -432,6 +571,51 @@ mod tests {
         let out_val = out.flatten_all()?.to_vec1::<f32>()?[0];
         println!("test_mxfp4_quantize_and_apply_cpu out_val: {}", out_val);
         assert!((out_val - (-20.0)).abs() < 1e-4);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod cuda_tests {
+    use super::*;
+
+    #[test]
+    fn mxfp_cuda_matches_cpu_for_multiple_rows_and_groups() -> Result<()> {
+        let cpu = Device::Cpu;
+        let gpu = Device::new_cuda(0)?;
+        let weight_values: Vec<f32> =
+            (0..3 * 64).map(|i| ((i as f32 * 0.37).sin() * (1 + i / 64) as f32) * 3.0).collect();
+        let input_values: Vec<f32> = (0..4 * 64).map(|i| (i as f32 * 0.19).cos()).collect();
+        let weight = Tensor::from_vec(weight_values, (3, 64), &cpu)?;
+        let input = Tensor::from_vec(input_values, (4, 64), &cpu)?.to_dtype(DType::F16)?;
+
+        for bits in [4, 8] {
+            let (packed, scales) = if bits == 4 {
+                quantize_mxfp4_cpu(&weight, 32)?
+            } else {
+                quantize_mxfp8_cpu(&weight, 32)?
+            };
+            let cpu_linear = MxfpLinear::new(packed.clone(), scales.clone(), bits, 32)?;
+            let gpu_linear =
+                MxfpLinear::new(packed.to_device(&gpu)?, scales.to_device(&gpu)?, bits, 32)?;
+            let expected = cpu_linear.apply(&input)?.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+            let actual = gpu_linear
+                .apply(&input.to_device(&gpu)?)?
+                .to_device(&cpu)?
+                .to_dtype(DType::F32)?
+                .to_vec2::<f32>()?;
+            for (row, (expected_row, actual_row)) in expected.iter().zip(actual.iter()).enumerate()
+            {
+                for (column, (&expected, &actual)) in
+                    expected_row.iter().zip(actual_row.iter()).enumerate()
+                {
+                    assert!(
+                        (expected - actual).abs() <= 0.02 * expected.abs().max(1.0),
+                        "MXFP{bits} mismatch at ({row}, {column}): CPU {expected}, CUDA {actual}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }
