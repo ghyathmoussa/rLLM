@@ -93,7 +93,9 @@ impl Worker {
                 &self.model_config.model_id,
                 self.model_config.clone(),
             )?;
-            if !loaded.is_cuda() {
+            // A CUDA worker must never silently fall back to CPU. CPU workers,
+            // however, are valid for native macOS and CPU-only Linux builds.
+            if self.device.is_cuda() && !loaded.is_cuda() {
                 anyhow::bail!(
                     "Candle loaded model on {}, not CUDA. Refusing to serve because true GPU inference was requested.",
                     loaded.device_description()
@@ -326,7 +328,9 @@ impl Worker {
             allocated_bytes = bytes_per_cache,
             "Initializing KV cache"
         );
-        rllm_metrics::record_gpu_memory_allocated(bytes_per_cache);
+        if self.device.is_cuda() {
+            rllm_metrics::record_gpu_memory_allocated(bytes_per_cache);
+        }
 
         // Allocate physical GPU KV cache when CUDA is available.
         #[cfg(has_cuda)]

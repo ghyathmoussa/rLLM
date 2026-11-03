@@ -34,6 +34,17 @@ use crate::{auth, cli::ServeArgs, grpc, openai::*};
 
 const BLOCK_SIZE: usize = 16;
 
+fn default_worker_device() -> rllm_tensor::Device {
+    #[cfg(feature = "cuda")]
+    {
+        rllm_tensor::Device::cuda(0)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        rllm_tensor::Device::cpu()
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct ModelRuntime {
@@ -284,7 +295,12 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     let cache_config = cache_config(args, &model_config);
     let scheduler_config = scheduler_config(args);
 
-    let worker = Worker::new(0, model_config.clone(), rllm_tensor::Device::cuda(0), BLOCK_SIZE);
+    // The CUDA feature is not available on macOS (and is optional on Linux).
+    // Keep the scheduler/executor usable with Candle's CPU backend rather than
+    // constructing a logical CUDA worker that cannot load its model.
+    let worker_device = default_worker_device();
+
+    let worker = Worker::new(0, model_config.clone(), worker_device.clone(), BLOCK_SIZE);
     let mut executor = UniProcExecutor::new(worker);
     executor.set_eos_token_id(eos_token_id);
     #[cfg(feature = "structured-outputs")]
@@ -305,7 +321,7 @@ fn build_runtime_blocking(model_ref: &str, args: &ServeArgs) -> Result<ModelRunt
     let scheduler =
         Scheduler::new(scheduler_config, &cache_config, num_gpu_blocks, model_config.max_model_len);
 
-    let device = "cuda:0".to_string();
+    let device = worker_device.to_string();
     let architecture = model_config.architecture.clone();
     let core = EngineCore::new(Box::new(executor), scheduler, eos_token_id)
         .with_stop_token_ids(stop_token_ids);
@@ -422,6 +438,12 @@ mod tests {
     use rllm_core::config::QuantizationKind;
 
     use super::*;
+
+    #[cfg(not(feature = "cuda"))]
+    #[test]
+    fn cpu_build_uses_a_cpu_worker() {
+        assert!(default_worker_device().is_cpu());
+    }
 
     #[test]
     fn parse_int8_quantization_requires_eight_bits() {

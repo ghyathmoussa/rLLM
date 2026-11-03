@@ -115,7 +115,11 @@ impl EngineCore {
         let exec_result = match self.executor.execute_model(&scheduler_output) {
             Ok(output) => output,
             Err(e) => {
-                tracing::error!("Executor error: {}", e);
+                // `Display` only prints the outer anyhow context (for example
+                // "Qwen layer 0"), which hides the Candle operation that
+                // actually failed. Keep the complete error chain in normal
+                // error-level logs so CPU backend failures are diagnosable.
+                tracing::error!(error = ?e, "Executor error");
                 tracing::debug!(
                     "{}",
                     rllm_metrics::debug_scheduler_output_dump(
