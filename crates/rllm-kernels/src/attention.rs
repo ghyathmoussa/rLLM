@@ -53,7 +53,7 @@ impl AttentionParams {
 ///
 /// Supports mixed prefill/decode batches via `num_prefill_tokens` and
 /// `num_decode_tokens`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AttentionMetadata {
     /// Sequence length per request (total KV length).
     pub seq_lens: Vec<u32>,
